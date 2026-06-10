@@ -3,7 +3,7 @@ package cli
 import (
 	"fmt"
 	"github.com/byteyellow/agent-computer-fleet/internal/control"
-	"github.com/byteyellow/agent-computer-fleet/internal/node"
+	runtimeplane "github.com/byteyellow/agent-computer-fleet/internal/runtime"
 	"github.com/byteyellow/agent-computer-fleet/internal/store"
 	"github.com/spf13/cobra"
 	"time"
@@ -23,7 +23,7 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(execCmd(&dataDir))
 	root.AddCommand(processCmd(&dataDir))
 	root.AddCommand(portCmd(&dataDir))
-	root.AddCommand(runtimeCmd())
+	root.AddCommand(runtimeCmd(&dataDir))
 	root.AddCommand(templateCmd(&dataDir))
 	root.AddCommand(apiCmd(&dataDir))
 	root.AddCommand(telemetryCmd(&dataDir))
@@ -52,12 +52,12 @@ func controlSvc(dataDir string) (control.Service, func(), error) {
 	if err != nil {
 		return control.Service{}, nil, err
 	}
-	rt, err := node.NewDockerRuntime()
+	driver, err := runtimeplane.NewDriver("docker", paths)
 	if err != nil {
 		db.Close()
 		return control.Service{}, nil, err
 	}
-	return control.Service{DB: db, Paths: paths, Runtime: rt}, func() { db.Close() }, nil
+	return control.Service{DB: db, Paths: paths, Driver: driver}, func() { db.Close() }, nil
 }
 
 func short(value string) string {

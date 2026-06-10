@@ -95,6 +95,9 @@ func EnsureSchema(db *sql.DB) error {
 			run_id TEXT NOT NULL,
 			container_id TEXT,
 			workspace_host_path TEXT NOT NULL,
+			runtime TEXT NOT NULL DEFAULT 'docker',
+			parent_snapshot_id TEXT NOT NULL DEFAULT '',
+			resumed_from_snapshot_id TEXT NOT NULL DEFAULT '',
 			status TEXT NOT NULL,
 			startup_cold_ms INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL,
@@ -176,6 +179,7 @@ func EnsureSchema(db *sql.DB) error {
 			snapshot_bytes INTEGER NOT NULL DEFAULT 0,
 			policy_block_count INTEGER NOT NULL DEFAULT 0,
 			quarantine_count INTEGER NOT NULL DEFAULT 0,
+			node_id TEXT NOT NULL DEFAULT 'local',
 			created_at TEXT NOT NULL
 		);`,
 		`CREATE TABLE IF NOT EXISTS ports (
@@ -308,6 +312,10 @@ func EnsureSchema(db *sql.DB) error {
 		`ALTER TABLE forensics_bundles ADD COLUMN sha256 TEXT NOT NULL DEFAULT '';`,
 		`ALTER TABLE forensics_bundles ADD COLUMN size_bytes INTEGER NOT NULL DEFAULT 0;`,
 		`ALTER TABLE policy_decisions ADD COLUMN rule_id TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE sessions ADD COLUMN runtime TEXT NOT NULL DEFAULT 'docker';`,
+		`ALTER TABLE sessions ADD COLUMN parent_snapshot_id TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE sessions ADD COLUMN resumed_from_snapshot_id TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE cost_samples ADD COLUMN node_id TEXT NOT NULL DEFAULT 'local';`,
 	}
 	for _, stmt := range alterStmts {
 		if _, err := db.Exec(stmt); err != nil && !isDuplicateColumn(err) {

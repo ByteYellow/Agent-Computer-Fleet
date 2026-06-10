@@ -1,38 +1,41 @@
 package control
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
-	goruntime "runtime"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/byteyellow/agent-computer-fleet/internal/economics"
 	"github.com/byteyellow/agent-computer-fleet/internal/egress"
 	"github.com/byteyellow/agent-computer-fleet/internal/ids"
-	"github.com/byteyellow/agent-computer-fleet/internal/node"
+	runtimeplane "github.com/byteyellow/agent-computer-fleet/internal/runtime"
+	"github.com/byteyellow/agent-computer-fleet/internal/scheduler"
+	"github.com/byteyellow/agent-computer-fleet/internal/state"
 	"github.com/byteyellow/agent-computer-fleet/internal/store"
 )
 
 type Service struct {
-	DB      *sql.DB
-	Paths   store.Paths
-	Runtime node.Runtime
+	DB     *sql.DB
+	Paths  store.Paths
+	Driver runtimeplane.Driver
 }
 
 type SessionInfo struct {
-	ID            string
-	LeaseID       string
-	RunID         string
-	ContainerID   string
-	WorkspacePath string
-	Status        string
-	StartupColdMS int64
-	CreatedAt     string
-	UpdatedAt     string
+	ID                    string
+	LeaseID               string
+	RunID                 string
+	ContainerID           string
+	WorkspacePath         string
+	Status                string
+	StartupColdMS         int64
+	RuntimeName           string
+	ParentSnapshotID      string
+	ResumedFromSnapshotID string
+	CreatedAt             string
+	UpdatedAt             string
 }
 
 func (s Service) CreateLease(taskPath string) (string, error) {
@@ -64,18 +67,30 @@ func (s Service) CreateSession(leaseID string) (string, error) {
 	if err := os.MkdirAll(workspace, 0o755); err != nil {
 		return "", err
 	}
-	if err := s.admit(task); err != nil {
+	decision, err := (scheduler.Scheduler{DB: s.DB}).Admit(scheduler.Request{
+		RunID:      runID,
+		SessionID:  sessionID,
+		Runtime:    "docker",
+		RiskTier:   task.RiskTier,
+		CPURequest: task.CPURequest,
+		MemoryMB:   task.MemoryMB,
+	})
+	if err != nil {
 		return "", err
 	}
+	if !decision.Admitted {
+		return "", fmt.Errorf("admission rejected: reason=%s overcommit_ratio=%.2f active_cpu_debt=%.3f queue_pressure=%s memory_pressure=%s memory_allocated_mb=%d memory_request_mb=%d memory_capacity_mb=%d",
+			decision.Reason, decision.OvercommitRatio, decision.ActiveCPUDebt, decision.QueuePressure, decision.MemoryPressure, decision.MemoryAllocatedMB, decision.MemoryRequestMB, decision.MemoryCapacityMB)
+	}
 	var egressProxy egress.ProxyInfo
-	if _, ok := s.Runtime.(*node.DockerRuntime); ok {
+	if s.isDockerRuntime() {
 		egressProxy, err = (egress.Service{DB: s.DB, Paths: s.Paths}).EnsureSessionProxy(runID, sessionID)
 		if err != nil {
 			return "", err
 		}
 	}
 	start := time.Now()
-	containerID, err := s.Runtime.CreateSession(node.CreateSessionRequest{
+	containerID, err := s.createRuntimeSession(runtimeplane.CreateSessionRequest{
 		SessionID:         sessionID,
 		LeaseID:           leaseID,
 		RunID:             runID,
@@ -93,13 +108,14 @@ func (s Service) CreateSession(leaseID string) (string, error) {
 	}
 	startupColdMS := time.Since(start).Milliseconds()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err = s.DB.Exec(`INSERT INTO sessions (id, lease_id, run_id, container_id, workspace_host_path, status, startup_cold_ms, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?)`, sessionID, leaseID, runID, containerID, workspace, startupColdMS, now, now)
+	runtimeName := s.runtimeName()
+	_, err = s.DB.Exec(`INSERT INTO sessions (id, lease_id, run_id, container_id, workspace_host_path, runtime, status, startup_cold_ms, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)`, sessionID, leaseID, runID, containerID, workspace, runtimeName, startupColdMS, now, now)
 	if err != nil {
 		return "", err
 	}
 	_, _ = s.DB.Exec(`INSERT INTO events (id, run_id, session_id, source, event_type, payload, created_at)
-		VALUES (?, ?, ?, 'control_plane', 'session_create', ?, ?)`, ids.New("evt"), runID, sessionID, fmt.Sprintf(`{"container_id":%q,"workspace":%q,"startup_cold_ms":%d}`, containerID, workspace, startupColdMS), now)
+		VALUES (?, ?, ?, 'control_plane', 'session_create', ?, ?)`, ids.New("evt"), runID, sessionID, fmt.Sprintf(`{"container_id":%q,"workspace":%q,"startup_cold_ms":%d,"runtime":%q,"scheduler_decision":%q,"node_id":%q}`, containerID, workspace, startupColdMS, runtimeName, decision.Reason, decision.NodeID), now)
 	_, _ = s.DB.Exec(`UPDATE leases SET status = 'allocated', updated_at = ? WHERE id = ?`, now, leaseID)
 	_, _ = s.DB.Exec(`INSERT INTO cost_samples (id, run_id, session_id, wall_seconds, created_at)
 		VALUES (?, ?, ?, ?, ?)`, ids.New("cost"), runID, sessionID, float64(startupColdMS)/1000, now)
@@ -124,7 +140,7 @@ func (s Service) Exec(sessionID string, command []string, stream bool) (string, 
 	_, _ = s.DB.Exec(`INSERT INTO events (id, run_id, session_id, process_id, source, event_type, payload, created_at)
 		VALUES (?, ?, ?, ?, 'control_plane', 'exec_start', ?, ?)`, ids.New("evt"), runID, sessionID, processID, fmt.Sprintf(`{"command":%q,"stream":%t}`, strings.Join(command, " "), stream), now)
 	start := time.Now()
-	result, err := s.Runtime.Exec(containerID, command, stream)
+	result, err := s.execRuntime(containerID, command, stream)
 	wallSeconds := time.Since(start).Seconds()
 	status := "exited"
 	if err != nil {
@@ -134,8 +150,8 @@ func (s Service) Exec(sessionID string, command []string, stream bool) (string, 
 	_, _ = s.DB.Exec(`UPDATE processes SET exec_id = ?, status = ?, exit_code = ?, ended_at = ? WHERE id = ?`, result.ExecID, status, result.ExitCode, ended, processID)
 	_, _ = s.DB.Exec(`INSERT INTO events (id, run_id, session_id, process_id, source, event_type, payload, created_at)
 		VALUES (?, ?, ?, ?, 'control_plane', 'exec_end', ?, ?)`, ids.New("evt"), runID, sessionID, processID, fmt.Sprintf(`{"exec_id":%q,"exit_code":%d,"status":%q,"wall_seconds":%.6f}`, result.ExecID, result.ExitCode, status, wallSeconds), ended)
-	_, _ = s.DB.Exec(`INSERT INTO cost_samples (id, run_id, session_id, wall_seconds, active_cpu_seconds, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)`, ids.New("cost"), runID, sessionID, wallSeconds, wallSeconds, ended)
+	_, _ = s.DB.Exec(`INSERT INTO cost_samples (id, run_id, session_id, node_id, wall_seconds, active_cpu_seconds, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, ids.New("cost"), runID, sessionID, "local", wallSeconds, wallSeconds, ended)
 	return processID, err
 }
 
@@ -144,7 +160,10 @@ func (s Service) Interrupt(processID string) error {
 	if err := s.DB.QueryRow(`SELECT container_id FROM processes WHERE id = ?`, processID).Scan(&containerID); err != nil {
 		return err
 	}
-	return s.Runtime.Interrupt(containerID)
+	if s.Driver != nil {
+		return s.Driver.Interrupt(context.Background(), containerID)
+	}
+	return fmt.Errorf("runtime driver is required")
 }
 
 func (s Service) ExposePort(sessionID string, port int) (string, error) {
@@ -160,7 +179,7 @@ func (s Service) ExposePort(sessionID string, port int) (string, error) {
 }
 
 func (s Service) ListSessions() ([]SessionInfo, error) {
-	rows, err := s.DB.Query(`SELECT id, lease_id, run_id, COALESCE(container_id, ''), workspace_host_path, status, startup_cold_ms, created_at, updated_at
+	rows, err := s.DB.Query(`SELECT id, lease_id, run_id, COALESCE(container_id, ''), workspace_host_path, status, startup_cold_ms, COALESCE(runtime, 'docker'), COALESCE(parent_snapshot_id, ''), COALESCE(resumed_from_snapshot_id, ''), created_at, updated_at
 		FROM sessions ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -169,7 +188,7 @@ func (s Service) ListSessions() ([]SessionInfo, error) {
 	var sessions []SessionInfo
 	for rows.Next() {
 		var session SessionInfo
-		if err := rows.Scan(&session.ID, &session.LeaseID, &session.RunID, &session.ContainerID, &session.WorkspacePath, &session.Status, &session.StartupColdMS, &session.CreatedAt, &session.UpdatedAt); err != nil {
+		if err := rows.Scan(&session.ID, &session.LeaseID, &session.RunID, &session.ContainerID, &session.WorkspacePath, &session.Status, &session.StartupColdMS, &session.RuntimeName, &session.ParentSnapshotID, &session.ResumedFromSnapshotID, &session.CreatedAt, &session.UpdatedAt); err != nil {
 			return nil, err
 		}
 		sessions = append(sessions, session)
@@ -179,8 +198,8 @@ func (s Service) ListSessions() ([]SessionInfo, error) {
 
 func (s Service) InspectSession(sessionID string) (SessionInfo, error) {
 	var session SessionInfo
-	err := s.DB.QueryRow(`SELECT id, lease_id, run_id, COALESCE(container_id, ''), workspace_host_path, status, startup_cold_ms, created_at, updated_at
-		FROM sessions WHERE id = ?`, sessionID).Scan(&session.ID, &session.LeaseID, &session.RunID, &session.ContainerID, &session.WorkspacePath, &session.Status, &session.StartupColdMS, &session.CreatedAt, &session.UpdatedAt)
+	err := s.DB.QueryRow(`SELECT id, lease_id, run_id, COALESCE(container_id, ''), workspace_host_path, status, startup_cold_ms, COALESCE(runtime, 'docker'), COALESCE(parent_snapshot_id, ''), COALESCE(resumed_from_snapshot_id, ''), created_at, updated_at
+		FROM sessions WHERE id = ?`, sessionID).Scan(&session.ID, &session.LeaseID, &session.RunID, &session.ContainerID, &session.WorkspacePath, &session.Status, &session.StartupColdMS, &session.RuntimeName, &session.ParentSnapshotID, &session.ResumedFromSnapshotID, &session.CreatedAt, &session.UpdatedAt)
 	return session, err
 }
 
@@ -189,8 +208,8 @@ func (s Service) StopSession(sessionID string) error {
 	if err != nil {
 		return err
 	}
-	if session.ContainerID != "" && s.Runtime != nil {
-		if err := s.Runtime.Stop(session.ContainerID); err != nil {
+	if session.ContainerID != "" {
+		if err := s.stopRuntime(session.ContainerID); err != nil {
 			return err
 		}
 	}
@@ -205,8 +224,8 @@ func (s Service) RemoveSession(sessionID string) error {
 	if err != nil {
 		return err
 	}
-	if session.ContainerID != "" && s.Runtime != nil {
-		if err := s.Runtime.Remove(session.ContainerID); err != nil {
+	if session.ContainerID != "" {
+		if err := s.removeRuntime(session.ContainerID); err != nil {
 			return err
 		}
 	}
@@ -216,62 +235,128 @@ func (s Service) RemoveSession(sessionID string) error {
 	return err
 }
 
-func (s Service) admit(task Task) error {
-	memoryTotalMB := envInt64("ACF_NODE_MEMORY_MB", 8192)
-	physicalCPU := float64(envInt("ACF_NODE_CPU", goruntime.NumCPU()))
-	overcommitRatio := envFloat("ACF_CPU_OVERCOMMIT_RATIO", 2.0)
-	idleDiscount := envFloat("ACF_IDLE_CPU_DISCOUNT", 0.1)
-	memorySafetyRatio := envFloat("ACF_MEMORY_SAFETY_RATIO", 0.9)
-	// The task YAML is stored as text, so v1 conservatively counts only the new request.
-	input := economics.AdmissionInput{
-		PhysicalCPU:       physicalCPU,
-		OvercommitRatio:   overcommitRatio,
-		ActiveCPURequest:  task.CPURequest,
-		IdleCPURequest:    task.CPURequest,
-		IdleDiscount:      idleDiscount,
-		MemoryAllocatedMB: 0,
-		MemoryRequestMB:   task.MemoryMB,
-		MemoryTotalMB:     memoryTotalMB,
-		MemorySafetyRatio: memorySafetyRatio,
+func (s Service) ResumeSnapshot(snapshotNameOrID, leaseID string) (string, error) {
+	var runID, taskPath string
+	if err := s.DB.QueryRow(`SELECT run_id, task_path FROM leases WHERE id = ?`, leaseID).Scan(&runID, &taskPath); err != nil {
+		return "", err
 	}
-	if !economics.Admit(input) {
-		return fmt.Errorf("admission rejected: cpu_request=%.2f memory_mb=%d capacity_cpu=%.2f memory_total_mb=%d", task.CPURequest, task.MemoryMB, physicalCPU*overcommitRatio, memoryTotalMB)
+	task, _, err := LoadTask(taskPath)
+	if err != nil {
+		return "", err
 	}
-	return nil
+	snapshot, _, err := state.Service{DB: s.DB, Paths: s.Paths}.InspectSnapshot(snapshotNameOrID)
+	if err != nil {
+		return "", err
+	}
+	if snapshot.Kind != "directory" && snapshot.Kind != "ready" {
+		return "", fmt.Errorf("snapshot %s kind=%s cannot be resumed by docker directory driver", snapshot.ID, snapshot.Kind)
+	}
+	sessionID := ids.New("sbx")
+	workspace := filepath.Join(s.Paths.Workspaces, sessionID)
+	startCopy := time.Now()
+	if s.Driver != nil {
+		if _, err := s.Driver.ResumeDirectorySnapshot(context.Background(), snapshot.Path, workspace); err != nil {
+			return "", err
+		}
+	} else {
+		if err := state.CopyDir(snapshot.Path, workspace); err != nil {
+			return "", err
+		}
+	}
+	resumeCopyMS := time.Since(startCopy).Milliseconds()
+	decision, err := (scheduler.Scheduler{DB: s.DB}).Admit(scheduler.Request{
+		RunID:      runID,
+		SessionID:  sessionID,
+		Runtime:    "docker",
+		RiskTier:   task.RiskTier,
+		CPURequest: task.CPURequest,
+		MemoryMB:   task.MemoryMB,
+		SnapshotID: snapshot.ID,
+	})
+	if err != nil {
+		return "", err
+	}
+	if !decision.Admitted {
+		return "", fmt.Errorf("admission rejected: reason=%s overcommit_ratio=%.2f active_cpu_debt=%.3f queue_pressure=%s memory_pressure=%s", decision.Reason, decision.OvercommitRatio, decision.ActiveCPUDebt, decision.QueuePressure, decision.MemoryPressure)
+	}
+	var egressProxy egress.ProxyInfo
+	if s.isDockerRuntime() {
+		egressProxy, err = (egress.Service{DB: s.DB, Paths: s.Paths}).EnsureSessionProxy(runID, sessionID)
+		if err != nil {
+			return "", err
+		}
+	}
+	start := time.Now()
+	containerID, err := s.createRuntimeSession(runtimeplane.CreateSessionRequest{
+		SessionID:         sessionID,
+		LeaseID:           leaseID,
+		RunID:             runID,
+		Image:             task.Image,
+		WorkspaceHostPath: workspace,
+		MemoryMB:          task.MemoryMB,
+		CPURequest:        task.CPURequest,
+		NetworkMode:       task.NetworkMode,
+		ProxyURL:          egressProxy.ContainerProxyURL,
+		NoProxy:           "localhost,127.0.0.1,::1",
+		DockerNetworkName: egressProxy.NetworkName,
+	})
+	if err != nil {
+		return "", err
+	}
+	startupColdMS := time.Since(start).Milliseconds()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	runtimeName := s.runtimeName()
+	_, err = s.DB.Exec(`INSERT INTO sessions (id, lease_id, run_id, container_id, workspace_host_path, runtime, parent_snapshot_id, resumed_from_snapshot_id, status, startup_cold_ms, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)`, sessionID, leaseID, runID, containerID, workspace, runtimeName, snapshot.ID, snapshot.ID, startupColdMS, now, now)
+	if err != nil {
+		return "", err
+	}
+	_, _ = s.DB.Exec(`INSERT INTO events (id, run_id, session_id, snapshot_id, source, event_type, payload, created_at)
+		VALUES (?, ?, ?, ?, 'control_plane', 'snapshot_resume', ?, ?)`, ids.New("evt"), runID, sessionID, snapshot.ID, fmt.Sprintf(`{"container_id":%q,"workspace":%q,"resume_copy_ms":%d,"startup_cold_ms":%d,"runtime":%q}`, containerID, workspace, resumeCopyMS, startupColdMS, runtimeName), now)
+	_, _ = s.DB.Exec(`UPDATE leases SET status = 'allocated', updated_at = ? WHERE id = ?`, now, leaseID)
+	_, _ = s.DB.Exec(`INSERT INTO cost_samples (id, run_id, session_id, node_id, wall_seconds, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)`, ids.New("cost"), runID, sessionID, "local", float64(resumeCopyMS+startupColdMS)/1000, now)
+	return sessionID, nil
 }
 
-func envInt(name string, fallback int) int {
-	value := os.Getenv(name)
-	if value == "" {
-		return fallback
+func (s Service) createRuntimeSession(req runtimeplane.CreateSessionRequest) (string, error) {
+	if s.Driver != nil {
+		return s.Driver.CreateSession(context.Background(), req)
 	}
-	parsed, err := strconv.Atoi(value)
-	if err != nil {
-		return fallback
-	}
-	return parsed
+	return "", fmt.Errorf("runtime driver is required")
 }
 
-func envInt64(name string, fallback int64) int64 {
-	value := os.Getenv(name)
-	if value == "" {
-		return fallback
+func (s Service) execRuntime(containerID string, command []string, stream bool) (runtimeplane.ExecResult, error) {
+	if s.Driver != nil {
+		return s.Driver.Exec(context.Background(), containerID, command, stream)
 	}
-	parsed, err := strconv.ParseInt(value, 10, 64)
-	if err != nil {
-		return fallback
-	}
-	return parsed
+	return runtimeplane.ExecResult{}, fmt.Errorf("runtime driver is required")
 }
 
-func envFloat(name string, fallback float64) float64 {
-	value := os.Getenv(name)
-	if value == "" {
-		return fallback
+func (s Service) stopRuntime(containerID string) error {
+	if s.Driver != nil {
+		return s.Driver.Stop(context.Background(), containerID)
 	}
-	parsed, err := strconv.ParseFloat(value, 64)
-	if err != nil {
-		return fallback
+	return fmt.Errorf("runtime driver is required")
+}
+
+func (s Service) removeRuntime(containerID string) error {
+	if s.Driver != nil {
+		return s.Driver.Remove(context.Background(), containerID)
 	}
-	return parsed
+	return fmt.Errorf("runtime driver is required")
+}
+
+func (s Service) runtimeName() string {
+	if s.Driver != nil {
+		return s.Driver.Name()
+	}
+	return ""
+}
+
+func (s Service) isDockerRuntime() bool {
+	if s.Driver != nil {
+		return s.Driver.Name() == "docker"
+	}
+	return false
 }

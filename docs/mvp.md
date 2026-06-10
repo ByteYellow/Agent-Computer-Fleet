@@ -6,7 +6,7 @@ The first binary is `acfctl`. It manages local leases, Docker-backed sandbox
 sessions, preview URL proxies, runtime/template registries, directory
 snapshots, prepared workspace forks, structured Agent Computer API calls,
 telemetry, MVP policy decisions, provenance traces, forensics bundles, and
-run-level cost counters.
+run/session/node-level cost counters.
 
 ## Quick path
 
@@ -24,6 +24,7 @@ acfctl snapshot create <session_id> --type directory --path /workspace --name re
 acfctl snapshot list
 acfctl snapshot inspect ready
 acfctl fork ready --count 2
+acfctl snapshot resume ready --lease <lease_id>
 acfctl attempt best-of --snapshot ready --strategy "pass::test -f hello.txt" --strategy "fail::test -f missing.txt"
 acfctl policy test examples/events/metadata-egress.jsonl
 acfctl policy decisions --run run-demo-bugfix
@@ -70,11 +71,27 @@ acfctl snapshot create "$session_id" --type directory --path /workspace --name r
 acfctl snapshot list
 acfctl snapshot inspect ready
 acfctl fork ready --count 3
+resume_lease_id=$(acfctl lease create --task examples/tasks/bugfix.yaml)
+acfctl snapshot resume ready --lease "$resume_lease_id"
 ```
 
 Each forked attempt prints an `attempt_id`, workspace path, and `fork_ms`.
 Modify files under one attempt workspace and verify the other attempt workspaces
-do not change.
+do not change. `snapshot resume` copies the directory snapshot back into a new
+workspace and starts a new running Docker session with parent snapshot lineage.
+
+### demo_runtime_capabilities
+
+```sh
+acfctl runtime list
+acfctl runtime inspect docker
+acfctl runtime inspect firecracker
+```
+
+The Docker backend reports `exec`, `stop`, `snapshot`, `fork`, and `resume` as
+available, with `memory_snapshot=false`. Firecracker, gVisor, and bubblewrap are
+registered as capability-gated stubs and do not report unavailable features as
+usable.
 
 ### demo_snapshot_stack
 
@@ -148,9 +165,10 @@ acfctl cost sample <session_id>
 acfctl cost show run-demo-bugfix
 ```
 
-The output includes `active_cpu_seconds`, `idle_seconds`, `wall_seconds`,
-`snapshot_bytes`, `policy_block_count`, `quarantine_count`, `overcommit_ratio`,
-`active_cpu_debt`, `queue_pressure`, and `cost_per_run`.
+The output includes run-level `active_cpu_seconds`, `idle_seconds`,
+`wall_seconds`, `snapshot_bytes`, `policy_block_count`, `quarantine_count`,
+`overcommit_ratio`, `active_cpu_debt`, `queue_pressure`, and `cost_per_run`,
+plus session-level and node-level cost rows.
 
 ### demo_provenance_trace
 
@@ -178,13 +196,20 @@ acfctl node list
 acfctl bench overcommit --sessions 20 --idle-ratio 0.8
 ```
 
-This simulation complements `cost sample`. It shows how idle-heavy sessions are
-admitted using `active_cpu_request + idle_cpu_request * idle_discount`.
+This simulation uses the same single-node scheduler admission function as
+`session create`. It shows how idle-heavy sessions are admitted using
+`active_cpu_request + idle_cpu_request * idle_discount`, while memory is not
+overcommitted.
 
 ## MVP limits
 
 - Docker must be running for `session`, `exec`, and `process` commands.
-- Directory snapshots are supported; memory snapshots are intentionally not.
+- Directory snapshot/fork/resume is supported; memory snapshots are
+  intentionally not.
+- Runtime backends are capability-gated. Docker is active; Firecracker, gVisor,
+  and bubblewrap are stubs.
+- Scheduler/admission is single-node and conservative. Multi-node placement is
+  still a follow-up.
 - `port expose` is an HTTP preview proxy, not a raw TCP tunnel.
 - Egress control currently covers HTTP/HTTPS proxy workflows and blocks direct
   outbound traffic from the Docker sandbox bridge. Raw TCP protocol policy is

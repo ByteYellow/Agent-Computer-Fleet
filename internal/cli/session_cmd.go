@@ -47,9 +47,9 @@ func sessionCmd(dataDir *string) *cobra.Command {
 				return err
 			}
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "ID\tSTATUS\tRUN\tCONTAINER\tWORKSPACE\tSTARTUP_MS")
+			fmt.Fprintln(w, "ID\tSTATUS\tRUN\tRUNTIME\tCONTAINER\tRESUMED_FROM\tWORKSPACE\tSTARTUP_MS")
 			for _, session := range sessions {
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\n", session.ID, session.Status, session.RunID, short(session.ContainerID), session.WorkspacePath, session.StartupColdMS)
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\n", session.ID, session.Status, session.RunID, session.RuntimeName, short(session.ContainerID), short(session.ResumedFromSnapshotID), session.WorkspacePath, session.StartupColdMS)
 			}
 			return w.Flush()
 		},
@@ -72,8 +72,8 @@ func sessionCmd(dataDir *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "id=%s\nlease_id=%s\nrun_id=%s\ncontainer_id=%s\nworkspace=%s\nstatus=%s\nstartup_cold_ms=%d\ncreated_at=%s\nupdated_at=%s\n",
-				session.ID, session.LeaseID, session.RunID, session.ContainerID, session.WorkspacePath, session.Status, session.StartupColdMS, session.CreatedAt, session.UpdatedAt)
+			fmt.Fprintf(cmd.OutOrStdout(), "id=%s\nlease_id=%s\nrun_id=%s\nruntime=%s\ncontainer_id=%s\nworkspace=%s\nstatus=%s\nparent_snapshot_id=%s\nresumed_from_snapshot_id=%s\nstartup_cold_ms=%d\ncreated_at=%s\nupdated_at=%s\n",
+				session.ID, session.LeaseID, session.RunID, session.RuntimeName, session.ContainerID, session.WorkspacePath, session.Status, session.ParentSnapshotID, session.ResumedFromSnapshotID, session.StartupColdMS, session.CreatedAt, session.UpdatedAt)
 			return nil
 		},
 	}

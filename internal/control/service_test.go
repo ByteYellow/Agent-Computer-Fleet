@@ -1,34 +1,54 @@
 package control
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/byteyellow/agent-computer-fleet/internal/node"
+	runtimeplane "github.com/byteyellow/agent-computer-fleet/internal/runtime"
+	"github.com/byteyellow/agent-computer-fleet/internal/state"
 	"github.com/byteyellow/agent-computer-fleet/internal/store"
 )
 
-type fakeRuntime struct{}
+type fakeDriver struct{}
 
-func (fakeRuntime) CreateSession(req node.CreateSessionRequest) (string, error) {
+func (fakeDriver) Name() string { return "fake" }
+
+func (fakeDriver) Capabilities() runtimeplane.Capabilities {
+	return runtimeplane.Capabilities{Exec: true, Stop: true, Snapshot: true, Fork: true, Resume: true}
+}
+
+func (fakeDriver) CreateSession(ctx context.Context, req runtimeplane.CreateSessionRequest) (string, error) {
 	return "container-" + req.SessionID, nil
 }
 
-func (fakeRuntime) Exec(containerID string, command []string, stream bool) (node.ExecResult, error) {
-	return node.ExecResult{ExecID: "exec-test", ExitCode: 0}, nil
+func (fakeDriver) Exec(ctx context.Context, containerID string, command []string, stream bool) (runtimeplane.ExecResult, error) {
+	return runtimeplane.ExecResult{ExecID: "exec-test", ExitCode: 0}, nil
 }
 
-func (fakeRuntime) Interrupt(containerID string) error {
+func (fakeDriver) Interrupt(ctx context.Context, containerID string) error {
 	return nil
 }
 
-func (fakeRuntime) Stop(containerID string) error {
+func (fakeDriver) Stop(ctx context.Context, containerID string) error {
 	return nil
 }
 
-func (fakeRuntime) Remove(containerID string) error {
+func (fakeDriver) Remove(ctx context.Context, containerID string) error {
 	return nil
+}
+
+func (fakeDriver) CreateDirectorySnapshot(ctx context.Context, src, dst string) (state.Manifest, error) {
+	return state.Manifest{}, nil
+}
+
+func (fakeDriver) ForkDirectorySnapshot(ctx context.Context, src, dst string) (state.Manifest, error) {
+	return state.Manifest{}, nil
+}
+
+func (fakeDriver) ResumeDirectorySnapshot(ctx context.Context, src, dst string) (state.Manifest, error) {
+	return state.Manifest{}, nil
 }
 
 func TestCreateLeaseAndSession(t *testing.T) {
@@ -49,7 +69,7 @@ func TestCreateLeaseAndSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	svc := Service{DB: db, Paths: paths, Runtime: fakeRuntime{}}
+	svc := Service{DB: db, Paths: paths, Driver: fakeDriver{}}
 	leaseID, err := svc.CreateLease(taskPath)
 	if err != nil {
 		t.Fatal(err)

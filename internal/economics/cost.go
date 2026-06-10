@@ -64,7 +64,52 @@ func ShowCost(db *sql.DB, runID string, out io.Writer) error {
 	}
 	_, err = fmt.Fprintf(out, "run_id=%s active_cpu_seconds=%.3f idle_seconds=%.3f wall_seconds=%.3f snapshot_bytes=%d policy_block_count=%d quarantine_count=%d overcommit_ratio=%.2f active_cpu_debt=%.3f queue_pressure=%s cost_per_run=%.6f\n",
 		runID, active, idle, wall, snapshotBytes, blocks, quarantines, overcommitRatio, activeDebt, queuePressure, costPerRun)
-	return err
+	if err != nil {
+		return err
+	}
+	sessionRows, err := db.Query(`SELECT COALESCE(session_id, ''), COALESCE(SUM(active_cpu_seconds), 0), COALESCE(SUM(idle_seconds), 0), COALESCE(SUM(wall_seconds), 0), COALESCE(SUM(snapshot_bytes), 0)
+		FROM cost_samples WHERE run_id = ? GROUP BY session_id ORDER BY session_id`, runID)
+	if err != nil {
+		return err
+	}
+	defer sessionRows.Close()
+	for sessionRows.Next() {
+		var sessionID string
+		var sessionActive, sessionIdle, sessionWall float64
+		var sessionSnapshotBytes int64
+		if err := sessionRows.Scan(&sessionID, &sessionActive, &sessionIdle, &sessionWall, &sessionSnapshotBytes); err != nil {
+			return err
+		}
+		if sessionID == "" {
+			sessionID = "none"
+		}
+		if _, err := fmt.Fprintf(out, "session_id=%s active_cpu_seconds=%.3f idle_seconds=%.3f wall_seconds=%.3f snapshot_bytes=%d\n", sessionID, sessionActive, sessionIdle, sessionWall, sessionSnapshotBytes); err != nil {
+			return err
+		}
+	}
+	if err := sessionRows.Err(); err != nil {
+		return err
+	}
+	nodeRows, err := db.Query(`SELECT COALESCE(node_id, 'local'), COALESCE(SUM(active_cpu_seconds), 0), COALESCE(SUM(idle_seconds), 0), COALESCE(SUM(wall_seconds), 0)
+		FROM cost_samples WHERE run_id = ? GROUP BY node_id ORDER BY node_id`, runID)
+	if err != nil {
+		return err
+	}
+	defer nodeRows.Close()
+	for nodeRows.Next() {
+		var nodeID string
+		var nodeActive, nodeIdle, nodeWall float64
+		if err := nodeRows.Scan(&nodeID, &nodeActive, &nodeIdle, &nodeWall); err != nil {
+			return err
+		}
+		if nodeID == "" {
+			nodeID = "local"
+		}
+		if _, err := fmt.Fprintf(out, "node_id=%s active_cpu_seconds=%.3f idle_seconds=%.3f wall_seconds=%.3f\n", nodeID, nodeActive, nodeIdle, nodeWall); err != nil {
+			return err
+		}
+	}
+	return nodeRows.Err()
 }
 
 func EstimateCost(activeCPUSeconds, wallSeconds float64, snapshotBytes, policyBlocks, quarantines int64) float64 {

@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"github.com/byteyellow/agent-computer-fleet/internal/economics"
+	"github.com/byteyellow/agent-computer-fleet/internal/scheduler"
 	"github.com/byteyellow/agent-computer-fleet/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -62,9 +63,9 @@ func benchCmd() *cobra.Command {
 		Use:   "overcommit",
 		Short: "simulate active-CPU-aware overcommit admission",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			result := economics.SimulateOvercommit(sessions, idleRatio, cpuPerSession, physicalCPU, overcommitRatio, idleDiscount, memoryPerSessionMB, memoryTotalMB)
-			fmt.Fprintf(cmd.OutOrStdout(), "sessions=%d idle_ratio=%.2f admitted=%d rejected=%d weighted_cpu=%.3f capacity_cpu=%.3f\n",
-				result.Sessions, result.IdleRatio, result.Admitted, result.Rejected, result.WeightedCPU, result.CapacityCPU)
+			result := scheduler.Simulate(sessions, idleRatio, cpuPerSession, physicalCPU, overcommitRatio, idleDiscount, memoryPerSessionMB, memoryTotalMB)
+			fmt.Fprintf(cmd.OutOrStdout(), "sessions=%d idle_ratio=%.2f admitted=%d rejected=%d weighted_cpu=%.3f capacity_cpu=%.3f overcommit_ratio=%.2f active_cpu_debt=%.3f queue_pressure=%s memory_pressure=%s memory_allocated_mb=%d memory_capacity_mb=%d reject_reason=%q\n",
+				result.Sessions, result.IdleRatio, result.Admitted, result.Rejected, result.WeightedCPU, result.CapacityCPU, result.OvercommitRatio, result.ActiveCPUDebt, result.QueuePressure, result.MemoryPressure, result.MemoryAllocatedMB, result.MemoryCapacityMB, result.LastRejectReason)
 			return nil
 		},
 	}

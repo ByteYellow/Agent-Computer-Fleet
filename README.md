@@ -94,6 +94,8 @@ SESSION_ID=$(./acfctl session create --lease "$LEASE_ID")
 ./acfctl exec "$SESSION_ID" --stream -- sh -lc 'echo hello > hello.txt'
 ./acfctl snapshot create "$SESSION_ID" --type directory --path /workspace --name ready
 ./acfctl fork ready --count 3
+RESUME_LEASE_ID=$(./acfctl lease create --task examples/tasks/bugfix.yaml)
+./acfctl snapshot resume ready --lease "$RESUME_LEASE_ID"
 ./acfctl cost show run-demo-bugfix
 
 ./acfctl session rm "$SESSION_ID"
@@ -117,6 +119,7 @@ security analysis, fanout execution, and cost accounting:
 | A process | `acfctl exec <session> --stream -- ...` | process id, exit code, wall time |
 | A workspace state | `acfctl snapshot create ...` | manifest hash, file count, bytes, taint |
 | A branch point | `acfctl fork <snapshot> --count 3` | attempt workspaces and lineage |
+| A stopped state | `acfctl snapshot resume <snapshot> --lease ...` | a new running session with parent snapshot lineage |
 | A network event | `acfctl egress check ...` or runtime proxy traffic | policy decisions and quarantine signals |
 | A run | `acfctl cost show <run_id>` | CPU seconds, wall time, storage bytes, policy blocks |
 
@@ -163,16 +166,27 @@ The long-term shape is six planes:
 ```mermaid
 flowchart LR
     CLI["acfctl CLI / API client"] --> Control["Control Plane\nlease, session, admission"]
+    Control <--> Economics["Economics Plane\nactive CPU, quota, warm pool"]
+    Control --> State["State Plane\nsnapshot metadata, lineage, topology"]
+    State --> Control
     Control --> Node["Node Plane\nruntime adapter, process manager"]
-    Control --> State["State Plane\nworkspace, snapshot, fork"]
+    Control -->|"snapshot topology / mount plan"| Node
     Node --> Docker["Docker sandbox\ninternal network"]
     Docker --> Egress["Egress proxy sidecar\nallowlist, deny, credential injection"]
-    Node --> Telemetry["Telemetry\nprocess, file, network, resource"]
+    State -.->|"read-only snapshot store / COW base"| Node
+    Docker --> Kernel["Host Kernel\neBPF / cgroup / runtime events"]
+    Kernel --> Telemetry["Telemetry Plane\nprocess, file, network, resource"]
+    Telemetry -->|"context lookup"| Control
+    Telemetry -->|"lineage / taint lookup"| State
     Telemetry --> Security["Security Plane\npolicy, response, forensics"]
     State --> Security
-    Control --> Economics["Economics Plane\nactive CPU, warm pool, cost"]
     Security --> Control
 ```
+
+Control owns placement and state transitions; State owns snapshot metadata and
+physical topology; Node executes the mount/restore/fork plan selected by
+Control. Telemetry is modeled as an independent host-kernel/runtime event path,
+then correlated back to Control and State context.
 
 | Plane | Responsibility |
 |---|---|
@@ -192,6 +206,7 @@ the stable first interface.
 - `exec --stream` records process rows and streams stdout/stderr.
 - `port expose` provides a local HTTP preview proxy.
 - Directory snapshots can be created and forked into independent workspaces.
+- Directory snapshots can be resumed into new running Docker sessions.
 - Templates can derive `template -> ready snapshot -> attempt workspace`
   lineage.
 - Best-of-forks can run multiple strategies and select a winner.
@@ -205,7 +220,11 @@ the stable first interface.
   written into workspace files, container environment, SQLite event payloads, or
   normal logs.
 - Cost output includes run-level CPU, wall time, snapshot bytes, policy block
-  count, quarantine count, and a simple cost estimate.
+  count, quarantine count, session-level cost, node-level cost, and a simple
+  cost estimate.
+- Session creation goes through a single-node scheduler/admission path that
+  reads node capacity, active sessions, memory pressure, warm pool signals, and
+  snapshot locality.
 
 ## Current boundaries
 
@@ -214,6 +233,8 @@ the stable first interface.
   adapters.
 - Snapshot support is directory-level only; memory snapshot/resume is not
   implemented.
+- Scheduler/admission is single-node and conservative. It is not a distributed
+  placement service yet.
 - Egress enforcement covers HTTP/HTTPS proxy workflows and blocks direct
   outbound traffic from the Docker sandbox bridge. It is not a general raw TCP
   policy engine yet.
@@ -234,6 +255,7 @@ acfctl exec <session_id> --stream -- <command...>
 acfctl port expose <session_id> <port>
 acfctl snapshot create <session_id> --type directory --path /workspace --name ready
 acfctl fork ready --count 3
+acfctl snapshot resume ready --lease <lease_id>
 acfctl attempt best-of --snapshot ready --strategy "name::command"
 acfctl cost show <run_id>
 ```
@@ -260,7 +282,7 @@ acfctl runtime inspect docker
 acfctl node register --address localhost --runtime docker --cpu 8 --memory-mb 8192
 acfctl node list
 acfctl pool create --template bugfix --size 2
-acfctl bench overcommit --sessions 20 --idle-ratio 0.8
+acfctl bench overcommit --sessions 20 --idle-ratio 0.8 --physical-cpu 8
 ```
 
 ## Roadmap
@@ -269,8 +291,7 @@ Near term:
 
 - Daemon/API server behind `acfctl`
 - JSON output mode for automation
-- YAML policy rule engine
-- Snapshot resume and taint propagation
+- Snapshot taint propagation and memory resume capability gates
 - Stronger process manager and process tree enforcement
 - Raw TCP policy enforcement for non-HTTP protocols
 

@@ -121,11 +121,33 @@ func snapshotCmd(dataDir *string) *cobra.Command {
 			return nil
 		},
 	}
+	var resumeLeaseID string
+	resume := &cobra.Command{
+		Use:   "resume <snapshot_name_or_id>",
+		Short: "resume a directory snapshot into a running session",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			svc, closeFn, err := controlSvc(*dataDir)
+			if err != nil {
+				return err
+			}
+			defer closeFn()
+			sessionID, err := svc.ResumeSnapshot(args[0], resumeLeaseID)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), sessionID)
+			return nil
+		},
+	}
+	resume.Flags().StringVar(&resumeLeaseID, "lease", "", "lease id used for resumed session runtime/task settings")
+	_ = resume.MarkFlagRequired("lease")
 	cmd := &cobra.Command{Use: "snapshot", Short: "snapshot operations"}
 	cmd.AddCommand(create)
 	cmd.AddCommand(stack)
 	cmd.AddCommand(list)
 	cmd.AddCommand(inspect)
+	cmd.AddCommand(resume)
 	return cmd
 }
 

@@ -1,0 +1,131 @@
+package economics
+
+import (
+	"database/sql"
+	"fmt"
+	"io"
+	"math"
+)
+
+type AdmissionInput struct {
+	PhysicalCPU       float64
+	OvercommitRatio   float64
+	ActiveCPURequest  float64
+	IdleCPURequest    float64
+	IdleDiscount      float64
+	MemoryAllocatedMB int64
+	MemoryRequestMB   int64
+	MemoryTotalMB     int64
+	MemorySafetyRatio float64
+}
+
+func Admit(in AdmissionInput) bool {
+	if in.OvercommitRatio == 0 {
+		in.OvercommitRatio = 1
+	}
+	if in.IdleDiscount == 0 {
+		in.IdleDiscount = 0.1
+	}
+	if in.MemorySafetyRatio == 0 {
+		in.MemorySafetyRatio = 0.9
+	}
+	weightedCPU := in.ActiveCPURequest + in.IdleCPURequest*in.IdleDiscount
+	if weightedCPU > in.PhysicalCPU*in.OvercommitRatio {
+		return false
+	}
+	return float64(in.MemoryAllocatedMB+in.MemoryRequestMB) <= float64(in.MemoryTotalMB)*in.MemorySafetyRatio
+}
+
+func ShowCost(db *sql.DB, runID string, out io.Writer) error {
+	var active, idle, wall float64
+	var snapshotBytes, blocks, quarantines int64
+	err := db.QueryRow(`SELECT
+		COALESCE(SUM(active_cpu_seconds), 0),
+		COALESCE(SUM(idle_seconds), 0),
+		COALESCE(SUM(wall_seconds), 0),
+		COALESCE(SUM(snapshot_bytes), 0),
+		COALESCE(SUM(policy_block_count), 0),
+		COALESCE(SUM(quarantine_count), 0)
+		FROM cost_samples WHERE run_id = ?`, runID).Scan(&active, &idle, &wall, &snapshotBytes, &blocks, &quarantines)
+	if err != nil {
+		return err
+	}
+	costPerRun := EstimateCost(active, wall, snapshotBytes, blocks, quarantines)
+	_, err = fmt.Fprintf(out, "run_id=%s active_cpu_seconds=%.3f idle_seconds=%.3f wall_seconds=%.3f snapshot_bytes=%d policy_block_count=%d quarantine_count=%d cost_per_run=%.6f\n",
+		runID, active, idle, wall, snapshotBytes, blocks, quarantines, costPerRun)
+	return err
+}
+
+func EstimateCost(activeCPUSeconds, wallSeconds float64, snapshotBytes, policyBlocks, quarantines int64) float64 {
+	storageGB := float64(snapshotBytes) / (1024 * 1024 * 1024)
+	return activeCPUSeconds*0.00001 + wallSeconds*0.000001 + storageGB*0.0001 + float64(policyBlocks)*0.0001 + float64(quarantines)*0.0005
+}
+
+type BenchResult struct {
+	Sessions    int
+	IdleRatio   float64
+	Admitted    int
+	Rejected    int
+	WeightedCPU float64
+	CapacityCPU float64
+}
+
+func SimulateOvercommit(sessions int, idleRatio, cpuPerSession, physicalCPU, overcommitRatio, idleDiscount float64, memoryPerSessionMB, memoryTotalMB int64) BenchResult {
+	if sessions < 0 {
+		sessions = 0
+	}
+	if idleRatio < 0 {
+		idleRatio = 0
+	}
+	if idleRatio > 1 {
+		idleRatio = 1
+	}
+	if cpuPerSession == 0 {
+		cpuPerSession = 1
+	}
+	if physicalCPU == 0 {
+		physicalCPU = 8
+	}
+	if overcommitRatio == 0 {
+		overcommitRatio = 2
+	}
+	if idleDiscount == 0 {
+		idleDiscount = 0.1
+	}
+	if memoryPerSessionMB == 0 {
+		memoryPerSessionMB = 256
+	}
+	if memoryTotalMB == 0 {
+		memoryTotalMB = 8192
+	}
+	result := BenchResult{
+		Sessions:    sessions,
+		IdleRatio:   idleRatio,
+		CapacityCPU: physicalCPU * overcommitRatio,
+	}
+	var memoryAllocated int64
+	for i := 0; i < sessions; i++ {
+		activeCPU := cpuPerSession * (1 - idleRatio)
+		idleCPU := cpuPerSession * idleRatio
+		nextWeighted := activeCPU + idleCPU*idleDiscount
+		ok := Admit(AdmissionInput{
+			PhysicalCPU:       physicalCPU,
+			OvercommitRatio:   overcommitRatio,
+			ActiveCPURequest:  result.WeightedCPU + activeCPU,
+			IdleCPURequest:    idleCPU,
+			IdleDiscount:      idleDiscount,
+			MemoryAllocatedMB: memoryAllocated,
+			MemoryRequestMB:   memoryPerSessionMB,
+			MemoryTotalMB:     memoryTotalMB,
+			MemorySafetyRatio: 0.9,
+		})
+		if !ok || math.IsNaN(nextWeighted) {
+			result.Rejected++
+			continue
+		}
+		result.Admitted++
+		result.WeightedCPU += nextWeighted
+		memoryAllocated += memoryPerSessionMB
+	}
+	return result
+}

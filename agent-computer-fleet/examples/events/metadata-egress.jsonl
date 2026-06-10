@@ -1,0 +1,1 @@
+{"source":"egress_proxy","event_type":"network_connect","run_id":"run-demo-bugfix","session_id":"sbx-demo","dst_ip":"169.254.169.254","args":["curl","http://169.254.169.254/latest/meta-data"]}

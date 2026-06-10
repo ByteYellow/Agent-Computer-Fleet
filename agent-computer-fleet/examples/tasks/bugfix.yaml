@@ -1,0 +1,9 @@
+run_id: run-demo-bugfix
+image: alpine:3.20
+workspace: /workspace
+command: ["sh", "-lc", "echo hello"]
+risk_tier: medium
+network_mode: allowlist
+cpu_request: 1
+memory_mb: 256
+timeout_seconds: 120

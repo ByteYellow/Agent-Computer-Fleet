@@ -1,0 +1,10 @@
+.DS_Store
+
+# Local Agent Computer Fleet state and build outputs.
+agent-computer-fleet/acfctl
+agent-computer-fleet/.acf/
+agent-computer-fleet/.acf-*/
+
+# Internal planning notes. Keep these local only.
+01-atomized-design-online-CN.MD
+02-paper-algorithm-map-CN.MD

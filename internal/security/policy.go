@@ -15,13 +15,16 @@ import (
 )
 
 type Event struct {
-	Source    string   `json:"source"`
-	EventType string   `json:"event_type"`
-	RunID     string   `json:"run_id"`
-	SessionID string   `json:"session_id"`
-	DstIP     string   `json:"dst_ip"`
-	Path      string   `json:"path"`
-	Args      []string `json:"args"`
+	Source     string   `json:"source"`
+	EventType  string   `json:"event_type"`
+	RunID      string   `json:"run_id"`
+	SessionID  string   `json:"session_id"`
+	ToolCallID string   `json:"tool_call_id"`
+	ProcessID  string   `json:"process_id"`
+	SnapshotID string   `json:"snapshot_id"`
+	DstIP      string   `json:"dst_ip"`
+	Path       string   `json:"path"`
+	Args       []string `json:"args"`
 }
 
 type Decision struct {
@@ -70,6 +73,11 @@ func EvaluateJSONLWithState(db *sql.DB, path string, out io.Writer) error {
 	return evaluateJSONL(path, out, db)
 }
 
+func EvaluateAndPersist(db *sql.DB, event Event, rawPayload string) (DecisionRecord, error) {
+	decision := DefaultEngine().Evaluate(event)
+	return persistDecision(db, event, rawPayload, decision)
+}
+
 func ListDecisions(db *sql.DB, runID string) ([]DecisionRecord, error) {
 	query := `SELECT id, COALESCE(event_id, ''), COALESCE(run_id, ''), COALESCE(session_id, ''), decision, reason, created_at
 		FROM policy_decisions`
@@ -114,7 +122,7 @@ func evaluateJSONL(path string, out io.Writer, db *sql.DB) error {
 		}
 		decision := engine.Evaluate(event)
 		if db != nil {
-			if err := persistDecision(db, event, line, decision); err != nil {
+			if _, err := persistDecision(db, event, line, decision); err != nil {
 				return err
 			}
 		}
@@ -125,18 +133,27 @@ func evaluateJSONL(path string, out io.Writer, db *sql.DB) error {
 	return scanner.Err()
 }
 
-func persistDecision(db *sql.DB, event Event, rawPayload string, decision Decision) error {
+func persistDecision(db *sql.DB, event Event, rawPayload string, decision Decision) (DecisionRecord, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	eventID := ids.New("evt")
-	_, err := db.Exec(`INSERT INTO events (id, run_id, session_id, source, event_type, payload, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`, eventID, event.RunID, event.SessionID, event.Source, event.EventType, rawPayload, now)
+	_, err := db.Exec(`INSERT INTO events (id, run_id, session_id, tool_call_id, process_id, snapshot_id, source, event_type, payload, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, eventID, event.RunID, event.SessionID, event.ToolCallID, event.ProcessID, event.SnapshotID, event.Source, event.EventType, rawPayload, now)
 	if err != nil {
-		return err
+		return DecisionRecord{}, err
+	}
+	record := DecisionRecord{
+		ID:        ids.New("dec"),
+		EventID:   eventID,
+		RunID:     event.RunID,
+		SessionID: event.SessionID,
+		Decision:  decision.Decision,
+		Reason:    decision.Reason,
+		CreatedAt: now,
 	}
 	_, err = db.Exec(`INSERT INTO policy_decisions (id, event_id, run_id, session_id, decision, reason, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`, ids.New("dec"), eventID, event.RunID, event.SessionID, decision.Decision, decision.Reason, now)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, record.ID, eventID, event.RunID, event.SessionID, decision.Decision, decision.Reason, now)
 	if err != nil {
-		return err
+		return DecisionRecord{}, err
 	}
 	blockCount := int64(0)
 	quarantineCount := int64(0)
@@ -155,12 +172,15 @@ func persistDecision(db *sql.DB, event Event, rawPayload string, decision Decisi
 			_, _ = db.Exec(`UPDATE sessions SET status = 'stopped', updated_at = ? WHERE id = ?`, now, event.SessionID)
 			_, _ = db.Exec(`UPDATE snapshots SET status = 'tainted' WHERE session_id = ?`, event.SessionID)
 		}
+		if event.ProcessID != "" {
+			_, _ = db.Exec(`UPDATE processes SET status = 'killed', ended_at = ? WHERE id = ?`, now, event.ProcessID)
+		}
 	}
 	if event.RunID != "" {
 		_, _ = db.Exec(`INSERT INTO cost_samples (id, run_id, session_id, policy_block_count, quarantine_count, created_at)
 			VALUES (?, ?, ?, ?, ?, ?)`, ids.New("cost"), event.RunID, event.SessionID, blockCount, quarantineCount, now)
 	}
-	return nil
+	return record, nil
 }
 
 func isPrivateIP(raw string) bool {

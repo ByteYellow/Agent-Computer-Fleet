@@ -99,6 +99,54 @@ func TestCreateStackRecordsLineage(t *testing.T) {
 	}
 }
 
+func TestCreateStackFromTemplateRecordsBundleLineage(t *testing.T) {
+	root := t.TempDir()
+	paths, err := store.Init(filepath.Join(root, ".acf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	templateID := "tmpl-test"
+	templateDir := filepath.Join(paths.Templates, templateID)
+	if err := os.MkdirAll(templateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(templateDir, "task.yaml"), []byte("run_id: run-test\nimage: alpine:3.20\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := BuildManifest(templateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = db.Exec(`INSERT INTO templates (id, name, task_path, image, risk_tier, network_mode, manifest_hash, bytes, status, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?)`,
+		templateID, "test-template", filepath.Join(root, "task.yaml"), "alpine:3.20", "medium", "allowlist", manifest.Hash, manifest.Bytes, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Service{DB: db, Paths: paths}.CreateStackFromTemplate("test-template")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TemplateSnapshotID != templateID {
+		t.Fatalf("template snapshot = %s, want %s", result.TemplateSnapshotID, templateID)
+	}
+	ready, lineage, err := Service{DB: db, Paths: paths}.InspectSnapshot(result.ReadySnapshotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready.ParentID != templateID || len(lineage) != 2 || lineage[1].ID != templateID {
+		t.Fatalf("unexpected lineage: ready=%+v lineage=%+v", ready, lineage)
+	}
+}
+
 func insertSession(t *testing.T, db *sql.DB, workspace string) {
 	t.Helper()
 	now := time.Now().UTC().Format(time.RFC3339Nano)

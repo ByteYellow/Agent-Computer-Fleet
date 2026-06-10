@@ -133,6 +133,59 @@ func (s Service) CreateStack(taskPath string) (StackResult, error) {
 	return StackResult{TemplateSnapshotID: templateID, ReadySnapshotID: readyID, Attempt: attempts[0]}, nil
 }
 
+func (s Service) CreateStackFromTemplate(templateNameOrID string) (StackResult, error) {
+	var templateID, templateName, templatePath, manifestHash string
+	var templateBytes int64
+	err := s.DB.QueryRow(`SELECT id, name, task_path, manifest_hash, bytes FROM templates
+		WHERE id = ? OR name = ? ORDER BY created_at DESC LIMIT 1`, templateNameOrID, templateNameOrID).
+		Scan(&templateID, &templateName, &templatePath, &manifestHash, &templateBytes)
+	if err != nil {
+		return StackResult{}, err
+	}
+	templateDir := filepath.Join(s.Paths.Templates, templateID)
+	manifest, err := BuildManifest(templateDir)
+	if err != nil {
+		return StackResult{}, err
+	}
+	if manifestHash == "" {
+		manifestHash = manifest.Hash
+	}
+	if templateBytes == 0 {
+		templateBytes = manifest.Bytes
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = s.DB.Exec(`INSERT OR IGNORE INTO snapshots (id, name, kind, source, path, manifest_hash, file_count, bytes, status, created_at)
+		VALUES (?, ?, 'template', 'template_bundle', ?, ?, ?, ?, 'ready', ?)`,
+		templateID, templateName, templateDir, manifestHash, manifest.Files, templateBytes, now)
+	if err != nil {
+		return StackResult{}, err
+	}
+
+	readyID := ids.New("snap")
+	readyDir := filepath.Join(s.Paths.Snapshots, readyID)
+	if err := CopyDir(templateDir, readyDir); err != nil {
+		return StackResult{}, err
+	}
+	if err := os.WriteFile(filepath.Join(readyDir, "STACK_READY"), []byte("ready\n"), 0o644); err != nil {
+		return StackResult{}, err
+	}
+	readyManifest, err := BuildManifest(readyDir)
+	if err != nil {
+		return StackResult{}, err
+	}
+	now = time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = s.DB.Exec(`INSERT INTO snapshots (id, name, parent_id, kind, source, path, manifest_hash, file_count, bytes, status, created_at)
+		VALUES (?, 'ready', ?, 'ready', ?, ?, ?, ?, ?, 'ready', ?)`, readyID, templateID, "template:"+templatePath, readyDir, readyManifest.Hash, readyManifest.Files, readyManifest.Bytes, now)
+	if err != nil {
+		return StackResult{}, err
+	}
+	attempts, err := s.Fork(readyID, 1)
+	if err != nil {
+		return StackResult{}, err
+	}
+	return StackResult{TemplateSnapshotID: templateID, ReadySnapshotID: readyID, Attempt: attempts[0]}, nil
+}
+
 func (s Service) Fork(snapshotNameOrID string, count int) ([]ForkResult, error) {
 	if count < 1 {
 		return nil, fmt.Errorf("count must be >= 1")

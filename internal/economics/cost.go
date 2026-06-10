@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
+	"strconv"
 )
 
 type AdmissionInput struct {
@@ -51,14 +53,35 @@ func ShowCost(db *sql.DB, runID string, out io.Writer) error {
 		return err
 	}
 	costPerRun := EstimateCost(active, wall, snapshotBytes, blocks, quarantines)
-	_, err = fmt.Fprintf(out, "run_id=%s active_cpu_seconds=%.3f idle_seconds=%.3f wall_seconds=%.3f snapshot_bytes=%d policy_block_count=%d quarantine_count=%d cost_per_run=%.6f\n",
-		runID, active, idle, wall, snapshotBytes, blocks, quarantines, costPerRun)
+	overcommitRatio := envFloat("ACF_CPU_OVERCOMMIT_RATIO", 2.0)
+	queuePressure := "low"
+	if active > 0 && idle == 0 {
+		queuePressure = "medium"
+	}
+	activeDebt := active - wall
+	if activeDebt < 0 {
+		activeDebt = 0
+	}
+	_, err = fmt.Fprintf(out, "run_id=%s active_cpu_seconds=%.3f idle_seconds=%.3f wall_seconds=%.3f snapshot_bytes=%d policy_block_count=%d quarantine_count=%d overcommit_ratio=%.2f active_cpu_debt=%.3f queue_pressure=%s cost_per_run=%.6f\n",
+		runID, active, idle, wall, snapshotBytes, blocks, quarantines, overcommitRatio, activeDebt, queuePressure, costPerRun)
 	return err
 }
 
 func EstimateCost(activeCPUSeconds, wallSeconds float64, snapshotBytes, policyBlocks, quarantines int64) float64 {
 	storageGB := float64(snapshotBytes) / (1024 * 1024 * 1024)
 	return activeCPUSeconds*0.00001 + wallSeconds*0.000001 + storageGB*0.0001 + float64(policyBlocks)*0.0001 + float64(quarantines)*0.0005
+}
+
+func envFloat(name string, fallback float64) float64 {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 type BenchResult struct {

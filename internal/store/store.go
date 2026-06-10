@@ -17,6 +17,7 @@ type Paths struct {
 	DB         string
 	Workspaces string
 	Snapshots  string
+	Templates  string
 	Artifacts  string
 	Logs       string
 }
@@ -33,6 +34,7 @@ func ResolvePaths(root string) Paths {
 		DB:         filepath.Join(root, "acf.db"),
 		Workspaces: filepath.Join(root, "workspaces"),
 		Snapshots:  filepath.Join(root, "snapshots"),
+		Templates:  filepath.Join(root, "templates"),
 		Artifacts:  filepath.Join(root, "artifacts"),
 		Logs:       filepath.Join(root, "logs"),
 	}
@@ -40,7 +42,7 @@ func ResolvePaths(root string) Paths {
 
 func Init(root string) (Paths, error) {
 	paths := ResolvePaths(root)
-	for _, dir := range []string{paths.Root, paths.Workspaces, paths.Snapshots, paths.Artifacts, paths.Logs} {
+	for _, dir := range []string{paths.Root, paths.Workspaces, paths.Snapshots, paths.Templates, paths.Artifacts, paths.Logs} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return paths, err
 		}
@@ -138,6 +140,9 @@ func EnsureSchema(db *sql.DB) error {
 			id TEXT PRIMARY KEY,
 			run_id TEXT,
 			session_id TEXT,
+			tool_call_id TEXT NOT NULL DEFAULT '',
+			process_id TEXT NOT NULL DEFAULT '',
+			snapshot_id TEXT NOT NULL DEFAULT '',
 			source TEXT NOT NULL,
 			event_type TEXT NOT NULL,
 			payload TEXT NOT NULL,
@@ -164,6 +169,74 @@ func EnsureSchema(db *sql.DB) error {
 			quarantine_count INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL
 		);`,
+		`CREATE TABLE IF NOT EXISTS ports (
+			id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL,
+			run_id TEXT NOT NULL,
+			container_id TEXT NOT NULL,
+			container_port INTEGER NOT NULL,
+			host_port INTEGER NOT NULL,
+			preview_url TEXT NOT NULL,
+			pid INTEGER NOT NULL DEFAULT 0,
+			status TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS templates (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			task_path TEXT NOT NULL,
+			image TEXT NOT NULL,
+			risk_tier TEXT NOT NULL,
+			network_mode TEXT NOT NULL,
+			manifest_hash TEXT NOT NULL,
+			bytes INTEGER NOT NULL,
+			status TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS baseline_profiles (
+			id TEXT PRIMARY KEY,
+			template_name TEXT NOT NULL,
+			exec_count INTEGER NOT NULL,
+			network_event_count INTEGER NOT NULL,
+			policy_block_count INTEGER NOT NULL,
+			active_cpu_seconds REAL NOT NULL,
+			status TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS warm_pool_items (
+			id TEXT PRIMARY KEY,
+			template_name TEXT NOT NULL,
+			session_id TEXT,
+			workspace_path TEXT,
+			frequency INTEGER NOT NULL DEFAULT 0,
+			cold_start_p95_ms INTEGER NOT NULL DEFAULT 0,
+			size_score REAL NOT NULL DEFAULT 1,
+			priority REAL NOT NULL DEFAULT 0,
+			status TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS forensics_bundles (
+			id TEXT PRIMARY KEY,
+			run_id TEXT NOT NULL,
+			path TEXT NOT NULL,
+			status TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS nodes (
+			id TEXT PRIMARY KEY,
+			address TEXT NOT NULL,
+			runtime TEXT NOT NULL,
+			labels TEXT NOT NULL DEFAULT '',
+			cpu_capacity REAL NOT NULL DEFAULT 0,
+			memory_mb INTEGER NOT NULL DEFAULT 0,
+			active_cpu_debt REAL NOT NULL DEFAULT 0,
+			warm_hit_count INTEGER NOT NULL DEFAULT 0,
+			status TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
@@ -185,6 +258,9 @@ func EnsureSchema(db *sql.DB) error {
 		`ALTER TABLE fork_attempts ADD COLUMN score REAL NOT NULL DEFAULT 0;`,
 		`ALTER TABLE fork_attempts ADD COLUMN is_winner INTEGER NOT NULL DEFAULT 0;`,
 		`ALTER TABLE cost_samples ADD COLUMN quarantine_count INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE events ADD COLUMN tool_call_id TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE events ADD COLUMN process_id TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE events ADD COLUMN snapshot_id TEXT NOT NULL DEFAULT '';`,
 	}
 	for _, stmt := range alterStmts {
 		if _, err := db.Exec(stmt); err != nil && !isDuplicateColumn(err) {

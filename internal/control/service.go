@@ -87,6 +87,8 @@ func (s Service) CreateSession(leaseID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	_, _ = s.DB.Exec(`INSERT INTO events (id, run_id, session_id, source, event_type, payload, created_at)
+		VALUES (?, ?, ?, 'control_plane', 'session_create', ?, ?)`, ids.New("evt"), runID, sessionID, fmt.Sprintf(`{"container_id":%q,"workspace":%q,"startup_cold_ms":%d}`, containerID, workspace, startupColdMS), now)
 	_, _ = s.DB.Exec(`UPDATE leases SET status = 'allocated', updated_at = ? WHERE id = ?`, now, leaseID)
 	_, _ = s.DB.Exec(`INSERT INTO cost_samples (id, run_id, session_id, wall_seconds, created_at)
 		VALUES (?, ?, ?, ?, ?)`, ids.New("cost"), runID, sessionID, float64(startupColdMS)/1000, now)
@@ -108,6 +110,8 @@ func (s Service) Exec(sessionID string, command []string, stream bool) (string, 
 	if err != nil {
 		return "", err
 	}
+	_, _ = s.DB.Exec(`INSERT INTO events (id, run_id, session_id, process_id, source, event_type, payload, created_at)
+		VALUES (?, ?, ?, ?, 'control_plane', 'exec_start', ?, ?)`, ids.New("evt"), runID, sessionID, processID, fmt.Sprintf(`{"command":%q,"stream":%t}`, strings.Join(command, " "), stream), now)
 	start := time.Now()
 	result, err := s.Runtime.Exec(containerID, command, stream)
 	wallSeconds := time.Since(start).Seconds()
@@ -117,6 +121,8 @@ func (s Service) Exec(sessionID string, command []string, stream bool) (string, 
 	}
 	ended := time.Now().UTC().Format(time.RFC3339Nano)
 	_, _ = s.DB.Exec(`UPDATE processes SET exec_id = ?, status = ?, exit_code = ?, ended_at = ? WHERE id = ?`, result.ExecID, status, result.ExitCode, ended, processID)
+	_, _ = s.DB.Exec(`INSERT INTO events (id, run_id, session_id, process_id, source, event_type, payload, created_at)
+		VALUES (?, ?, ?, ?, 'control_plane', 'exec_end', ?, ?)`, ids.New("evt"), runID, sessionID, processID, fmt.Sprintf(`{"exec_id":%q,"exit_code":%d,"status":%q,"wall_seconds":%.6f}`, result.ExecID, result.ExitCode, status, wallSeconds), ended)
 	_, _ = s.DB.Exec(`INSERT INTO cost_samples (id, run_id, session_id, wall_seconds, active_cpu_seconds, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)`, ids.New("cost"), runID, sessionID, wallSeconds, wallSeconds, ended)
 	return processID, err

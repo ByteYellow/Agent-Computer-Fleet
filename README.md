@@ -12,7 +12,7 @@ enforce egress policy, and account for cost, from one CLI-first control plane.
 [![Go](https://img.shields.io/badge/go-1.23+-00ADD8.svg?style=flat-square)](https://go.dev/)
 [![Runtime](https://img.shields.io/badge/runtime-Docker-2496ED.svg?style=flat-square)](https://www.docker.com/)
 [![SQLite](https://img.shields.io/badge/state-SQLite-003B57.svg?style=flat-square)](https://www.sqlite.org/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg?style=flat-square)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-green.svg?style=flat-square)](LICENSE)
 
 **[Quickstart](#quickstart)** | **[Demos](#demos)** | **[Architecture](#architecture)** | **[Roadmap](#roadmap)**
 
@@ -265,16 +265,16 @@ Later:
 - Falco/Tetragon/eBPF telemetry integration
 - Rich provenance graph queries and forensics bundles
 
-## Development
+## Testing
 
 ```sh
 go test ./...
 ```
 
-Local state lives under `.acf/` by default and is intentionally ignored. Public
-docs live under [docs/](docs/); runnable examples live under [examples/](examples/)
-and [scripts/](scripts/).
+Local runtime state lives under `.acf/` by default and is intentionally ignored.
+Public docs live under [docs/](docs/); runnable examples live under
+[examples/](examples/) and [scripts/](scripts/).
 
 <div align="center">
-<sub>MIT licensed | local-first MVP | built around Go, Docker, and SQLite</sub>
+<sub>Apache-2.0 licensed | local-first MVP | built around Go, Docker, and SQLite</sub>
 </div>

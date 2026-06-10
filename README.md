@@ -1,61 +1,76 @@
-# Agent Computer Fleet
+# agent-computer-fleet
 
-`agent-computer-fleet` is a CLI-first Agent Computer Control Plane for AI agent
-sandbox workloads.
+`agent-computer-fleet` is a CLI-first Agent Computer Control Plane for local AI
+agent sandboxes.
 
-Agent Computer Control Plane for AI agents: pluggable sandbox runtimes with
-streaming exec, workspace snapshot/fork, runtime policy response, telemetry
-correlation, and active-CPU-aware cost accounting for secure, reproducible,
-high-density sandbox fleets.
+It treats a sandbox as a leaseable, executable, snapshotable, forkable, auditable
+computer instead of a one-shot container.
 
-It treats a sandbox as a controllable computer with identity, lifecycle,
-filesystem, process execution, snapshots, forks, telemetry, policy response, and
-cost accounting.
+## What v1 proves
 
-## V1 status
+- Docker-backed sandbox sessions can be created and executed through `acfctl`.
+- `/workspace` can be snapshotted and forked into independent attempt workspaces.
+- Policy events can be correlated with `run_id` and `session_id`, then persisted.
+- Risky events can quarantine sessions and taint snapshots.
+- Run-level cost output includes active CPU, wall time, snapshot bytes, policy
+  blocks, quarantines, and an estimated `cost_per_run`.
 
-The v1 MVP lives in:
+## Quick start
 
-```text
-agent-computer-fleet/
-```
+Prerequisites:
 
-It can run a local Docker-backed flow:
+- Go 1.23+
+- Docker Desktop or a compatible Docker daemon
 
 ```sh
-cd agent-computer-fleet
+go build ./cmd/acfctl
+
+./acfctl init
+lease_id=$(./acfctl lease create --task examples/tasks/bugfix.yaml)
+session_id=$(./acfctl session create --lease "$lease_id")
+
+./acfctl session inspect "$session_id"
+./acfctl exec "$session_id" --stream -- go version
+./acfctl exec "$session_id" --stream -- sh -lc 'echo hello > hello.txt'
+
+./acfctl snapshot create "$session_id" --type directory --path /workspace --name ready
+./acfctl fork ready --count 3
+
+./acfctl policy test examples/events/metadata-egress.jsonl
+./acfctl policy decisions --run run-demo-bugfix
+./acfctl cost show run-demo-bugfix
+./acfctl session rm "$session_id"
+```
+
+Or run the full v1 demo:
+
+```sh
 ./scripts/demo_v1.sh
 ```
 
-The demo covers:
+## V1 commands
 
-- streaming terminal execution
-- workspace snapshot
-- snapshot fanout into multiple attempt workspaces
-- metadata egress quarantine policy
-- run-level cost output
-- active-CPU-aware overcommit simulation
-- session cleanup
-
-## Architecture
-
-Agent Computer Control Plane:
-
-- Ingress Plane: CLI/API, lease, stream, preview
-- Control Plane: scheduling, quota, state, policy, GC
-- Node Plane: session, runtime, pool, cgroup, telemetry
-- State Plane: template, snapshot, fork, resume, taint
-- Security Plane: egress, secret, telemetry, policy, quarantine
-- Economics Plane: prewarm, sleep/wake, active CPU, overcommit
-
-## Documents
-
-- `01-atomized-design-online-CN.MD`: v2 atomized design based on online product research.
-- `02-paper-algorithm-map-CN.MD`: mapping papers and algorithms to implementable project mechanisms.
-- `agent-computer-fleet/README.md`: engineering quick start and v1 command reference.
+```sh
+acfctl init
+acfctl lease create --task examples/tasks/bugfix.yaml
+acfctl session create --lease <lease_id>
+acfctl session list
+acfctl session inspect <session_id>
+acfctl session stop <session_id>
+acfctl session rm <session_id>
+acfctl exec <session_id> --stream -- <command...>
+acfctl process interrupt <process_id>
+acfctl port expose <session_id> <port>
+acfctl snapshot create <session_id> --type directory --path /workspace --name ready
+acfctl fork ready --count 3
+acfctl policy test examples/events/metadata-egress.jsonl
+acfctl policy decisions --run <run_id>
+acfctl cost show <run_id>
+acfctl bench overcommit --sessions 20 --idle-ratio 0.8
+```
 
 ## V1 boundaries
 
-V1 is single-node and Docker-first. It intentionally does not implement
-multi-node Fleet Manager, Raft, Firecracker memory snapshots, live migration,
+V1 is intentionally single-node and Docker-first. It does not implement
+multi-node scheduling, Raft, Firecracker memory snapshots, live migration,
 deep-learning anomaly detection, or custom eBPF LSM enforcement.

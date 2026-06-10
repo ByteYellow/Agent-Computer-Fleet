@@ -15,19 +15,38 @@ type EventRecord struct {
 	CreatedAt  string
 }
 
+type Filter struct {
+	RunID      string
+	SessionID  string
+	Type       string
+	ToolCallID string
+}
+
 func ListEvents(db *sql.DB, runID, sessionID string) ([]EventRecord, error) {
+	return ListEventsFiltered(db, Filter{RunID: runID, SessionID: sessionID})
+}
+
+func ListEventsFiltered(db *sql.DB, filter Filter) ([]EventRecord, error) {
 	query := `SELECT id, COALESCE(run_id, ''), COALESCE(session_id, ''), COALESCE(tool_call_id, ''),
 		COALESCE(process_id, ''), COALESCE(snapshot_id, ''), source, event_type, payload, created_at
 		FROM events`
 	args := []any{}
 	clauses := []string{}
-	if runID != "" {
+	if filter.RunID != "" {
 		clauses = append(clauses, "run_id = ?")
-		args = append(args, runID)
+		args = append(args, filter.RunID)
 	}
-	if sessionID != "" {
+	if filter.SessionID != "" {
 		clauses = append(clauses, "session_id = ?")
-		args = append(args, sessionID)
+		args = append(args, filter.SessionID)
+	}
+	if filter.Type != "" {
+		clauses = append(clauses, "event_type = ?")
+		args = append(args, filter.Type)
+	}
+	if filter.ToolCallID != "" {
+		clauses = append(clauses, "tool_call_id = ?")
+		args = append(args, filter.ToolCallID)
 	}
 	if len(clauses) > 0 {
 		query += " WHERE " + clauses[0]

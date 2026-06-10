@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"fmt"
 	"github.com/byteyellow/agent-computer-fleet/internal/control"
 	"github.com/byteyellow/agent-computer-fleet/internal/node"
 	"github.com/byteyellow/agent-computer-fleet/internal/store"
 	"github.com/spf13/cobra"
+	"time"
 )
 
 func NewRootCommand() *cobra.Command {
@@ -63,4 +65,19 @@ func short(value string) string {
 		return value
 	}
 	return value[:12]
+}
+
+func wallSecondsText(startedAt, endedAt string) string {
+	if startedAt == "" || endedAt == "" {
+		return ""
+	}
+	start, err := time.Parse(time.RFC3339Nano, startedAt)
+	if err != nil {
+		return ""
+	}
+	end, err := time.Parse(time.RFC3339Nano, endedAt)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%.3f", end.Sub(start).Seconds())
 }

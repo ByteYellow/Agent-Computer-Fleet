@@ -160,6 +160,20 @@ server, and real multi-node scheduler.
 
 The long-term shape is six planes:
 
+```mermaid
+flowchart LR
+    CLI["acfctl CLI / API client"] --> Control["Control Plane\nlease, session, admission"]
+    Control --> Node["Node Plane\nruntime adapter, process manager"]
+    Control --> State["State Plane\nworkspace, snapshot, fork"]
+    Node --> Docker["Docker sandbox\ninternal network"]
+    Docker --> Egress["Egress proxy sidecar\nallowlist, deny, credential injection"]
+    Node --> Telemetry["Telemetry\nprocess, file, network, resource"]
+    Telemetry --> Security["Security Plane\npolicy, response, forensics"]
+    State --> Security
+    Control --> Economics["Economics Plane\nactive CPU, warm pool, cost"]
+    Security --> Control
+```
+
 | Plane | Responsibility |
 |---|---|
 | **Ingress** | CLI/API, lease, streaming exec, preview URL |
@@ -183,6 +197,7 @@ the stable first interface.
 - Best-of-forks can run multiple strategies and select a winner.
 - Telemetry, policy decisions, provenance trace, and forensics export have MVP
   implementations.
+- Policy rules can be loaded from YAML for offline event tests.
 - Docker sessions get a session-scoped internal bridge network and an egress
   proxy sidecar. Proxy-aware HTTP/HTTPS clients route through the sidecar;
   direct egress from the sandbox network is blocked.
@@ -228,8 +243,10 @@ Security, telemetry, and provenance:
 ```sh
 acfctl egress allow example.com
 acfctl credential inject --run <run_id> --session <session_id> --name github-token --host api.github.com --value <secret>
-acfctl telemetry list --run <run_id>
-acfctl policy test examples/events/metadata-egress.jsonl
+acfctl process list --session <session_id>
+acfctl process inspect <process_id>
+acfctl telemetry list --run <run_id> --type network_deny --tool-call <tool_call_id>
+acfctl policy test examples/events/metadata-egress.jsonl --rules examples/policies/default.yaml
 acfctl policy decisions --run <run_id>
 acfctl graph trace --run <run_id>
 acfctl forensics export <run_id>

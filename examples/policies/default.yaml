@@ -1,0 +1,29 @@
+rules:
+  - id: metadata_ip_dst
+    match:
+      dst_ip: 169.254.169.254
+    decision: quarantine
+    reason: metadata IP access
+
+  - id: metadata_ip_args
+    match:
+      args_contains:
+        - 169.254.169.254
+    decision: quarantine
+    reason: metadata IP access
+
+  - id: private_cidr_access
+    match:
+      private_cidr: true
+    decision: deny
+    reason: private CIDR access
+
+  - id: secret_path_access
+    match:
+      path_contains:
+        - .env
+        - id_rsa
+        - secret
+        - credentials
+    decision: kill
+    reason: secret path access

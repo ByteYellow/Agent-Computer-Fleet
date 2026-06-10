@@ -11,6 +11,7 @@ import (
 )
 
 const DefaultDataDir = ".acf"
+const SchemaVersion = 2
 
 type Paths struct {
 	Root       string
@@ -74,6 +75,11 @@ func Open(paths Paths) (*sql.DB, error) {
 
 func EnsureSchema(db *sql.DB) error {
 	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS schema_versions (
+			version INTEGER PRIMARY KEY,
+			description TEXT NOT NULL,
+			applied_at TEXT NOT NULL
+		);`,
 		`CREATE TABLE IF NOT EXISTS leases (
 			id TEXT PRIMARY KEY,
 			run_id TEXT NOT NULL,
@@ -155,6 +161,7 @@ func EnsureSchema(db *sql.DB) error {
 			event_id TEXT,
 			run_id TEXT,
 			session_id TEXT,
+			rule_id TEXT NOT NULL DEFAULT '',
 			decision TEXT NOT NULL,
 			reason TEXT NOT NULL,
 			created_at TEXT NOT NULL
@@ -223,6 +230,8 @@ func EnsureSchema(db *sql.DB) error {
 			id TEXT PRIMARY KEY,
 			run_id TEXT NOT NULL,
 			path TEXT NOT NULL,
+			sha256 TEXT NOT NULL DEFAULT '',
+			size_bytes INTEGER NOT NULL DEFAULT 0,
 			status TEXT NOT NULL,
 			created_at TEXT NOT NULL
 		);`,
@@ -296,11 +305,22 @@ func EnsureSchema(db *sql.DB) error {
 		`ALTER TABLE egress_proxies ADD COLUMN mode TEXT NOT NULL DEFAULT 'host';`,
 		`ALTER TABLE egress_proxies ADD COLUMN network_name TEXT NOT NULL DEFAULT '';`,
 		`ALTER TABLE egress_proxies ADD COLUMN container_id TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE forensics_bundles ADD COLUMN sha256 TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE forensics_bundles ADD COLUMN size_bytes INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE policy_decisions ADD COLUMN rule_id TEXT NOT NULL DEFAULT '';`,
 	}
 	for _, stmt := range alterStmts {
 		if _, err := db.Exec(stmt); err != nil && !isDuplicateColumn(err) {
 			return fmt.Errorf("migrate schema: %w", err)
 		}
+	}
+	if _, err := db.Exec(`INSERT OR IGNORE INTO schema_versions (version, description, applied_at)
+		VALUES (1, 'initial local control plane schema', datetime('now'))`); err != nil {
+		return fmt.Errorf("record schema version: %w", err)
+	}
+	if _, err := db.Exec(`INSERT OR IGNORE INTO schema_versions (version, description, applied_at)
+		VALUES (?, 'forensics hash and v0.1 policy/schema metadata', datetime('now'))`, SchemaVersion); err != nil {
+		return fmt.Errorf("record schema version: %w", err)
 	}
 	return nil
 }

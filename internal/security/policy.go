@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/byteyellow/agent-computer-fleet/internal/ids"
+	"gopkg.in/yaml.v3"
 )
 
 type Event struct {
@@ -30,6 +31,7 @@ type Event struct {
 type Decision struct {
 	Decision string `json:"decision"`
 	Reason   string `json:"reason"`
+	RuleID   string `json:"rule_id,omitempty"`
 }
 
 type DecisionRecord struct {
@@ -37,6 +39,7 @@ type DecisionRecord struct {
 	EventID   string
 	RunID     string
 	SessionID string
+	RuleID    string
 	Decision  string
 	Reason    string
 	CreatedAt string
@@ -44,33 +47,139 @@ type DecisionRecord struct {
 
 type Engine struct {
 	SecretPathPatterns []string
+	Rules              []Rule
 }
 
 func DefaultEngine() Engine {
-	return Engine{SecretPathPatterns: []string{".env", "id_rsa", "secret", "credentials"}}
+	return Engine{SecretPathPatterns: []string{".env", "id_rsa", "secret", "credentials"}, Rules: DefaultRules()}
+}
+
+type Rule struct {
+	ID       string    `yaml:"id"`
+	Match    RuleMatch `yaml:"match"`
+	Decision string    `yaml:"decision"`
+	Reason   string    `yaml:"reason"`
+}
+
+type RuleMatch struct {
+	Source       string   `yaml:"source"`
+	EventType    string   `yaml:"event_type"`
+	DstIP        string   `yaml:"dst_ip"`
+	PrivateCIDR  bool     `yaml:"private_cidr"`
+	PathContains []string `yaml:"path_contains"`
+	ArgsContains []string `yaml:"args_contains"`
+}
+
+type RuleFile struct {
+	Rules []Rule `yaml:"rules"`
+}
+
+func DefaultRules() []Rule {
+	return []Rule{
+		{
+			ID:       "metadata_ip_dst",
+			Match:    RuleMatch{DstIP: "169.254.169.254"},
+			Decision: "quarantine",
+			Reason:   "metadata IP access",
+		},
+		{
+			ID:       "metadata_ip_args",
+			Match:    RuleMatch{ArgsContains: []string{"169.254.169.254"}},
+			Decision: "quarantine",
+			Reason:   "metadata IP access",
+		},
+		{
+			ID:       "private_cidr_access",
+			Match:    RuleMatch{PrivateCIDR: true},
+			Decision: "deny",
+			Reason:   "private CIDR access",
+		},
+		{
+			ID:       "secret_path_access",
+			Match:    RuleMatch{PathContains: []string{".env", "id_rsa", "secret", "credentials"}},
+			Decision: "kill",
+			Reason:   "secret path access",
+		},
+	}
+}
+
+func LoadEngine(path string) (Engine, error) {
+	if path == "" {
+		return DefaultEngine(), nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return Engine{}, err
+	}
+	var file RuleFile
+	if err := yaml.Unmarshal(raw, &file); err != nil {
+		return Engine{}, err
+	}
+	engine := Engine{Rules: file.Rules}
+	if len(engine.Rules) == 0 {
+		return Engine{}, fmt.Errorf("policy rule file has no rules")
+	}
+	return engine, nil
 }
 
 func (e Engine) Evaluate(event Event) Decision {
-	if event.DstIP == "169.254.169.254" || strings.Contains(strings.Join(event.Args, " "), "169.254.169.254") {
-		return Decision{Decision: "quarantine", Reason: "metadata IP access"}
-	}
-	if event.DstIP != "" && isPrivateIP(event.DstIP) {
-		return Decision{Decision: "deny", Reason: "private CIDR access"}
-	}
-	for _, pattern := range e.SecretPathPatterns {
-		if strings.Contains(event.Path, pattern) {
-			return Decision{Decision: "kill", Reason: "secret path access"}
+	if len(e.Rules) > 0 {
+		for _, rule := range e.Rules {
+			if rule.Matches(event) {
+				reason := rule.Reason
+				if reason == "" {
+					reason = rule.ID
+				}
+				return Decision{Decision: rule.Decision, Reason: reason, RuleID: rule.ID}
+			}
 		}
 	}
 	return Decision{Decision: "allow", Reason: "no policy matched"}
 }
 
+func (r Rule) Matches(event Event) bool {
+	if r.Match.Source != "" && r.Match.Source != event.Source {
+		return false
+	}
+	if r.Match.EventType != "" && r.Match.EventType != event.EventType {
+		return false
+	}
+	if r.Match.DstIP != "" && event.DstIP != r.Match.DstIP && !strings.Contains(strings.Join(event.Args, " "), r.Match.DstIP) {
+		return false
+	}
+	if r.Match.PrivateCIDR && !isPrivateIP(event.DstIP) {
+		return false
+	}
+	for _, pattern := range r.Match.PathContains {
+		if pattern != "" && strings.Contains(event.Path, pattern) {
+			return true
+		}
+	}
+	if len(r.Match.PathContains) > 0 {
+		return false
+	}
+	joinedArgs := strings.Join(event.Args, " ")
+	for _, pattern := range r.Match.ArgsContains {
+		if pattern != "" && strings.Contains(joinedArgs, pattern) {
+			return true
+		}
+	}
+	if len(r.Match.ArgsContains) > 0 {
+		return false
+	}
+	return r.Match.Source != "" || r.Match.EventType != "" || r.Match.DstIP != "" || r.Match.PrivateCIDR
+}
+
 func EvaluateJSONL(path string, out io.Writer) error {
-	return evaluateJSONL(path, out, nil)
+	return EvaluateJSONLWithEngine(nil, path, out, DefaultEngine())
 }
 
 func EvaluateJSONLWithState(db *sql.DB, path string, out io.Writer) error {
-	return evaluateJSONL(path, out, db)
+	return EvaluateJSONLWithEngine(db, path, out, DefaultEngine())
+}
+
+func EvaluateJSONLWithEngine(db *sql.DB, path string, out io.Writer, engine Engine) error {
+	return evaluateJSONL(path, out, db, engine)
 }
 
 func EvaluateAndPersist(db *sql.DB, event Event, rawPayload string) (DecisionRecord, error) {
@@ -83,7 +192,7 @@ func PersistDecision(db *sql.DB, event Event, rawPayload string, decision Decisi
 }
 
 func ListDecisions(db *sql.DB, runID string) ([]DecisionRecord, error) {
-	query := `SELECT id, COALESCE(event_id, ''), COALESCE(run_id, ''), COALESCE(session_id, ''), decision, reason, created_at
+	query := `SELECT id, COALESCE(event_id, ''), COALESCE(run_id, ''), COALESCE(session_id, ''), COALESCE(rule_id, ''), decision, reason, created_at
 		FROM policy_decisions`
 	args := []any{}
 	if runID != "" {
@@ -99,7 +208,7 @@ func ListDecisions(db *sql.DB, runID string) ([]DecisionRecord, error) {
 	var records []DecisionRecord
 	for rows.Next() {
 		var record DecisionRecord
-		if err := rows.Scan(&record.ID, &record.EventID, &record.RunID, &record.SessionID, &record.Decision, &record.Reason, &record.CreatedAt); err != nil {
+		if err := rows.Scan(&record.ID, &record.EventID, &record.RunID, &record.SessionID, &record.RuleID, &record.Decision, &record.Reason, &record.CreatedAt); err != nil {
 			return nil, err
 		}
 		records = append(records, record)
@@ -107,13 +216,12 @@ func ListDecisions(db *sql.DB, runID string) ([]DecisionRecord, error) {
 	return records, rows.Err()
 }
 
-func evaluateJSONL(path string, out io.Writer, db *sql.DB) error {
+func evaluateJSONL(path string, out io.Writer, db *sql.DB, engine Engine) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	engine := DefaultEngine()
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -130,7 +238,7 @@ func evaluateJSONL(path string, out io.Writer, db *sql.DB) error {
 				return err
 			}
 		}
-		row := map[string]any{"event": event, "decision": decision.Decision, "reason": decision.Reason}
+		row := map[string]any{"event": event, "rule_id": decision.RuleID, "decision": decision.Decision, "reason": decision.Reason}
 		b, _ := json.Marshal(row)
 		fmt.Fprintln(out, string(b))
 	}
@@ -150,12 +258,13 @@ func persistDecision(db *sql.DB, event Event, rawPayload string, decision Decisi
 		EventID:   eventID,
 		RunID:     event.RunID,
 		SessionID: event.SessionID,
+		RuleID:    decision.RuleID,
 		Decision:  decision.Decision,
 		Reason:    decision.Reason,
 		CreatedAt: now,
 	}
-	_, err = db.Exec(`INSERT INTO policy_decisions (id, event_id, run_id, session_id, decision, reason, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`, record.ID, eventID, event.RunID, event.SessionID, decision.Decision, decision.Reason, now)
+	_, err = db.Exec(`INSERT INTO policy_decisions (id, event_id, run_id, session_id, rule_id, decision, reason, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, record.ID, eventID, event.RunID, event.SessionID, decision.RuleID, decision.Decision, decision.Reason, now)
 	if err != nil {
 		return DecisionRecord{}, err
 	}

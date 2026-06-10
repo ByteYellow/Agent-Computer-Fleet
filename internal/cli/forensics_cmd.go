@@ -22,11 +22,11 @@ func forensicsCmd(dataDir *string) *cobra.Command {
 				return err
 			}
 			defer db.Close()
-			path, err := (forensics.Service{DB: db, Paths: paths}).Export(args[0])
+			bundle, err := (forensics.Service{DB: db, Paths: paths}).ExportBundle(args[0])
 			if err != nil {
 				return err
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), path)
+			fmt.Fprintf(cmd.OutOrStdout(), "bundle_id=%s path=%s sha256=%s size_bytes=%d\n", bundle.ID, bundle.Path, bundle.SHA256, bundle.SizeBytes)
 			return nil
 		},
 	}

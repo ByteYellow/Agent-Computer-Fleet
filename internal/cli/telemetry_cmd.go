@@ -9,7 +9,7 @@ import (
 )
 
 func telemetryCmd(dataDir *string) *cobra.Command {
-	var runID, sessionID string
+	var runID, sessionID, eventType, toolCallID string
 	list := &cobra.Command{
 		Use:   "list",
 		Short: "list recorded telemetry events",
@@ -23,7 +23,12 @@ func telemetryCmd(dataDir *string) *cobra.Command {
 				return err
 			}
 			defer db.Close()
-			events, err := telemetry.ListEvents(db, runID, sessionID)
+			events, err := telemetry.ListEventsFiltered(db, telemetry.Filter{
+				RunID:      runID,
+				SessionID:  sessionID,
+				Type:       eventType,
+				ToolCallID: toolCallID,
+			})
 			if err != nil {
 				return err
 			}
@@ -37,6 +42,8 @@ func telemetryCmd(dataDir *string) *cobra.Command {
 	}
 	list.Flags().StringVar(&runID, "run", "", "filter by run id")
 	list.Flags().StringVar(&sessionID, "session", "", "filter by session id")
+	list.Flags().StringVar(&eventType, "type", "", "filter by event type")
+	list.Flags().StringVar(&toolCallID, "tool-call", "", "filter by tool call id")
 	cmd := &cobra.Command{Use: "telemetry", Short: "telemetry inspection commands"}
 	cmd.AddCommand(list)
 	return cmd

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/byteyellow/agent-computer-fleet/internal/ids"
@@ -31,6 +32,28 @@ type ForkResult struct {
 	ForkMS        int64
 }
 
+type SnapshotInfo struct {
+	ID               string
+	Name             string
+	SessionID        string
+	ParentID         string
+	Kind             string
+	Source           string
+	Path             string
+	ManifestHash     string
+	FileCount        int64
+	Bytes            int64
+	SnapshotCreateMS int64
+	Status           string
+	CreatedAt        string
+}
+
+type StackResult struct {
+	TemplateSnapshotID string
+	ReadySnapshotID    string
+	Attempt            ForkResult
+}
+
 func (s Service) CreateDirectorySnapshot(sessionID, workspacePath, name string) (string, Manifest, int64, error) {
 	if workspacePath != "/workspace" {
 		return "", Manifest{}, 0, fmt.Errorf("only /workspace directory snapshots are supported in MVP")
@@ -51,14 +74,63 @@ func (s Service) CreateDirectorySnapshot(sessionID, workspacePath, name string) 
 		return "", Manifest{}, 0, err
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err = s.DB.Exec(`INSERT INTO snapshots (id, name, session_id, path, manifest_hash, file_count, bytes, snapshot_create_ms, status, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?)`, snapshotID, name, sessionID, dst, manifest.Hash, manifest.Files, manifest.Bytes, snapshotCreateMS, now)
+	_, err = s.DB.Exec(`INSERT INTO snapshots (id, name, session_id, kind, source, path, manifest_hash, file_count, bytes, snapshot_create_ms, status, created_at)
+		VALUES (?, ?, ?, 'ready', 'session', ?, ?, ?, ?, ?, 'ready', ?)`, snapshotID, name, sessionID, dst, manifest.Hash, manifest.Files, manifest.Bytes, snapshotCreateMS, now)
 	if err != nil {
 		return "", Manifest{}, 0, err
 	}
 	_, _ = s.DB.Exec(`INSERT INTO cost_samples (id, run_id, session_id, snapshot_bytes, wall_seconds, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)`, ids.New("cost"), runID, sessionID, manifest.Bytes, float64(snapshotCreateMS)/1000, now)
 	return snapshotID, manifest, snapshotCreateMS, nil
+}
+
+func (s Service) CreateStack(taskPath string) (StackResult, error) {
+	templateID := ids.New("tmpl")
+	templateDir := filepath.Join(s.Paths.Snapshots, templateID)
+	if err := os.MkdirAll(templateDir, 0o755); err != nil {
+		return StackResult{}, err
+	}
+	taskBytes, err := os.ReadFile(taskPath)
+	if err != nil {
+		return StackResult{}, err
+	}
+	if err := os.WriteFile(filepath.Join(templateDir, "task.yaml"), taskBytes, 0o644); err != nil {
+		return StackResult{}, err
+	}
+	templateManifest, err := BuildManifest(templateDir)
+	if err != nil {
+		return StackResult{}, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = s.DB.Exec(`INSERT INTO snapshots (id, name, kind, source, path, manifest_hash, file_count, bytes, status, created_at)
+		VALUES (?, 'template', 'template', ?, ?, ?, ?, ?, 'ready', ?)`, templateID, taskPath, templateDir, templateManifest.Hash, templateManifest.Files, templateManifest.Bytes, now)
+	if err != nil {
+		return StackResult{}, err
+	}
+
+	readyID := ids.New("snap")
+	readyDir := filepath.Join(s.Paths.Snapshots, readyID)
+	if err := CopyDir(templateDir, readyDir); err != nil {
+		return StackResult{}, err
+	}
+	if err := os.WriteFile(filepath.Join(readyDir, "STACK_READY"), []byte("ready\n"), 0o644); err != nil {
+		return StackResult{}, err
+	}
+	readyManifest, err := BuildManifest(readyDir)
+	if err != nil {
+		return StackResult{}, err
+	}
+	now = time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = s.DB.Exec(`INSERT INTO snapshots (id, name, parent_id, kind, source, path, manifest_hash, file_count, bytes, status, created_at)
+		VALUES (?, 'ready', ?, 'ready', ?, ?, ?, ?, ?, 'ready', ?)`, readyID, templateID, "stack:"+taskPath, readyDir, readyManifest.Hash, readyManifest.Files, readyManifest.Bytes, now)
+	if err != nil {
+		return StackResult{}, err
+	}
+	attempts, err := s.Fork(readyID, 1)
+	if err != nil {
+		return StackResult{}, err
+	}
+	return StackResult{TemplateSnapshotID: templateID, ReadySnapshotID: readyID, Attempt: attempts[0]}, nil
 }
 
 func (s Service) Fork(snapshotNameOrID string, count int) ([]ForkResult, error) {
@@ -87,6 +159,49 @@ func (s Service) Fork(snapshotNameOrID string, count int) ([]ForkResult, error) 
 		results = append(results, ForkResult{AttemptID: attemptID, WorkspacePath: dst, ForkMS: forkMS})
 	}
 	return results, nil
+}
+
+func (s Service) ListSnapshots() ([]SnapshotInfo, error) {
+	rows, err := s.DB.Query(`SELECT id, COALESCE(name, ''), COALESCE(session_id, ''), COALESCE(parent_id, ''),
+		kind, source, path, manifest_hash, file_count, bytes, snapshot_create_ms, status, created_at
+		FROM snapshots ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var snapshots []SnapshotInfo
+	for rows.Next() {
+		var snapshot SnapshotInfo
+		if err := rows.Scan(&snapshot.ID, &snapshot.Name, &snapshot.SessionID, &snapshot.ParentID, &snapshot.Kind, &snapshot.Source, &snapshot.Path, &snapshot.ManifestHash, &snapshot.FileCount, &snapshot.Bytes, &snapshot.SnapshotCreateMS, &snapshot.Status, &snapshot.CreatedAt); err != nil {
+			return nil, err
+		}
+		snapshots = append(snapshots, snapshot)
+	}
+	return snapshots, rows.Err()
+}
+
+func (s Service) InspectSnapshot(snapshotNameOrID string) (SnapshotInfo, []SnapshotInfo, error) {
+	var snapshot SnapshotInfo
+	err := s.DB.QueryRow(`SELECT id, COALESCE(name, ''), COALESCE(session_id, ''), COALESCE(parent_id, ''),
+		kind, source, path, manifest_hash, file_count, bytes, snapshot_create_ms, status, created_at
+		FROM snapshots WHERE id = ? OR name = ? ORDER BY created_at DESC LIMIT 1`, snapshotNameOrID, snapshotNameOrID).Scan(&snapshot.ID, &snapshot.Name, &snapshot.SessionID, &snapshot.ParentID, &snapshot.Kind, &snapshot.Source, &snapshot.Path, &snapshot.ManifestHash, &snapshot.FileCount, &snapshot.Bytes, &snapshot.SnapshotCreateMS, &snapshot.Status, &snapshot.CreatedAt)
+	if err != nil {
+		return SnapshotInfo{}, nil, err
+	}
+	lineage := []SnapshotInfo{snapshot}
+	parentID := snapshot.ParentID
+	for strings.TrimSpace(parentID) != "" {
+		var parent SnapshotInfo
+		err := s.DB.QueryRow(`SELECT id, COALESCE(name, ''), COALESCE(session_id, ''), COALESCE(parent_id, ''),
+			kind, source, path, manifest_hash, file_count, bytes, snapshot_create_ms, status, created_at
+			FROM snapshots WHERE id = ?`, parentID).Scan(&parent.ID, &parent.Name, &parent.SessionID, &parent.ParentID, &parent.Kind, &parent.Source, &parent.Path, &parent.ManifestHash, &parent.FileCount, &parent.Bytes, &parent.SnapshotCreateMS, &parent.Status, &parent.CreatedAt)
+		if err != nil {
+			break
+		}
+		lineage = append(lineage, parent)
+		parentID = parent.ParentID
+	}
+	return snapshot, lineage, nil
 }
 
 func CopyDir(src, dst string) error {

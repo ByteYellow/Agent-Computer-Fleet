@@ -34,7 +34,12 @@ session_id=$(./acfctl session create --lease "$lease_id")
 ./acfctl exec "$session_id" --stream -- sh -lc 'echo hello > hello.txt'
 
 ./acfctl snapshot create "$session_id" --type directory --path /workspace --name ready
+./acfctl snapshot list
+./acfctl snapshot inspect ready
 ./acfctl fork ready --count 3
+./acfctl attempt best-of --snapshot ready \
+  --strategy "pass::test -f hello.txt" \
+  --strategy "fail::test -f missing.txt"
 
 ./acfctl policy test examples/events/metadata-egress.jsonl
 ./acfctl policy decisions --run run-demo-bugfix
@@ -62,7 +67,11 @@ acfctl exec <session_id> --stream -- <command...>
 acfctl process interrupt <process_id>
 acfctl port expose <session_id> <port>
 acfctl snapshot create <session_id> --type directory --path /workspace --name ready
+acfctl snapshot stack --task examples/tasks/bugfix.yaml
+acfctl snapshot list
+acfctl snapshot inspect <snapshot_name_or_id>
 acfctl fork ready --count 3
+acfctl attempt best-of --snapshot ready --strategy "name::command"
 acfctl policy test examples/events/metadata-egress.jsonl
 acfctl policy decisions --run <run_id>
 acfctl cost show <run_id>

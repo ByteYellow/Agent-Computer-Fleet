@@ -17,7 +17,10 @@ acfctl session inspect <session_id>
 acfctl exec <session_id> --stream -- go version
 acfctl exec <session_id> --stream -- sh -lc 'echo hello > hello.txt'
 acfctl snapshot create <session_id> --type directory --path /workspace --name ready
+acfctl snapshot list
+acfctl snapshot inspect ready
 acfctl fork ready --count 2
+acfctl attempt best-of --snapshot ready --strategy "pass::test -f hello.txt" --strategy "fail::test -f missing.txt"
 acfctl policy test examples/events/metadata-egress.jsonl
 acfctl policy decisions --run run-demo-bugfix
 acfctl cost show run-demo-bugfix
@@ -39,12 +42,38 @@ acfctl exec "$session_id" --stream -- go version
 ```sh
 acfctl exec "$session_id" --stream -- sh -lc 'echo base > hello.txt'
 acfctl snapshot create "$session_id" --type directory --path /workspace --name ready
+acfctl snapshot list
+acfctl snapshot inspect ready
 acfctl fork ready --count 3
 ```
 
 Each forked attempt prints an `attempt_id`, workspace path, and `fork_ms`.
 Modify files under one attempt workspace and verify the other attempt workspaces
 do not change.
+
+### demo_snapshot_stack
+
+```sh
+acfctl snapshot stack --task examples/tasks/bugfix.yaml
+acfctl snapshot list
+acfctl snapshot inspect <ready_snapshot_id>
+```
+
+This records `template -> ready snapshot -> attempt workspace` lineage. Use
+`snapshot inspect <snapshot_id>` to see kind, parent, manifest hash, status, and
+storage bytes.
+
+### demo_best_of_forks
+
+```sh
+acfctl attempt best-of --snapshot ready \
+  --strategy "pass::test -f hello.txt" \
+  --strategy "fail::test -f missing.txt"
+```
+
+The command forks one workspace per strategy, executes each command in its own
+attempt workspace, records exit code, wall time, output summary, score, and
+marks the winning attempt.
 
 ### demo_metadata_egress_quarantine
 

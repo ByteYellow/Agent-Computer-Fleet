@@ -36,7 +36,20 @@ echo "== demo_streaming_terminal"
 
 echo "== demo_snapshot_fanout"
 "$BIN" --data-dir "$DATA_DIR" snapshot create "$SESSION_ID" --type directory --path /workspace --name ready
+"$BIN" --data-dir "$DATA_DIR" snapshot list
+"$BIN" --data-dir "$DATA_DIR" snapshot inspect ready
 "$BIN" --data-dir "$DATA_DIR" fork ready --count 3
+
+echo "== demo_best_of_forks"
+"$BIN" --data-dir "$DATA_DIR" attempt best-of --snapshot ready \
+  --strategy "pass::test -f hello.txt" \
+  --strategy "fail::test -f missing.txt"
+
+echo "== demo_snapshot_stack"
+STACK_OUTPUT="$("$BIN" --data-dir "$DATA_DIR" snapshot stack --task examples/tasks/bugfix.yaml)"
+echo "$STACK_OUTPUT"
+STACK_READY="$(echo "$STACK_OUTPUT" | awk -F= '/^ready_snapshot=/{print $2}')"
+"$BIN" --data-dir "$DATA_DIR" snapshot inspect "$STACK_READY"
 
 echo "== demo_metadata_egress_quarantine"
 "$BIN" --data-dir "$DATA_DIR" policy test examples/events/metadata-egress.jsonl

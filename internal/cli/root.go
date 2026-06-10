@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"text/tabwriter"
 
+	"github.com/byteyellow/agent-computer-fleet/internal/attempt"
 	"github.com/byteyellow/agent-computer-fleet/internal/control"
 	"github.com/byteyellow/agent-computer-fleet/internal/economics"
 	"github.com/byteyellow/agent-computer-fleet/internal/node"
@@ -29,6 +30,7 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(portCmd(&dataDir))
 	root.AddCommand(snapshotCmd(&dataDir))
 	root.AddCommand(forkCmd(&dataDir))
+	root.AddCommand(attemptCmd(&dataDir))
 	root.AddCommand(policyCmd(&dataDir))
 	root.AddCommand(costCmd(&dataDir))
 	root.AddCommand(benchCmd())
@@ -322,8 +324,87 @@ func snapshotCmd(dataDir *string) *cobra.Command {
 	create.Flags().StringVar(&typ, "type", "directory", "snapshot type")
 	create.Flags().StringVar(&path, "path", "/workspace", "path inside sandbox")
 	create.Flags().StringVar(&name, "name", "", "snapshot name")
+	var taskPath string
+	stack := &cobra.Command{
+		Use:   "stack",
+		Short: "build a template -> ready snapshot -> attempt workspace stack",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			paths, err := store.Init(*dataDir)
+			if err != nil {
+				return err
+			}
+			db, err := store.Open(paths)
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+			result, err := state.Service{DB: db, Paths: paths}.CreateStack(taskPath)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "template_snapshot=%s\nready_snapshot=%s\nattempt_id=%s workspace=%s fork_ms=%d\n", result.TemplateSnapshotID, result.ReadySnapshotID, result.Attempt.AttemptID, result.Attempt.WorkspacePath, result.Attempt.ForkMS)
+			return nil
+		},
+	}
+	stack.Flags().StringVar(&taskPath, "task", "", "task yaml path")
+	_ = stack.MarkFlagRequired("task")
+	list := &cobra.Command{
+		Use:   "list",
+		Short: "list snapshots with lineage metadata",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			paths, err := store.Init(*dataDir)
+			if err != nil {
+				return err
+			}
+			db, err := store.Open(paths)
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+			snapshots, err := state.Service{DB: db, Paths: paths}.ListSnapshots()
+			if err != nil {
+				return err
+			}
+			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "ID\tNAME\tKIND\tPARENT\tSTATUS\tFILES\tBYTES\tHASH")
+			for _, snapshot := range snapshots {
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\n", snapshot.ID, snapshot.Name, snapshot.Kind, short(snapshot.ParentID), snapshot.Status, snapshot.FileCount, snapshot.Bytes, short(snapshot.ManifestHash))
+			}
+			return w.Flush()
+		},
+	}
+	inspect := &cobra.Command{
+		Use:   "inspect <snapshot_name_or_id>",
+		Short: "inspect snapshot manifest, taint status, and lineage",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			paths, err := store.Init(*dataDir)
+			if err != nil {
+				return err
+			}
+			db, err := store.Open(paths)
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+			snapshot, lineage, err := state.Service{DB: db, Paths: paths}.InspectSnapshot(args[0])
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "id=%s\nname=%s\nkind=%s\nsource=%s\nparent_id=%s\nsession_id=%s\nstatus=%s\nfiles=%d\nbytes=%d\nmanifest_hash=%s\nsnapshot_create_ms=%d\npath=%s\ncreated_at=%s\n",
+				snapshot.ID, snapshot.Name, snapshot.Kind, snapshot.Source, snapshot.ParentID, snapshot.SessionID, snapshot.Status, snapshot.FileCount, snapshot.Bytes, snapshot.ManifestHash, snapshot.SnapshotCreateMS, snapshot.Path, snapshot.CreatedAt)
+			fmt.Fprintln(cmd.OutOrStdout(), "lineage:")
+			for i, item := range lineage {
+				fmt.Fprintf(cmd.OutOrStdout(), "  %d. id=%s kind=%s name=%s status=%s bytes=%d\n", i+1, item.ID, item.Kind, item.Name, item.Status, item.Bytes)
+			}
+			return nil
+		},
+	}
 	cmd := &cobra.Command{Use: "snapshot", Short: "snapshot operations"}
 	cmd.AddCommand(create)
+	cmd.AddCommand(stack)
+	cmd.AddCommand(list)
+	cmd.AddCommand(inspect)
 	return cmd
 }
 
@@ -354,6 +435,52 @@ func forkCmd(dataDir *string) *cobra.Command {
 		},
 	}
 	cmd.Flags().IntVar(&count, "count", 1, "number of prepared workspaces")
+	return cmd
+}
+
+func attemptCmd(dataDir *string) *cobra.Command {
+	var snapshot string
+	var strategies []string
+	bestOf := &cobra.Command{
+		Use:   "best-of",
+		Short: "fork attempts from one snapshot, execute strategies, and choose a winner",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			paths, err := store.Init(*dataDir)
+			if err != nil {
+				return err
+			}
+			db, err := store.Open(paths)
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+			service := attempt.Service{DB: db, State: state.Service{DB: db, Paths: paths}}
+			results, winner, err := service.BestOf(snapshot, strategies)
+			if err != nil {
+				return err
+			}
+			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "ATTEMPT\tSTRATEGY\tSTATUS\tEXIT\tWALL_MS\tSCORE\tWINNER\tOUTPUT")
+			for _, result := range results {
+				winnerMark := ""
+				if result.IsWinner {
+					winnerMark = "yes"
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%.3f\t%s\t%s\n", result.AttemptID, result.Strategy, result.Status, result.ExitCode, result.WallMS, result.Score, winnerMark, result.OutputSummary)
+			}
+			if err := w.Flush(); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "winner=%s strategy=%s workspace=%s score=%.3f\n", winner.AttemptID, winner.Strategy, winner.WorkspacePath, winner.Score)
+			return nil
+		},
+	}
+	bestOf.Flags().StringVar(&snapshot, "snapshot", "", "snapshot name or id")
+	bestOf.Flags().StringArrayVar(&strategies, "strategy", nil, "strategy in name::command form; repeat for multiple attempts")
+	_ = bestOf.MarkFlagRequired("snapshot")
+	_ = bestOf.MarkFlagRequired("strategy")
+	cmd := &cobra.Command{Use: "attempt", Short: "attempt execution and selection commands"}
+	cmd.AddCommand(bestOf)
 	return cmd
 }
 

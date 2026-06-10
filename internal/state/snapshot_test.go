@@ -64,6 +64,41 @@ func TestCreateSnapshotAndForkWorkspaces(t *testing.T) {
 	}
 }
 
+func TestCreateStackRecordsLineage(t *testing.T) {
+	root := t.TempDir()
+	paths, err := store.Init(filepath.Join(root, ".acf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	taskPath := filepath.Join(root, "task.yaml")
+	if err := os.WriteFile(taskPath, []byte("run_id: run-test\nimage: alpine:3.20\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Service{DB: db, Paths: paths}.CreateStack(taskPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TemplateSnapshotID == "" || result.ReadySnapshotID == "" || result.Attempt.AttemptID == "" {
+		t.Fatalf("unexpected stack result: %+v", result)
+	}
+	ready, lineage, err := Service{DB: db, Paths: paths}.InspectSnapshot(result.ReadySnapshotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready.Kind != "ready" || ready.ParentID != result.TemplateSnapshotID || ready.Bytes == 0 {
+		t.Fatalf("unexpected ready snapshot: %+v", ready)
+	}
+	if len(lineage) != 2 || lineage[1].Kind != "template" {
+		t.Fatalf("lineage = %+v, want ready -> template", lineage)
+	}
+}
+
 func insertSession(t *testing.T, db *sql.DB, workspace string) {
 	t.Helper()
 	now := time.Now().UTC().Format(time.RFC3339Nano)

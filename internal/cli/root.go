@@ -366,9 +366,9 @@ func snapshotCmd(dataDir *string) *cobra.Command {
 				return err
 			}
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "ID\tNAME\tKIND\tPARENT\tSTATUS\tFILES\tBYTES\tHASH")
+			fmt.Fprintln(w, "ID\tNAME\tKIND\tPARENT\tSTATUS\tTAINTED\tFILES\tBYTES\tHASH")
 			for _, snapshot := range snapshots {
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\n", snapshot.ID, snapshot.Name, snapshot.Kind, short(snapshot.ParentID), snapshot.Status, snapshot.FileCount, snapshot.Bytes, short(snapshot.ManifestHash))
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%t\t%d\t%d\t%s\n", snapshot.ID, snapshot.Name, snapshot.Kind, short(snapshot.ParentID), snapshot.Status, snapshot.Status == "tainted", snapshot.FileCount, snapshot.Bytes, short(snapshot.ManifestHash))
 			}
 			return w.Flush()
 		},
@@ -391,8 +391,8 @@ func snapshotCmd(dataDir *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "id=%s\nname=%s\nkind=%s\nsource=%s\nparent_id=%s\nsession_id=%s\nstatus=%s\nfiles=%d\nbytes=%d\nmanifest_hash=%s\nsnapshot_create_ms=%d\npath=%s\ncreated_at=%s\n",
-				snapshot.ID, snapshot.Name, snapshot.Kind, snapshot.Source, snapshot.ParentID, snapshot.SessionID, snapshot.Status, snapshot.FileCount, snapshot.Bytes, snapshot.ManifestHash, snapshot.SnapshotCreateMS, snapshot.Path, snapshot.CreatedAt)
+			fmt.Fprintf(cmd.OutOrStdout(), "id=%s\nname=%s\nkind=%s\nsource=%s\nparent_id=%s\nsession_id=%s\nstatus=%s\ntainted=%t\nfiles=%d\nbytes=%d\nmanifest_hash=%s\nsnapshot_create_ms=%d\npath=%s\ncreated_at=%s\n",
+				snapshot.ID, snapshot.Name, snapshot.Kind, snapshot.Source, snapshot.ParentID, snapshot.SessionID, snapshot.Status, snapshot.Status == "tainted", snapshot.FileCount, snapshot.Bytes, snapshot.ManifestHash, snapshot.SnapshotCreateMS, snapshot.Path, snapshot.CreatedAt)
 			fmt.Fprintln(cmd.OutOrStdout(), "lineage:")
 			for i, item := range lineage {
 				fmt.Fprintf(cmd.OutOrStdout(), "  %d. id=%s kind=%s name=%s status=%s bytes=%d\n", i+1, item.ID, item.Kind, item.Name, item.Status, item.Bytes)

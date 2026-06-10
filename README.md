@@ -226,6 +226,23 @@ the stable first interface.
   reads node capacity, active sessions, memory pressure, warm pool signals, and
   snapshot locality.
 
+## Runtime driver capabilities
+
+Runtime backends are capability-gated. `acfctl runtime list` and
+`acfctl runtime inspect <backend>` report what each backend can actually do
+instead of presenting planned adapters as usable.
+
+| Backend | Exec | Stop | Snapshot | Fork | Resume | Memory snapshot | Status |
+|---|---:|---:|---:|---:|---:|---:|---|
+| Docker | yes | yes | directory | directory | directory | no | active |
+| gVisor | no | no | no | no | no | no | planned stub |
+| Firecracker | no | no | no | no | no | no | planned stub |
+| bubblewrap | no | no | no | no | no | no | planned stub |
+
+The Docker driver implements directory-level snapshot, fork, and resume by
+copying workspace state and then creating a new running session. Memory-level
+snapshot/restore is intentionally left false until a VM-capable backend exists.
+
 ## Current boundaries
 
 - Docker is the only fully active runtime backend today.

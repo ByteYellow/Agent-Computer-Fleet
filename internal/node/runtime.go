@@ -9,6 +9,9 @@ type CreateSessionRequest struct {
 	MemoryMB          int64
 	CPURequest        float64
 	NetworkMode       string
+	ProxyURL          string
+	NoProxy           string
+	DockerNetworkName string
 }
 
 type Runtime interface {

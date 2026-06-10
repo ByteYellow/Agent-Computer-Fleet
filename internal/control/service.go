@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/byteyellow/agent-computer-fleet/internal/economics"
+	"github.com/byteyellow/agent-computer-fleet/internal/egress"
 	"github.com/byteyellow/agent-computer-fleet/internal/ids"
 	"github.com/byteyellow/agent-computer-fleet/internal/node"
 	"github.com/byteyellow/agent-computer-fleet/internal/store"
@@ -66,6 +67,13 @@ func (s Service) CreateSession(leaseID string) (string, error) {
 	if err := s.admit(task); err != nil {
 		return "", err
 	}
+	var egressProxy egress.ProxyInfo
+	if _, ok := s.Runtime.(*node.DockerRuntime); ok {
+		egressProxy, err = (egress.Service{DB: s.DB, Paths: s.Paths}).EnsureSessionProxy(runID, sessionID)
+		if err != nil {
+			return "", err
+		}
+	}
 	start := time.Now()
 	containerID, err := s.Runtime.CreateSession(node.CreateSessionRequest{
 		SessionID:         sessionID,
@@ -76,6 +84,9 @@ func (s Service) CreateSession(leaseID string) (string, error) {
 		MemoryMB:          task.MemoryMB,
 		CPURequest:        task.CPURequest,
 		NetworkMode:       task.NetworkMode,
+		ProxyURL:          egressProxy.ContainerProxyURL,
+		NoProxy:           "localhost,127.0.0.1,::1",
+		DockerNetworkName: egressProxy.NetworkName,
 	})
 	if err != nil {
 		return "", err
@@ -183,6 +194,7 @@ func (s Service) StopSession(sessionID string) error {
 			return err
 		}
 	}
+	_ = (egress.Service{DB: s.DB, Paths: s.Paths}).CloseForSession(sessionID)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err = s.DB.Exec(`UPDATE sessions SET status = 'stopped', updated_at = ? WHERE id = ?`, now, sessionID)
 	return err
@@ -198,6 +210,7 @@ func (s Service) RemoveSession(sessionID string) error {
 			return err
 		}
 	}
+	_ = (egress.Service{DB: s.DB, Paths: s.Paths}).CloseForSession(sessionID)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err = s.DB.Exec(`UPDATE sessions SET status = 'removed', container_id = '', updated_at = ? WHERE id = ?`, now, sessionID)
 	return err

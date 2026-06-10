@@ -19,7 +19,7 @@ Current focus:
 - Directory snapshot, fork, template lineage, and best-of-forks
 - Runtime telemetry, policy decisions, provenance trace, and forensics bundle
 - Active CPU cost sampling, conservative admission model, and warm pool signals
-- Extension points for gVisor, Firecracker, bubblewrap, egress proxy, and
+- Extension points for gVisor, Firecracker, bubblewrap, stronger egress isolation, and
   multi-node scheduling
 
 ## Why
@@ -97,6 +97,7 @@ Run focused demos:
 ./scripts/demo_snapshot_fanout.sh
 ./scripts/demo_best_of_forks.sh
 ./scripts/demo_policy_quarantine.sh
+./scripts/demo_egress_proxy.sh
 ./scripts/demo_cost_accounting.sh
 ./scripts/demo_provenance_trace.sh
 ```
@@ -168,8 +169,10 @@ Runtime and egress extension points:
 ```sh
 acfctl runtime list
 acfctl runtime inspect docker
+acfctl egress start
+acfctl egress allow example.com
 acfctl egress check --run <run_id> --session <session_id> --dst-ip 169.254.169.254
-acfctl credential inject --run <run_id> --session <session_id> --name github-token --host api.github.com
+acfctl credential inject --run <run_id> --session <session_id> --name github-token --host api.github.com --value <secret>
 ```
 
 ## What Works Now
@@ -184,6 +187,12 @@ acfctl credential inject --run <run_id> --session <session_id> --name github-tok
 - Structured API calls produce telemetry and policy decisions.
 - Metadata IP and secret-path events can trigger quarantine or kill decisions in
   the MVP enforcement path.
+- Docker sandbox sessions get a session-scoped internal bridge network and an
+  egress proxy sidecar. Proxy-aware HTTP/HTTPS clients route through the sidecar;
+  direct egress from the sandbox network is blocked. The proxy records
+  `network_connect`/`network_deny`, applies host allowlist and metadata/private
+  IP policy, and injects configured credentials without storing raw secrets in
+  SQLite or telemetry payloads.
 - Forensics bundles can export run evidence.
 - Docker stats can be sampled into run cost metrics.
 
@@ -194,8 +203,9 @@ acfctl credential inject --run <run_id> --session <session_id> --name github-tok
   complete adapters.
 - Snapshot support is directory-level only; memory snapshot/resume is not
   implemented.
-- The egress proxy is currently a policy/telemetry path, not a mandatory network
-  chokepoint for all sandbox traffic.
+- The Docker egress sidecar blocks direct outbound traffic from the sandbox
+  bridge, but it is still HTTP/HTTPS proxy enforcement, not a general raw TCP
+  policy engine for arbitrary protocols.
 - The node registry captures scheduling signals, but there is no distributed
   scheduler yet.
 - Baseline detection is MVP-level event/cost counting, not syscall ML or eBPF
@@ -205,7 +215,7 @@ acfctl credential inject --run <run_id> --session <session_id> --name github-tok
 
 Near term:
 
-- Mandatory egress proxy and real credential injection
+- Raw TCP policy enforcement for non-HTTP protocols
 - Daemon/API server behind `acfctl`
 - Continuous Docker stats/cgroup sampler
 - YAML policy rule engine

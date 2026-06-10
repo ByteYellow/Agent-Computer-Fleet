@@ -19,6 +19,7 @@ type Paths struct {
 	Snapshots  string
 	Templates  string
 	Artifacts  string
+	Secrets    string
 	Logs       string
 }
 
@@ -36,13 +37,14 @@ func ResolvePaths(root string) Paths {
 		Snapshots:  filepath.Join(root, "snapshots"),
 		Templates:  filepath.Join(root, "templates"),
 		Artifacts:  filepath.Join(root, "artifacts"),
+		Secrets:    filepath.Join(root, "secrets"),
 		Logs:       filepath.Join(root, "logs"),
 	}
 }
 
 func Init(root string) (Paths, error) {
 	paths := ResolvePaths(root)
-	for _, dir := range []string{paths.Root, paths.Workspaces, paths.Snapshots, paths.Templates, paths.Artifacts, paths.Logs} {
+	for _, dir := range []string{paths.Root, paths.Workspaces, paths.Snapshots, paths.Templates, paths.Artifacts, paths.Secrets, paths.Logs} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return paths, err
 		}
@@ -237,6 +239,34 @@ func EnsureSchema(db *sql.DB) error {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);`,
+		`CREATE TABLE IF NOT EXISTS egress_proxies (
+			id TEXT PRIMARY KEY,
+			run_id TEXT NOT NULL DEFAULT '',
+			session_id TEXT NOT NULL DEFAULT '',
+			host_port INTEGER NOT NULL,
+			proxy_url TEXT NOT NULL,
+			container_proxy_url TEXT NOT NULL,
+			mode TEXT NOT NULL DEFAULT 'host',
+			network_name TEXT NOT NULL DEFAULT '',
+			container_id TEXT NOT NULL DEFAULT '',
+			pid INTEGER NOT NULL DEFAULT 0,
+			status TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS egress_allowlist (
+			host TEXT PRIMARY KEY,
+			created_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS egress_credentials (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			host TEXT NOT NULL,
+			path_prefix TEXT NOT NULL DEFAULT '/',
+			header_name TEXT NOT NULL,
+			secret_ref TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		);`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
@@ -261,6 +291,11 @@ func EnsureSchema(db *sql.DB) error {
 		`ALTER TABLE events ADD COLUMN tool_call_id TEXT NOT NULL DEFAULT '';`,
 		`ALTER TABLE events ADD COLUMN process_id TEXT NOT NULL DEFAULT '';`,
 		`ALTER TABLE events ADD COLUMN snapshot_id TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE egress_proxies ADD COLUMN run_id TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE egress_proxies ADD COLUMN session_id TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE egress_proxies ADD COLUMN mode TEXT NOT NULL DEFAULT 'host';`,
+		`ALTER TABLE egress_proxies ADD COLUMN network_name TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE egress_proxies ADD COLUMN container_id TEXT NOT NULL DEFAULT '';`,
 	}
 	for _, stmt := range alterStmts {
 		if _, err := db.Exec(stmt); err != nil && !isDuplicateColumn(err) {

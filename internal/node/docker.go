@@ -49,6 +49,9 @@ func (r *DockerRuntime) CreateSession(req CreateSessionRequest) (string, error) 
 			Target: "/workspace",
 		}},
 	}
+	if req.DockerNetworkName != "" {
+		hostCfg.NetworkMode = container.NetworkMode(req.DockerNetworkName)
+	}
 	if req.MemoryMB > 0 {
 		hostCfg.Resources.Memory = req.MemoryMB * 1024 * 1024
 	}
@@ -58,6 +61,7 @@ func (r *DockerRuntime) CreateSession(req CreateSessionRequest) (string, error) 
 		Tty:        false,
 		OpenStdin:  true,
 		Cmd:        []string{"sleep", "infinity"},
+		Env:        proxyEnv(req.ProxyURL, req.NoProxy),
 		Labels: map[string]string{
 			"acf.session_id": req.SessionID,
 			"acf.lease_id":   req.LeaseID,
@@ -139,6 +143,26 @@ func (r *DockerRuntime) Remove(containerID string) error {
 		return nil
 	}
 	return err
+}
+
+func proxyEnv(proxyURL, noProxy string) []string {
+	if proxyURL == "" {
+		return nil
+	}
+	if noProxy == "" {
+		noProxy = "localhost,127.0.0.1,::1"
+	}
+	return []string{
+		"HTTP_PROXY=" + proxyURL,
+		"http_proxy=" + proxyURL,
+		"HTTPS_PROXY=" + proxyURL,
+		"https_proxy=" + proxyURL,
+		"ALL_PROXY=" + proxyURL,
+		"all_proxy=" + proxyURL,
+		"NO_PROXY=" + noProxy,
+		"no_proxy=" + noProxy,
+		"ACF_EGRESS_PROXY=" + proxyURL,
+	}
 }
 
 func isNoSuchImage(err error) bool {

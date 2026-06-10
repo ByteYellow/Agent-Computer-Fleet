@@ -111,6 +111,7 @@ marks the winning attempt.
 
 ```sh
 ./scripts/demo_policy_quarantine.sh
+./scripts/demo_egress_proxy.sh
 ```
 
 Equivalent manual flow:
@@ -122,6 +123,17 @@ acfctl policy decisions --run run-demo-bugfix
 
 The metadata IP event produces a `quarantine` decision and marks the local
 session as quarantined.
+
+### demo_egress_proxy
+
+```sh
+./scripts/demo_egress_proxy.sh
+```
+
+This starts a Docker session on a session-scoped internal bridge network with an
+acf egress proxy sidecar, adds `example.com` to the allowlist, verifies an
+allowed HTTP request through the sidecar, verifies direct egress bypass failure,
+verifies metadata IP denial, and records a redacted credential injection event.
 
 ### demo_cost_per_run
 
@@ -174,5 +186,8 @@ admitted using `active_cpu_request + idle_cpu_request * idle_discount`.
 - Docker must be running for `session`, `exec`, and `process` commands.
 - Directory snapshots are supported; memory snapshots are intentionally not.
 - `port expose` is an HTTP preview proxy, not a raw TCP tunnel.
+- Egress control currently covers HTTP/HTTPS proxy workflows and blocks direct
+  outbound traffic from the Docker sandbox bridge. Raw TCP protocol policy is
+  still a follow-up.
 - The node registry is local metadata. Multi-node scheduling is still a
   follow-up.

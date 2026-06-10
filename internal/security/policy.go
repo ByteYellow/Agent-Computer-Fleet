@@ -78,6 +78,10 @@ func EvaluateAndPersist(db *sql.DB, event Event, rawPayload string) (DecisionRec
 	return persistDecision(db, event, rawPayload, decision)
 }
 
+func PersistDecision(db *sql.DB, event Event, rawPayload string, decision Decision) (DecisionRecord, error) {
+	return persistDecision(db, event, rawPayload, decision)
+}
+
 func ListDecisions(db *sql.DB, runID string) ([]DecisionRecord, error) {
 	query := `SELECT id, COALESCE(event_id, ''), COALESCE(run_id, ''), COALESCE(session_id, ''), decision, reason, created_at
 		FROM policy_decisions`

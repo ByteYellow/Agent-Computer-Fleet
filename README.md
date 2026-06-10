@@ -74,6 +74,39 @@ network decision, snapshot, artifact, and cost sample can all be tied back to
 ./acfctl fork ready --count 3
 ```
 
+## Why this exists
+
+Modern agent workloads are turning sandboxes into a scheduling and observability
+problem, not just an execution problem. Evaluation, RL rollouts, best-of-N
+sampling, self-repair loops, and tool-using agents can create thousands of
+short-lived computers that spend most of their wall time waiting on I/O, model
+latency, package installs, tests, or external services. Treating each attempt as
+a full-price container leaves a large resource gap: CPU is reserved but idle,
+state is rebuilt instead of reused, and security evidence is scattered across
+logs, containers, filesystems, and model/tool context.
+
+Agent Computer Fleet is an attempt to make that substrate explicit. It models
+an agent sandbox as a leaseable, resumable, forkable, observable, and
+cost-accounted computer. The control plane should know which run owns a process,
+which snapshot produced an artifact, which tool call caused a network edge, how
+much active CPU was actually consumed, and whether a branch came from tainted
+state.
+
+The current repository is a local-first MVP. It proves the control-plane shape
+with Docker, SQLite, directory snapshots, scheduler admission, and egress
+sidecars. The longer-term target is a high-density sandbox fleet that can pair
+runtime-level snapshot/resume with scheduler-level time sharing and kernel-level
+telemetry.
+
+## Industrial pain points
+
+| Pain point | Why it matters | Control-plane direction |
+|---|---|---|
+| **High-concurrency RL rollout resource sink** | Rollout fleets multiply sandbox count by task count, sample count, retry count, and evaluator count. Without snapshot reuse and per-run accounting, evaluation infrastructure becomes a CPU, disk, and cold-start sink. | Model every rollout as lease/session/snapshot/attempt/cost; reuse ready state; fan out from snapshots; report cost per run/session/node. |
+| **CPU time-sharing and conservative overcommit** | Agent sandboxes are often idle-heavy. Static CPU reservation wastes capacity, while blind overcommit causes throttling and noisy failures. | Track active CPU debt, idle discount, memory pressure, warm-pool signals, and queue pressure before admitting new sessions. Memory is not overcommitted; CPU is overcommitted conservatively. |
+| **Fast stop/resume/fork instead of rebuild loops** | Rebuilding workspaces and containers for every attempt destroys iteration speed. Real fleets need a path from ready snapshot to attempt workspace or resumed session. | Keep runtime drivers capability-gated; Docker implements directory snapshot/fork/resume now; VM-capable backends can later expose disk and memory snapshot capabilities. |
+| **eBPF dual-axis monitoring** | Security and debugging need both system-side facts and application-side intent. Syscalls alone do not say which agent tool call caused an action; tool logs alone do not prove what happened in the kernel. | Correlate kernel/runtime telemetry such as process, file, network, syscall, cgroup events with `run_id`, `session_id`, `process_id`, `snapshot_id`, and `tool_call_id`. eBPF/Falco/Tetragon integration is a planned telemetry provider, not yet active in this MVP. |
+
 ## Quickstart
 
 Prerequisites:

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/byteyellow/agent-computer-fleet/internal/scheduler"
 	"github.com/byteyellow/agent-computer-fleet/internal/state"
 	"github.com/byteyellow/agent-computer-fleet/internal/store"
+	"github.com/byteyellow/agent-computer-fleet/internal/warm"
 )
 
 type Service struct {
@@ -64,8 +66,18 @@ func (s Service) CreateSession(leaseID string) (string, error) {
 	}
 	sessionID := ids.New("sbx")
 	workspace := filepath.Join(s.Paths.Workspaces, sessionID)
-	if err := os.MkdirAll(workspace, 0o755); err != nil {
-		return "", err
+	templateName := templateNameFromTaskPath(taskPath)
+	warmHit := false
+	if item, ok, hitErr := (warm.Service{DB: s.DB, Paths: s.Paths}).Hit(templateName, sessionID, 250, task.MemoryMB); hitErr != nil {
+		return "", hitErr
+	} else if ok {
+		workspace = item.WorkspacePath
+		warmHit = true
+	}
+	if !warmHit {
+		if err := os.MkdirAll(workspace, 0o755); err != nil {
+			return "", err
+		}
 	}
 	decision, err := (scheduler.Scheduler{DB: s.DB}).Admit(scheduler.Request{
 		RunID:      runID,
@@ -79,8 +91,8 @@ func (s Service) CreateSession(leaseID string) (string, error) {
 		return "", err
 	}
 	if !decision.Admitted {
-		return "", fmt.Errorf("admission rejected: reason=%s overcommit_ratio=%.2f active_cpu_debt=%.3f queue_pressure=%s memory_pressure=%s memory_allocated_mb=%d memory_request_mb=%d memory_capacity_mb=%d",
-			decision.Reason, decision.OvercommitRatio, decision.ActiveCPUDebt, decision.QueuePressure, decision.MemoryPressure, decision.MemoryAllocatedMB, decision.MemoryRequestMB, decision.MemoryCapacityMB)
+		return "", fmt.Errorf("admission rejected: reject_reason=%s effective_cpu=%.3f debt=%.3f burst_risk=%s overcommit_ratio=%.2f queue_pressure=%s memory_pressure=%s memory_allocated_mb=%d memory_request_mb=%d memory_capacity_mb=%d",
+			decision.RejectReason, decision.EffectiveCPU, decision.ActiveCPUDebt, decision.BurstRisk, decision.OvercommitRatio, decision.QueuePressure, decision.MemoryPressure, decision.MemoryAllocatedMB, decision.MemoryRequestMB, decision.MemoryCapacityMB)
 	}
 	var egressProxy egress.ProxyInfo
 	if s.isDockerRuntime() {
@@ -115,7 +127,7 @@ func (s Service) CreateSession(leaseID string) (string, error) {
 		return "", err
 	}
 	_, _ = s.DB.Exec(`INSERT INTO events (id, run_id, session_id, source, event_type, payload, created_at)
-		VALUES (?, ?, ?, 'control_plane', 'session_create', ?, ?)`, ids.New("evt"), runID, sessionID, fmt.Sprintf(`{"container_id":%q,"workspace":%q,"startup_cold_ms":%d,"runtime":%q,"scheduler_decision":%q,"node_id":%q}`, containerID, workspace, startupColdMS, runtimeName, decision.Reason, decision.NodeID), now)
+		VALUES (?, ?, ?, 'control_plane', 'session_create', ?, ?)`, ids.New("evt"), runID, sessionID, fmt.Sprintf(`{"container_id":%q,"workspace":%q,"startup_cold_ms":%d,"runtime":%q,"scheduler_decision":%q,"node_id":%q,"warm_hit":%t}`, containerID, workspace, startupColdMS, runtimeName, decision.Reason, decision.NodeID, warmHit), now)
 	_, _ = s.DB.Exec(`UPDATE leases SET status = 'allocated', updated_at = ? WHERE id = ?`, now, leaseID)
 	_, _ = s.DB.Exec(`INSERT INTO cost_samples (id, run_id, session_id, wall_seconds, created_at)
 		VALUES (?, ?, ?, ?, ?)`, ids.New("cost"), runID, sessionID, float64(startupColdMS)/1000, now)
@@ -123,6 +135,14 @@ func (s Service) CreateSession(leaseID string) (string, error) {
 }
 
 func (s Service) Exec(sessionID string, command []string, stream bool) (string, error) {
+	return s.exec(sessionID, command, stream, nil, nil)
+}
+
+func (s Service) ExecStream(sessionID string, command []string, stdout, stderr io.Writer) (string, error) {
+	return s.exec(sessionID, command, true, stdout, stderr)
+}
+
+func (s Service) exec(sessionID string, command []string, stream bool, stdout, stderr io.Writer) (string, error) {
 	if len(command) == 0 {
 		return "", fmt.Errorf("command is required")
 	}
@@ -140,7 +160,7 @@ func (s Service) Exec(sessionID string, command []string, stream bool) (string, 
 	_, _ = s.DB.Exec(`INSERT INTO events (id, run_id, session_id, process_id, source, event_type, payload, created_at)
 		VALUES (?, ?, ?, ?, 'control_plane', 'exec_start', ?, ?)`, ids.New("evt"), runID, sessionID, processID, fmt.Sprintf(`{"command":%q,"stream":%t}`, strings.Join(command, " "), stream), now)
 	start := time.Now()
-	result, err := s.execRuntime(containerID, command, stream)
+	result, err := s.execRuntime(containerID, command, stream, stdout, stderr)
 	wallSeconds := time.Since(start).Seconds()
 	status := "exited"
 	if err != nil {
@@ -244,7 +264,12 @@ func (s Service) ResumeSnapshot(snapshotNameOrID, leaseID string) (string, error
 	if err != nil {
 		return "", err
 	}
-	snapshot, _, err := state.Service{DB: s.DB, Paths: s.Paths}.InspectSnapshot(snapshotNameOrID)
+	stateSvc := state.Service{DB: s.DB, Paths: s.Paths}
+	plan, err := stateSvc.Plan(snapshotNameOrID, true)
+	if err != nil {
+		return "", err
+	}
+	snapshot, _, err := stateSvc.InspectSnapshot(plan.SnapshotID)
 	if err != nil {
 		return "", err
 	}
@@ -277,7 +302,8 @@ func (s Service) ResumeSnapshot(snapshotNameOrID, leaseID string) (string, error
 		return "", err
 	}
 	if !decision.Admitted {
-		return "", fmt.Errorf("admission rejected: reason=%s overcommit_ratio=%.2f active_cpu_debt=%.3f queue_pressure=%s memory_pressure=%s", decision.Reason, decision.OvercommitRatio, decision.ActiveCPUDebt, decision.QueuePressure, decision.MemoryPressure)
+		return "", fmt.Errorf("admission rejected: reject_reason=%s effective_cpu=%.3f debt=%.3f burst_risk=%s overcommit_ratio=%.2f queue_pressure=%s memory_pressure=%s memory_allocated_mb=%d memory_request_mb=%d memory_capacity_mb=%d",
+			decision.RejectReason, decision.EffectiveCPU, decision.ActiveCPUDebt, decision.BurstRisk, decision.OvercommitRatio, decision.QueuePressure, decision.MemoryPressure, decision.MemoryAllocatedMB, decision.MemoryRequestMB, decision.MemoryCapacityMB)
 	}
 	var egressProxy egress.ProxyInfo
 	if s.isDockerRuntime() {
@@ -313,6 +339,8 @@ func (s Service) ResumeSnapshot(snapshotNameOrID, leaseID string) (string, error
 	}
 	_, _ = s.DB.Exec(`INSERT INTO events (id, run_id, session_id, snapshot_id, source, event_type, payload, created_at)
 		VALUES (?, ?, ?, ?, 'control_plane', 'snapshot_resume', ?, ?)`, ids.New("evt"), runID, sessionID, snapshot.ID, fmt.Sprintf(`{"container_id":%q,"workspace":%q,"resume_copy_ms":%d,"startup_cold_ms":%d,"runtime":%q}`, containerID, workspace, resumeCopyMS, startupColdMS, runtimeName), now)
+	_, _ = s.DB.Exec(`INSERT INTO snapshot_edges (id, parent_id, child_id, edge_type, plan, plan_reason, planner_score, created_at)
+		VALUES (?, ?, ?, 'resume', ?, ?, ?, ?)`, ids.New("edge"), snapshot.ID, sessionID, plan.Plan, plan.Reason, plan.Score, now)
 	_, _ = s.DB.Exec(`UPDATE leases SET status = 'allocated', updated_at = ? WHERE id = ?`, now, leaseID)
 	_, _ = s.DB.Exec(`INSERT INTO cost_samples (id, run_id, session_id, node_id, wall_seconds, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)`, ids.New("cost"), runID, sessionID, "local", float64(resumeCopyMS+startupColdMS)/1000, now)
@@ -326,8 +354,11 @@ func (s Service) createRuntimeSession(req runtimeplane.CreateSessionRequest) (st
 	return "", fmt.Errorf("runtime driver is required")
 }
 
-func (s Service) execRuntime(containerID string, command []string, stream bool) (runtimeplane.ExecResult, error) {
+func (s Service) execRuntime(containerID string, command []string, stream bool, stdout, stderr io.Writer) (runtimeplane.ExecResult, error) {
 	if s.Driver != nil {
+		if stdout != nil || stderr != nil {
+			return s.Driver.ExecStream(context.Background(), containerID, command, stdout, stderr)
+		}
 		return s.Driver.Exec(context.Background(), containerID, command, stream)
 	}
 	return runtimeplane.ExecResult{}, fmt.Errorf("runtime driver is required")
@@ -359,4 +390,16 @@ func (s Service) isDockerRuntime() bool {
 		return s.Driver.Name() == "docker"
 	}
 	return false
+}
+
+func templateNameFromTaskPath(taskPath string) string {
+	base := filepath.Base(taskPath)
+	ext := filepath.Ext(base)
+	if ext != "" {
+		base = strings.TrimSuffix(base, ext)
+	}
+	if base == "" || base == "." {
+		return "default"
+	}
+	return base
 }

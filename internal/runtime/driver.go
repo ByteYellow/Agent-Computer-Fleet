@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"io"
 
 	"github.com/byteyellow/agent-computer-fleet/internal/node"
 	"github.com/byteyellow/agent-computer-fleet/internal/state"
@@ -53,6 +54,7 @@ type Driver interface {
 	Capabilities() Capabilities
 	CreateSession(context.Context, CreateSessionRequest) (string, error)
 	Exec(context.Context, string, []string, bool) (ExecResult, error)
+	ExecStream(context.Context, string, []string, io.Writer, io.Writer) (ExecResult, error)
 	Interrupt(context.Context, string) error
 	Stop(context.Context, string) error
 	Remove(context.Context, string) error
@@ -158,6 +160,9 @@ func (d StubDriver) CreateSession(context.Context, CreateSessionRequest) (string
 	return "", fmt.Errorf("runtime backend %q is not implemented", d.NameValue)
 }
 func (d StubDriver) Exec(context.Context, string, []string, bool) (ExecResult, error) {
+	return ExecResult{}, fmt.Errorf("runtime backend %q is not implemented", d.NameValue)
+}
+func (d StubDriver) ExecStream(context.Context, string, []string, io.Writer, io.Writer) (ExecResult, error) {
 	return ExecResult{}, fmt.Errorf("runtime backend %q is not implemented", d.NameValue)
 }
 func (d StubDriver) Interrupt(context.Context, string) error {

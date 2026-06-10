@@ -8,12 +8,20 @@ import (
 	"text/tabwriter"
 )
 
-func sessionCmd(dataDir *string) *cobra.Command {
+func sessionCmd(dataDir, daemonURL *string) *cobra.Command {
 	var leaseID string
 	create := &cobra.Command{
 		Use:   "create",
 		Short: "create a Docker-backed sandbox session",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if client, ok := daemonClient(*daemonURL); ok {
+				id, err := client.CreateSession(leaseID)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), id)
+				return nil
+			}
 			svc, closeFn, err := controlSvc(*dataDir)
 			if err != nil {
 				return err
@@ -33,16 +41,7 @@ func sessionCmd(dataDir *string) *cobra.Command {
 		Use:   "list",
 		Short: "list sandbox sessions",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			paths, err := store.Init(*dataDir)
-			if err != nil {
-				return err
-			}
-			db, err := store.Open(paths)
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-			sessions, err := control.Service{DB: db, Paths: paths}.ListSessions()
+			sessions, err := listSessions(*dataDir, *daemonURL)
 			if err != nil {
 				return err
 			}
@@ -59,16 +58,7 @@ func sessionCmd(dataDir *string) *cobra.Command {
 		Short: "inspect a sandbox session",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			paths, err := store.Init(*dataDir)
-			if err != nil {
-				return err
-			}
-			db, err := store.Open(paths)
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-			session, err := control.Service{DB: db, Paths: paths}.InspectSession(args[0])
+			session, err := inspectSession(*dataDir, *daemonURL, args[0])
 			if err != nil {
 				return err
 			}
@@ -82,6 +72,13 @@ func sessionCmd(dataDir *string) *cobra.Command {
 		Short: "stop a sandbox session container",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if client, ok := daemonClient(*daemonURL); ok {
+				if err := client.StopSession(args[0]); err != nil {
+					return err
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), "stopped")
+				return nil
+			}
 			svc, closeFn, err := controlSvc(*dataDir)
 			if err != nil {
 				return err
@@ -100,6 +97,13 @@ func sessionCmd(dataDir *string) *cobra.Command {
 		Short:   "remove a sandbox session container",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if client, ok := daemonClient(*daemonURL); ok {
+				if err := client.RemoveSession(args[0]); err != nil {
+					return err
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), "removed")
+				return nil
+			}
 			svc, closeFn, err := controlSvc(*dataDir)
 			if err != nil {
 				return err
@@ -119,4 +123,36 @@ func sessionCmd(dataDir *string) *cobra.Command {
 	cmd.AddCommand(stop)
 	cmd.AddCommand(remove)
 	return cmd
+}
+
+func listSessions(dataDir, daemonURL string) ([]control.SessionInfo, error) {
+	if client, ok := daemonClient(daemonURL); ok {
+		return client.ListSessions()
+	}
+	paths, err := store.Init(dataDir)
+	if err != nil {
+		return nil, err
+	}
+	db, err := store.Open(paths)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	return control.Service{DB: db, Paths: paths}.ListSessions()
+}
+
+func inspectSession(dataDir, daemonURL, sessionID string) (control.SessionInfo, error) {
+	if client, ok := daemonClient(daemonURL); ok {
+		return client.InspectSession(sessionID)
+	}
+	paths, err := store.Init(dataDir)
+	if err != nil {
+		return control.SessionInfo{}, err
+	}
+	db, err := store.Open(paths)
+	if err != nil {
+		return control.SessionInfo{}, err
+	}
+	defer db.Close()
+	return control.Service{DB: db, Paths: paths}.InspectSession(sessionID)
 }

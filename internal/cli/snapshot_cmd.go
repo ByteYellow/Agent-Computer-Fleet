@@ -8,7 +8,7 @@ import (
 	"text/tabwriter"
 )
 
-func snapshotCmd(dataDir *string) *cobra.Command {
+func snapshotCmd(dataDir, daemonURL *string) *cobra.Command {
 	var typ, path, name string
 	create := &cobra.Command{
 		Use:   "create <session_id>",
@@ -17,6 +17,14 @@ func snapshotCmd(dataDir *string) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if typ != "directory" {
 				return fmt.Errorf("only --type directory is supported")
+			}
+			if client, ok := daemonClient(*daemonURL); ok {
+				result, err := client.CreateSnapshot(args[0], typ, path, name)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "%s files=%d bytes=%d snapshot_create_ms=%d hash=%s\n", result.SnapshotID, result.Files, result.Bytes, result.SnapshotCreateMS, result.Hash)
+				return nil
 			}
 			paths, err := store.Init(*dataDir)
 			if err != nil {
@@ -94,6 +102,28 @@ func snapshotCmd(dataDir *string) *cobra.Command {
 			return w.Flush()
 		},
 	}
+	planCmd := &cobra.Command{
+		Use:   "plan <snapshot_name_or_id>",
+		Short: "show snapshot planner decision for fork/resume",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			paths, err := store.Init(*dataDir)
+			if err != nil {
+				return err
+			}
+			db, err := store.Open(paths)
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+			plan, err := state.Service{DB: db, Paths: paths}.Plan(args[0], true)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "snapshot_id=%s plan=%s score=%.3f reason=%s\n", plan.SnapshotID, plan.Plan, plan.Score, plan.Reason)
+			return nil
+		},
+	}
 	inspect := &cobra.Command{
 		Use:   "inspect <snapshot_name_or_id>",
 		Short: "inspect snapshot manifest, taint status, and lineage",
@@ -127,6 +157,14 @@ func snapshotCmd(dataDir *string) *cobra.Command {
 		Short: "resume a directory snapshot into a running session",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if client, ok := daemonClient(*daemonURL); ok {
+				sessionID, err := client.ResumeSnapshot(args[0], resumeLeaseID)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), sessionID)
+				return nil
+			}
 			svc, closeFn, err := controlSvc(*dataDir)
 			if err != nil {
 				return err
@@ -147,6 +185,7 @@ func snapshotCmd(dataDir *string) *cobra.Command {
 	cmd.AddCommand(stack)
 	cmd.AddCommand(list)
 	cmd.AddCommand(inspect)
+	cmd.AddCommand(planCmd)
 	cmd.AddCommand(resume)
 	return cmd
 }
@@ -172,7 +211,7 @@ func forkCmd(dataDir *string) *cobra.Command {
 				return err
 			}
 			for _, result := range results {
-				fmt.Fprintf(cmd.OutOrStdout(), "attempt_id=%s workspace=%s fork_ms=%d\n", result.AttemptID, result.WorkspacePath, result.ForkMS)
+				fmt.Fprintf(cmd.OutOrStdout(), "attempt_id=%s workspace=%s fork_ms=%d plan=%s\n", result.AttemptID, result.WorkspacePath, result.ForkMS, result.Plan)
 			}
 			return nil
 		},

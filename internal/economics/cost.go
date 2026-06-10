@@ -40,6 +40,7 @@ func Admit(in AdmissionInput) bool {
 
 func ShowCost(db *sql.DB, runID string, out io.Writer) error {
 	var active, idle, wall float64
+	var fanoutCost, savedCost float64
 	var snapshotBytes, blocks, quarantines int64
 	err := db.QueryRow(`SELECT
 		COALESCE(SUM(active_cpu_seconds), 0),
@@ -47,8 +48,10 @@ func ShowCost(db *sql.DB, runID string, out io.Writer) error {
 		COALESCE(SUM(wall_seconds), 0),
 		COALESCE(SUM(snapshot_bytes), 0),
 		COALESCE(SUM(policy_block_count), 0),
-		COALESCE(SUM(quarantine_count), 0)
-		FROM cost_samples WHERE run_id = ?`, runID).Scan(&active, &idle, &wall, &snapshotBytes, &blocks, &quarantines)
+		COALESCE(SUM(quarantine_count), 0),
+		COALESCE(SUM(fanout_cost), 0),
+		COALESCE(SUM(saved_cost), 0)
+		FROM cost_samples WHERE run_id = ?`, runID).Scan(&active, &idle, &wall, &snapshotBytes, &blocks, &quarantines, &fanoutCost, &savedCost)
 	if err != nil {
 		return err
 	}
@@ -62,8 +65,8 @@ func ShowCost(db *sql.DB, runID string, out io.Writer) error {
 	if activeDebt < 0 {
 		activeDebt = 0
 	}
-	_, err = fmt.Fprintf(out, "run_id=%s active_cpu_seconds=%.3f idle_seconds=%.3f wall_seconds=%.3f snapshot_bytes=%d policy_block_count=%d quarantine_count=%d overcommit_ratio=%.2f active_cpu_debt=%.3f queue_pressure=%s cost_per_run=%.6f\n",
-		runID, active, idle, wall, snapshotBytes, blocks, quarantines, overcommitRatio, activeDebt, queuePressure, costPerRun)
+	_, err = fmt.Fprintf(out, "run_id=%s active_cpu_seconds=%.3f idle_seconds=%.3f wall_seconds=%.3f snapshot_bytes=%d policy_block_count=%d quarantine_count=%d fanout_cost=%.6f saved_cost=%.6f overcommit_ratio=%.2f active_cpu_debt=%.3f queue_pressure=%s cost_per_run=%.6f\n",
+		runID, active, idle, wall, snapshotBytes, blocks, quarantines, fanoutCost, savedCost, overcommitRatio, activeDebt, queuePressure, costPerRun)
 	if err != nil {
 		return err
 	}

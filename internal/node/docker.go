@@ -91,6 +91,16 @@ func (r *DockerRuntime) CreateSession(req CreateSessionRequest) (string, error) 
 }
 
 func (r *DockerRuntime) Exec(containerID string, command []string, stream bool) (ExecResult, error) {
+	stdout := io.Discard
+	stderr := io.Discard
+	if stream {
+		stdout = os.Stdout
+		stderr = os.Stderr
+	}
+	return r.ExecWithWriters(containerID, command, stdout, stderr)
+}
+
+func (r *DockerRuntime) ExecWithWriters(containerID string, command []string, stdout, stderr io.Writer) (ExecResult, error) {
 	ctx := context.Background()
 	resp, err := r.Client.ContainerExecCreate(ctx, containerID, types.ExecConfig{
 		Cmd:          command,
@@ -106,8 +116,14 @@ func (r *DockerRuntime) Exec(containerID string, command []string, stream bool) 
 		return ExecResult{ExecID: resp.ID}, err
 	}
 	defer attach.Close()
-	if stream {
-		_, err = stdcopy.StdCopy(os.Stdout, os.Stderr, attach.Reader)
+	if stdout != nil || stderr != nil {
+		if stdout == nil {
+			stdout = io.Discard
+		}
+		if stderr == nil {
+			stderr = io.Discard
+		}
+		_, err = stdcopy.StdCopy(stdout, stderr, attach.Reader)
 	} else {
 		_, err = io.Copy(io.Discard, attach.Reader)
 	}

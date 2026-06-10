@@ -23,6 +23,7 @@ type DockerStatsSample struct {
 	IdleSeconds      float64
 	Throttling       string
 	MemoryPressure   string
+	EWMAActiveCPU    float64
 }
 
 func SampleDockerStats(db *sql.DB, sessionID string) (DockerStatsSample, error) {
@@ -74,9 +75,19 @@ func SampleDockerStats(db *sql.DB, sessionID string) (DockerStatsSample, error) 
 		Throttling:       throttling,
 		MemoryPressure:   pressure,
 	}
+	const alpha = 0.35
+	var prevEWMA float64
+	_ = db.QueryRow(`SELECT COALESCE(ewma_active_cpu, 0) FROM cpu_samples WHERE session_id = ? ORDER BY created_at DESC LIMIT 1`, sessionID).Scan(&prevEWMA)
+	if prevEWMA == 0 {
+		sample.EWMAActiveCPU = sample.ActiveCPUSeconds
+	} else {
+		sample.EWMAActiveCPU = alpha*sample.ActiveCPUSeconds + (1-alpha)*prevEWMA
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, _ = db.Exec(`INSERT INTO cost_samples (id, run_id, session_id, active_cpu_seconds, idle_seconds, wall_seconds, created_at)
-		VALUES (?, ?, ?, ?, ?, 1, ?)`, ids.New("cost"), runID, sessionID, sample.ActiveCPUSeconds, sample.IdleSeconds, now)
+	_, _ = db.Exec(`INSERT INTO cost_samples (id, run_id, session_id, node_id, active_cpu_seconds, idle_seconds, wall_seconds, created_at)
+		VALUES (?, ?, ?, 'local', ?, ?, 1, ?)`, ids.New("cost"), runID, sessionID, sample.ActiveCPUSeconds, sample.IdleSeconds, now)
+	_, _ = db.Exec(`INSERT INTO cpu_samples (id, run_id, session_id, node_id, active_cpu_seconds, idle_seconds, cpu_percent, ewma_active_cpu, throttling, memory_pressure, created_at)
+		VALUES (?, ?, ?, 'local', ?, ?, ?, ?, ?, ?, ?)`, ids.New("cpu"), runID, sessionID, sample.ActiveCPUSeconds, sample.IdleSeconds, sample.CPUPerc, sample.EWMAActiveCPU, sample.Throttling, sample.MemoryPressure, now)
 	payload := fmt.Sprintf(`{"cpu_percent":%.3f,"memory_usage_bytes":%d,"memory_limit_bytes":%d,"throttling":%q,"memory_pressure":%q}`,
 		sample.CPUPerc, sample.MemoryUsageBytes, sample.MemoryLimitBytes, sample.Throttling, sample.MemoryPressure)
 	_, _ = db.Exec(`INSERT INTO events (id, run_id, session_id, source, event_type, payload, created_at)

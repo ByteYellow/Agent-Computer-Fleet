@@ -26,10 +26,25 @@ type Manifest struct {
 	Bytes int64
 }
 
+type FileEntry struct {
+	Path      string
+	Hash      string
+	SizeBytes int64
+	Mode      string
+}
+
 type ForkResult struct {
 	AttemptID     string
 	WorkspacePath string
 	ForkMS        int64
+	Plan          string
+}
+
+type SnapshotPlan struct {
+	SnapshotID string
+	Plan       string
+	Reason     string
+	Score      float64
 }
 
 type SnapshotInfo struct {
@@ -74,10 +89,17 @@ func (s Service) CreateDirectorySnapshot(sessionID, workspacePath, name string) 
 		return "", Manifest{}, 0, err
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err = s.DB.Exec(`INSERT INTO snapshots (id, name, session_id, kind, source, path, manifest_hash, file_count, bytes, snapshot_create_ms, status, created_at)
-		VALUES (?, ?, ?, 'ready', 'session', ?, ?, ?, ?, ?, 'ready', ?)`, snapshotID, name, sessionID, dst, manifest.Hash, manifest.Files, manifest.Bytes, snapshotCreateMS, now)
+	parentID, delta := s.latestSnapshotForSession(sessionID, dst)
+	score := plannerScore(manifest.Bytes, false)
+	_, err = s.DB.Exec(`INSERT INTO snapshots (id, name, session_id, parent_id, kind, source, path, manifest_hash, file_count, bytes, snapshot_create_ms, delta_parent_id, delta_files_added, delta_files_modified, delta_files_deleted, planner_score, status, created_at)
+		VALUES (?, ?, ?, ?, 'ready', 'session', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?)`, snapshotID, name, sessionID, parentID, dst, manifest.Hash, manifest.Files, manifest.Bytes, snapshotCreateMS, parentID, delta.Added, delta.Modified, delta.Deleted, score, now)
 	if err != nil {
 		return "", Manifest{}, 0, err
+	}
+	_ = s.recordManifest(snapshotID, dst)
+	if parentID != "" {
+		_, _ = s.DB.Exec(`INSERT INTO snapshot_edges (id, parent_id, child_id, edge_type, plan, plan_reason, planner_score, created_at)
+			VALUES (?, ?, ?, 'snapshot_delta', 'file_manifest_delta', ?, ?, ?)`, ids.New("edge"), parentID, snapshotID, fmt.Sprintf("added=%d modified=%d deleted=%d", delta.Added, delta.Modified, delta.Deleted), score, now)
 	}
 	_, _ = s.DB.Exec(`INSERT INTO cost_samples (id, run_id, session_id, snapshot_bytes, wall_seconds, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)`, ids.New("cost"), runID, sessionID, manifest.Bytes, float64(snapshotCreateMS)/1000, now)
@@ -191,8 +213,12 @@ func (s Service) Fork(snapshotNameOrID string, count int) ([]ForkResult, error) 
 		return nil, fmt.Errorf("count must be >= 1")
 	}
 	var snapshotID, src string
-	err := s.DB.QueryRow(`SELECT id, path FROM snapshots WHERE id = ? OR name = ? ORDER BY created_at DESC LIMIT 1`, snapshotNameOrID, snapshotNameOrID).Scan(&snapshotID, &src)
+	plan, err := s.Plan(snapshotNameOrID, false)
 	if err != nil {
+		return nil, err
+	}
+	snapshotID = plan.SnapshotID
+	if err := s.DB.QueryRow(`SELECT path FROM snapshots WHERE id = ?`, snapshotID).Scan(&src); err != nil {
 		return nil, err
 	}
 	results := make([]ForkResult, 0, count)
@@ -209,9 +235,48 @@ func (s Service) Fork(snapshotNameOrID string, count int) ([]ForkResult, error) 
 			VALUES (?, ?, ?, ?, ?)`, attemptID, snapshotID, dst, forkMS, now); err != nil {
 			return results, err
 		}
-		results = append(results, ForkResult{AttemptID: attemptID, WorkspacePath: dst, ForkMS: forkMS})
+		_, _ = s.DB.Exec(`INSERT INTO snapshot_edges (id, parent_id, child_id, edge_type, plan, plan_reason, planner_score, created_at)
+			VALUES (?, ?, ?, 'fork', ?, ?, ?, ?)`, ids.New("edge"), snapshotID, attemptID, plan.Plan, plan.Reason, plan.Score, now)
+		results = append(results, ForkResult{AttemptID: attemptID, WorkspacePath: dst, ForkMS: forkMS, Plan: plan.Plan})
 	}
 	return results, nil
+}
+
+type deltaCounts struct{ Added, Modified, Deleted int64 }
+
+func (s Service) Plan(snapshotNameOrID string, rejectTainted bool) (SnapshotPlan, error) {
+	rows, err := s.DB.Query(`SELECT id, bytes, COALESCE(tainted, 0), status, created_at FROM snapshots
+		WHERE id = ? OR name = ? OR parent_id = ?
+		ORDER BY created_at DESC`, snapshotNameOrID, snapshotNameOrID, snapshotNameOrID)
+	if err != nil {
+		return SnapshotPlan{}, err
+	}
+	defer rows.Close()
+	var best SnapshotPlan
+	found := false
+	for rows.Next() {
+		var id, status, createdAt string
+		var bytes int64
+		var tainted int
+		if err := rows.Scan(&id, &bytes, &tainted, &status, &createdAt); err != nil {
+			return SnapshotPlan{}, err
+		}
+		if rejectTainted && (tainted != 0 || status == "tainted") {
+			continue
+		}
+		score := plannerScore(bytes, tainted != 0 || status == "tainted")
+		if !found || score > best.Score {
+			best = SnapshotPlan{SnapshotID: id, Plan: "copy", Reason: fmt.Sprintf("latest-local score=%.3f created_at=%s", score, createdAt), Score: score}
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return SnapshotPlan{}, err
+	}
+	if !found {
+		return SnapshotPlan{}, fmt.Errorf("no usable snapshot found for %s", snapshotNameOrID)
+	}
+	return best, nil
 }
 
 func (s Service) ListSnapshots() ([]SnapshotInfo, error) {
@@ -257,6 +322,78 @@ func (s Service) InspectSnapshot(snapshotNameOrID string) (SnapshotInfo, []Snaps
 	return snapshot, lineage, nil
 }
 
+func (s Service) latestSnapshotForSession(sessionID, newRoot string) (string, deltaCounts) {
+	var parentID string
+	var parentPath string
+	err := s.DB.QueryRow(`SELECT id, path FROM snapshots WHERE session_id = ? AND status IN ('ready', 'tainted') ORDER BY created_at DESC LIMIT 1`, sessionID).Scan(&parentID, &parentPath)
+	if err != nil {
+		return "", deltaCounts{}
+	}
+	delta, err := diffManifests(parentPath, newRoot)
+	if err != nil {
+		return parentID, deltaCounts{}
+	}
+	return parentID, delta
+}
+
+func (s Service) recordManifest(snapshotID, root string) error {
+	entries, err := BuildFileManifest(root)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if _, err := s.DB.Exec(`INSERT OR REPLACE INTO snapshot_files (snapshot_id, path, sha256, size_bytes, mode) VALUES (?, ?, ?, ?, ?)`,
+			snapshotID, entry.Path, entry.Hash, entry.SizeBytes, entry.Mode); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func diffManifests(oldRoot, newRoot string) (deltaCounts, error) {
+	oldEntries, err := BuildFileManifest(oldRoot)
+	if err != nil {
+		return deltaCounts{}, err
+	}
+	newEntries, err := BuildFileManifest(newRoot)
+	if err != nil {
+		return deltaCounts{}, err
+	}
+	oldMap := map[string]FileEntry{}
+	newMap := map[string]FileEntry{}
+	for _, entry := range oldEntries {
+		oldMap[entry.Path] = entry
+	}
+	for _, entry := range newEntries {
+		newMap[entry.Path] = entry
+	}
+	var delta deltaCounts
+	for path, newEntry := range newMap {
+		oldEntry, ok := oldMap[path]
+		if !ok {
+			delta.Added++
+			continue
+		}
+		if oldEntry.Hash != newEntry.Hash || oldEntry.SizeBytes != newEntry.SizeBytes {
+			delta.Modified++
+		}
+	}
+	for path := range oldMap {
+		if _, ok := newMap[path]; !ok {
+			delta.Deleted++
+		}
+	}
+	return delta, nil
+}
+
+func plannerScore(bytes int64, tainted bool) float64 {
+	score := 1000.0 - float64(bytes)/(1024*1024)
+	if tainted {
+		score -= 500
+	}
+	return score
+}
+
 func CopyDir(src, dst string) error {
 	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -300,8 +437,24 @@ func copyFile(src, dst string, mode os.FileMode) error {
 }
 
 func BuildManifest(root string) (Manifest, error) {
+	entries, err := BuildFileManifest(root)
+	if err != nil {
+		return Manifest{}, err
+	}
 	h := sha256.New()
 	var files, bytes int64
+	for _, entry := range entries {
+		_, _ = h.Write([]byte(entry.Path))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(entry.Hash))
+		files++
+		bytes += entry.SizeBytes
+	}
+	return Manifest{Hash: hex.EncodeToString(h.Sum(nil)), Files: files, Bytes: bytes}, nil
+}
+
+func BuildFileManifest(root string) ([]FileEntry, error) {
+	var entries []FileEntry
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -317,13 +470,12 @@ func BuildManifest(root string) (Manifest, error) {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, path)
-		_, _ = h.Write([]byte(rel))
-		_, _ = h.Write([]byte{0})
 		f, err := os.Open(path)
 		if err != nil {
 			return err
 		}
-		n, copyErr := io.Copy(h, f)
+		fh := sha256.New()
+		n, copyErr := io.Copy(fh, f)
 		closeErr := f.Close()
 		if copyErr != nil {
 			return copyErr
@@ -331,12 +483,11 @@ func BuildManifest(root string) (Manifest, error) {
 		if closeErr != nil {
 			return closeErr
 		}
-		files++
-		bytes += n
+		entries = append(entries, FileEntry{Path: rel, Hash: hex.EncodeToString(fh.Sum(nil)), SizeBytes: n, Mode: info.Mode().String()})
 		return nil
 	})
 	if err != nil {
-		return Manifest{}, err
+		return nil, err
 	}
-	return Manifest{Hash: hex.EncodeToString(h.Sum(nil)), Files: files, Bytes: bytes}, nil
+	return entries, nil
 }

@@ -31,6 +31,8 @@ type NodeState struct {
 	MemoryTotalMB     int64
 	MemorySafetyRatio float64
 	ActiveCPUDebt     float64
+	EWMAActiveCPU     float64
+	ThrottlingCount   int64
 	MemoryAllocatedMB int64
 	RunningSessions   int
 	WarmPoolReady     int
@@ -56,6 +58,9 @@ type Decision struct {
 	SnapshotLocal     bool
 	ActiveCPURequest  float64
 	IdleCPURequest    float64
+	EffectiveCPU      float64
+	BurstRisk         string
+	RejectReason      string
 }
 
 type Scheduler struct {
@@ -116,6 +121,13 @@ func (s Scheduler) NodeState(snapshotID string) (NodeState, error) {
 		state.ActiveCPUDebt = 0
 	}
 	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM warm_pool_items WHERE status = 'ready'`).Scan(&state.WarmPoolReady)
+	_ = s.DB.QueryRow(`SELECT COALESCE(AVG(ewma_active_cpu), 0), COALESCE(SUM(CASE WHEN throttling != '' AND throttling != 'unknown' THEN 1 ELSE 0 END), 0) FROM cpu_samples WHERE node_id = ?`, state.NodeID).Scan(&state.EWMAActiveCPU, &state.ThrottlingCount)
+	if state.ThrottlingCount > 0 {
+		state.OvercommitRatio *= 0.8
+		if state.OvercommitRatio < 1 {
+			state.OvercommitRatio = 1
+		}
+	}
 	if snapshotID != "" {
 		_ = s.DB.QueryRow(`SELECT COUNT(*) > 0 FROM snapshots WHERE id = ? OR name = ?`, snapshotID, snapshotID).Scan(&state.SnapshotLocal)
 	}
@@ -145,7 +157,8 @@ func AdmitRequest(req Request, state NodeState) Decision {
 	}
 	active := req.CPURequest * (1 - req.IdleRatio)
 	idle := req.CPURequest * req.IdleRatio
-	weighted := active + idle*state.IdleDiscount + state.ActiveCPUDebt
+	burstPenalty := state.EWMAActiveCPU * 0.25
+	weighted := active + idle*state.IdleDiscount + state.ActiveCPUDebt + burstPenalty
 	capacity := state.PhysicalCPU * state.OvercommitRatio
 	memoryCapacity := int64(math.Floor(float64(state.MemoryTotalMB) * state.MemorySafetyRatio))
 	decision := Decision{
@@ -166,16 +179,20 @@ func AdmitRequest(req Request, state NodeState) Decision {
 		SnapshotLocal:     state.SnapshotLocal,
 		ActiveCPURequest:  active,
 		IdleCPURequest:    idle,
+		EffectiveCPU:      weighted,
+		BurstRisk:         burstRisk(state, active),
 	}
 	if state.MemoryAllocatedMB+req.MemoryMB > memoryCapacity {
 		decision.Admitted = false
 		decision.MemoryPressure = "high"
 		decision.Reason = fmt.Sprintf("memory pressure: allocated_mb=%d request_mb=%d capacity_mb=%d", state.MemoryAllocatedMB, req.MemoryMB, memoryCapacity)
+		decision.RejectReason = decision.Reason
 		return decision
 	}
 	if weighted > capacity {
 		decision.Admitted = false
 		decision.Reason = fmt.Sprintf("active CPU overcommit: weighted_cpu=%.3f capacity_cpu=%.3f active_cpu_debt=%.3f", weighted, capacity, state.ActiveCPUDebt)
+		decision.RejectReason = decision.Reason
 		return decision
 	}
 	return decision
@@ -195,9 +212,12 @@ type BenchResult struct {
 	MemoryAllocatedMB int64
 	MemoryCapacityMB  int64
 	OvercommitRatio   float64
+	Bursty            bool
+	EffectiveCPU      float64
+	BurstRisk         string
 }
 
-func Simulate(sessions int, idleRatio, cpuPerSession, physicalCPU, overcommitRatio, idleDiscount float64, memoryPerSessionMB, memoryTotalMB int64) BenchResult {
+func Simulate(sessions int, idleRatio, cpuPerSession, physicalCPU, overcommitRatio, idleDiscount float64, memoryPerSessionMB, memoryTotalMB int64, bursty bool) BenchResult {
 	state := NodeState{
 		NodeID:            "bench-local",
 		PhysicalCPU:       physicalCPU,
@@ -225,11 +245,20 @@ func Simulate(sessions int, idleRatio, cpuPerSession, physicalCPU, overcommitRat
 	if cpuPerSession <= 0 {
 		cpuPerSession = 1
 	}
-	result := BenchResult{Sessions: sessions, IdleRatio: idleRatio, CapacityCPU: state.PhysicalCPU * state.OvercommitRatio, OvercommitRatio: state.OvercommitRatio}
+	result := BenchResult{Sessions: sessions, IdleRatio: idleRatio, CapacityCPU: state.PhysicalCPU * state.OvercommitRatio, OvercommitRatio: state.OvercommitRatio, Bursty: bursty}
 	for i := 0; i < sessions; i++ {
 		state.RunningSessions = result.Admitted
-		decision := AdmitRequest(Request{Runtime: "docker", CPURequest: cpuPerSession, MemoryMB: memoryPerSessionMB, IdleRatio: idleRatio}, state)
+		nextIdleRatio := idleRatio
+		if bursty && i%4 == 0 {
+			nextIdleRatio = 0.05
+			state.EWMAActiveCPU = cpuPerSession * 0.8
+		} else if bursty {
+			state.EWMAActiveCPU = state.EWMAActiveCPU*0.7 + cpuPerSession*(1-nextIdleRatio)*0.3
+		}
+		decision := AdmitRequest(Request{Runtime: "docker", CPURequest: cpuPerSession, MemoryMB: memoryPerSessionMB, IdleRatio: nextIdleRatio}, state)
 		result.CapacityCPU = decision.CapacityCPU
+		result.EffectiveCPU = decision.EffectiveCPU
+		result.BurstRisk = decision.BurstRisk
 		result.ActiveCPUDebt = decision.ActiveCPUDebt
 		result.QueuePressure = decision.QueuePressure
 		result.MemoryPressure = decision.MemoryPressure
@@ -245,6 +274,16 @@ func Simulate(sessions int, idleRatio, cpuPerSession, physicalCPU, overcommitRat
 		result.MemoryAllocatedMB = state.MemoryAllocatedMB
 	}
 	return result
+}
+
+func burstRisk(state NodeState, active float64) string {
+	if state.ThrottlingCount > 0 || state.EWMAActiveCPU+active > state.PhysicalCPU*0.8 {
+		return "high"
+	}
+	if state.EWMAActiveCPU+active > state.PhysicalCPU*0.5 {
+		return "medium"
+	}
+	return "low"
 }
 
 func envString(name, fallback string) string {

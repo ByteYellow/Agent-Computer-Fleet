@@ -3,6 +3,7 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"io"
 	"os/exec"
 	"strings"
 
@@ -52,6 +53,10 @@ func (d *DockerDriver) CreateSession(ctx context.Context, req CreateSessionReque
 
 func (d *DockerDriver) Exec(ctx context.Context, containerID string, command []string, stream bool) (ExecResult, error) {
 	return d.Runtime.Exec(containerID, command, stream)
+}
+
+func (d *DockerDriver) ExecStream(ctx context.Context, containerID string, command []string, stdout, stderr io.Writer) (ExecResult, error) {
+	return d.Runtime.ExecWithWriters(containerID, command, stdout, stderr)
 }
 
 func (d *DockerDriver) Interrupt(ctx context.Context, containerID string) error {

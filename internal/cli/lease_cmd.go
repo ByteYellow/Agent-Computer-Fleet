@@ -7,12 +7,20 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func leaseCmd(dataDir *string) *cobra.Command {
+func leaseCmd(dataDir, daemonURL *string) *cobra.Command {
 	var taskPath string
 	create := &cobra.Command{
 		Use:   "create",
 		Short: "create a sandbox lease",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if client, ok := daemonClient(*daemonURL); ok {
+				id, err := client.CreateLease(taskPath)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), id)
+				return nil
+			}
 			paths, err := store.Init(*dataDir)
 			if err != nil {
 				return err

@@ -44,8 +44,8 @@ func costCmd(dataDir *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "session_id=%s run_id=%s cpu_percent=%.3f active_cpu_seconds=%.3f idle_seconds=%.3f memory_usage_bytes=%d memory_limit_bytes=%d throttling=%s memory_pressure=%s\n",
-				sample.SessionID, sample.RunID, sample.CPUPerc, sample.ActiveCPUSeconds, sample.IdleSeconds, sample.MemoryUsageBytes, sample.MemoryLimitBytes, sample.Throttling, sample.MemoryPressure)
+			fmt.Fprintf(cmd.OutOrStdout(), "session_id=%s run_id=%s cpu_percent=%.3f ewma_active_cpu=%.3f active_cpu_seconds=%.3f idle_seconds=%.3f memory_usage_bytes=%d memory_limit_bytes=%d throttling=%s memory_pressure=%s\n",
+				sample.SessionID, sample.RunID, sample.CPUPerc, sample.EWMAActiveCPU, sample.ActiveCPUSeconds, sample.IdleSeconds, sample.MemoryUsageBytes, sample.MemoryLimitBytes, sample.Throttling, sample.MemoryPressure)
 			return nil
 		},
 	}
@@ -59,13 +59,14 @@ func benchCmd() *cobra.Command {
 	var sessions int
 	var idleRatio, cpuPerSession, physicalCPU, overcommitRatio, idleDiscount float64
 	var memoryPerSessionMB, memoryTotalMB int64
+	var bursty bool
 	overcommit := &cobra.Command{
 		Use:   "overcommit",
 		Short: "simulate active-CPU-aware overcommit admission",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			result := scheduler.Simulate(sessions, idleRatio, cpuPerSession, physicalCPU, overcommitRatio, idleDiscount, memoryPerSessionMB, memoryTotalMB)
-			fmt.Fprintf(cmd.OutOrStdout(), "sessions=%d idle_ratio=%.2f admitted=%d rejected=%d weighted_cpu=%.3f capacity_cpu=%.3f overcommit_ratio=%.2f active_cpu_debt=%.3f queue_pressure=%s memory_pressure=%s memory_allocated_mb=%d memory_capacity_mb=%d reject_reason=%q\n",
-				result.Sessions, result.IdleRatio, result.Admitted, result.Rejected, result.WeightedCPU, result.CapacityCPU, result.OvercommitRatio, result.ActiveCPUDebt, result.QueuePressure, result.MemoryPressure, result.MemoryAllocatedMB, result.MemoryCapacityMB, result.LastRejectReason)
+			result := scheduler.Simulate(sessions, idleRatio, cpuPerSession, physicalCPU, overcommitRatio, idleDiscount, memoryPerSessionMB, memoryTotalMB, bursty)
+			fmt.Fprintf(cmd.OutOrStdout(), "sessions=%d idle_ratio=%.2f bursty=%t admitted=%d rejected=%d weighted_cpu=%.3f effective_cpu=%.3f capacity_cpu=%.3f overcommit_ratio=%.2f active_cpu_debt=%.3f burst_risk=%s queue_pressure=%s memory_pressure=%s memory_allocated_mb=%d memory_capacity_mb=%d reject_reason=%q\n",
+				result.Sessions, result.IdleRatio, result.Bursty, result.Admitted, result.Rejected, result.WeightedCPU, result.EffectiveCPU, result.CapacityCPU, result.OvercommitRatio, result.ActiveCPUDebt, result.BurstRisk, result.QueuePressure, result.MemoryPressure, result.MemoryAllocatedMB, result.MemoryCapacityMB, result.LastRejectReason)
 			return nil
 		},
 	}
@@ -77,6 +78,7 @@ func benchCmd() *cobra.Command {
 	overcommit.Flags().Float64Var(&idleDiscount, "idle-discount", 0.1, "idle CPU discount")
 	overcommit.Flags().Int64Var(&memoryPerSessionMB, "memory-per-session-mb", 256, "memory request per simulated session")
 	overcommit.Flags().Int64Var(&memoryTotalMB, "memory-total-mb", 8192, "node memory capacity")
+	overcommit.Flags().BoolVar(&bursty, "bursty", false, "simulate periodic CPU bursts instead of fixed idle ratio")
 	cmd := &cobra.Command{Use: "bench", Short: "benchmark and simulation commands"}
 	cmd.AddCommand(overcommit)
 	return cmd

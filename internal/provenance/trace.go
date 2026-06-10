@@ -71,6 +71,24 @@ func TraceRun(db *sql.DB, runID string, out io.Writer) error {
 		return err
 	}
 
+	edgeRows, err := db.Query(`SELECT parent_id, child_id, edge_type, plan, COALESCE(plan_reason, ''), COALESCE(planner_score, 0), created_at FROM snapshot_edges ORDER BY created_at ASC`)
+	if err != nil {
+		return err
+	}
+	defer edgeRows.Close()
+	fmt.Fprintln(out, "snapshot_edges:")
+	for edgeRows.Next() {
+		var parentID, childID, edgeType, plan, reason, createdAt string
+		var score float64
+		if err := edgeRows.Scan(&parentID, &childID, &edgeType, &plan, &reason, &score, &createdAt); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "  parent=%s child=%s type=%s plan=%s score=%.3f reason=%q created_at=%s\n", parentID, childID, edgeType, plan, score, reason, createdAt)
+	}
+	if err := edgeRows.Err(); err != nil {
+		return err
+	}
+
 	events, err := telemetry.ListEvents(db, runID, "")
 	if err != nil {
 		return err

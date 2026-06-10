@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -24,6 +25,10 @@ func (fakeDriver) CreateSession(ctx context.Context, req runtimeplane.CreateSess
 }
 
 func (fakeDriver) Exec(ctx context.Context, containerID string, command []string, stream bool) (runtimeplane.ExecResult, error) {
+	return runtimeplane.ExecResult{ExecID: "exec-test", ExitCode: 0}, nil
+}
+
+func (fakeDriver) ExecStream(ctx context.Context, containerID string, command []string, stdout, stderr io.Writer) (runtimeplane.ExecResult, error) {
 	return runtimeplane.ExecResult{ExecID: "exec-test", ExitCode: 0}, nil
 }
 

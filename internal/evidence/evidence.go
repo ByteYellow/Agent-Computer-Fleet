@@ -31,19 +31,19 @@ func (s Service) ProcessEvidence(limit int) (ProcessResult, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.DB.Query(`SELECT id, run_id, rollout_id, attempt_id, tool_call_id, snapshot_id, event_type, created_at
+	rows, err := s.DB.Query(`SELECT id, run_id, rollout_id, attempt_id, session_id, tool_call_id, snapshot_id, event_type, created_at
 		FROM evidence_events WHERE status = 'queued' ORDER BY created_at LIMIT ?`, limit)
 	if err != nil {
 		return ProcessResult{}, err
 	}
 	defer rows.Close()
 	type event struct {
-		id, runID, rolloutID, attemptID, toolCallID, snapshotID, eventType, createdAt string
+		id, runID, rolloutID, attemptID, sessionID, toolCallID, snapshotID, eventType, createdAt string
 	}
 	var events []event
 	for rows.Next() {
 		var ev event
-		if err := rows.Scan(&ev.id, &ev.runID, &ev.rolloutID, &ev.attemptID, &ev.toolCallID, &ev.snapshotID, &ev.eventType, &ev.createdAt); err != nil {
+		if err := rows.Scan(&ev.id, &ev.runID, &ev.rolloutID, &ev.attemptID, &ev.sessionID, &ev.toolCallID, &ev.snapshotID, &ev.eventType, &ev.createdAt); err != nil {
 			return ProcessResult{}, err
 		}
 		events = append(events, ev)
@@ -67,6 +67,16 @@ func (s Service) ProcessEvidence(limit int) (ProcessResult, error) {
 			_, _ = s.DB.Exec(`INSERT INTO graph_edges (id, run_id, rollout_id, from_id, to_id, edge_type, source_event_id, created_at)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 				ids.New("edge"), ev.runID, ev.rolloutID, ev.attemptID, ev.toolCallID, "attempt_tool_call", ev.id, now)
+		}
+		if ev.attemptID != "" && ev.sessionID != "" {
+			_, _ = s.DB.Exec(`INSERT INTO graph_edges (id, run_id, rollout_id, from_id, to_id, edge_type, source_event_id, created_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				ids.New("edge"), ev.runID, ev.rolloutID, ev.attemptID, ev.sessionID, "attempt_session", ev.id, now)
+		}
+		if ev.toolCallID != "" && ev.sessionID != "" {
+			_, _ = s.DB.Exec(`INSERT INTO graph_edges (id, run_id, rollout_id, from_id, to_id, edge_type, source_event_id, created_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				ids.New("edge"), ev.runID, ev.rolloutID, ev.toolCallID, ev.sessionID, "tool_call_session", ev.id, now)
 		}
 		if _, err := s.DB.Exec(`UPDATE evidence_events SET status = 'processed', processed_at = ? WHERE id = ?`, now, ev.id); err != nil {
 			return ProcessResult{Processed: len(events)}, err

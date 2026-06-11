@@ -78,10 +78,12 @@ type BurstReservation struct {
 	ID          string
 	Admitted    bool
 	Reason      string
+	Status      string
 	Inflight    int64
 	ReservedCPU float64
 	MaxInflight int64
 	ExpiresAt   string
+	WaitMS      int64
 }
 
 type Scheduler struct {
@@ -197,6 +199,45 @@ func (s Scheduler) NodeState(snapshotID string) (NodeState, error) {
 }
 
 func (s Scheduler) ReserveBurst(runID, sessionID, processID string, cpuRequest float64, ttl time.Duration) (BurstReservation, error) {
+	policy := strings.ToLower(strings.TrimSpace(envString("ACF_BURST_OVERFLOW_POLICY", "reject")))
+	if policy != "delay" && policy != "queue" {
+		return s.reserveBurstOnce(runID, sessionID, processID, cpuRequest, ttl, 0, "rejected")
+	}
+	timeout := time.Duration(envInt64("ACF_BURST_QUEUE_TIMEOUT_MS", 1000)) * time.Millisecond
+	if timeout < 0 {
+		timeout = 0
+	}
+	deadline := time.Now().Add(timeout)
+	var last BurstReservation
+	var lastErr error
+	for {
+		reservation, err := s.reserveBurstOnce(runID, sessionID, processID, cpuRequest, ttl, time.Since(deadline.Add(-timeout)).Milliseconds(), "queued")
+		if err == nil {
+			if reservation.WaitMS > 0 {
+				reservation.Reason = fmt.Sprintf("admitted after delay: wait_ms=%d", reservation.WaitMS)
+				_, _ = s.DB.Exec(`UPDATE burst_reservations SET status = 'delayed', released_at = ?, reason = ?
+					WHERE process_id = ? AND status = 'queued'`,
+					time.Now().UTC().Format(time.RFC3339Nano), reservation.Reason, processID)
+			}
+			return reservation, nil
+		}
+		last = reservation
+		lastErr = err
+		if !strings.Contains(reservation.Reason, "burst inflight limit") || time.Now().After(deadline) {
+			reason := fmt.Sprintf("burst queue timeout: wait_ms=%d last_reason=%s", timeout.Milliseconds(), reservation.Reason)
+			if last.ID != "" {
+				_, _ = s.DB.Exec(`UPDATE burst_reservations SET status = ?, reason = ? WHERE process_id = ? AND status = 'queued'`,
+					"rejected", reason, processID)
+				last.Status = "rejected"
+				last.Reason = reason
+			}
+			return last, lastErr
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func (s Scheduler) reserveBurstOnce(runID, sessionID, processID string, cpuRequest float64, ttl time.Duration, waitMS int64, overflowStatus string) (BurstReservation, error) {
 	if s.DB == nil {
 		return BurstReservation{}, fmt.Errorf("scheduler database is required")
 	}
@@ -244,16 +285,19 @@ func (s Scheduler) ReserveBurst(runID, sessionID, processID string, cpuRequest f
 	reservation := BurstReservation{
 		ID:          ids.New("burst"),
 		Admitted:    true,
+		Status:      "active",
 		Inflight:    inflight,
 		ReservedCPU: reservedCPU,
 		MaxInflight: maxInflight,
 		ExpiresAt:   expiresAt,
+		WaitMS:      waitMS,
 	}
 	status := "active"
 	reason := "admitted"
 	if inflight >= maxInflight {
 		reservation.Admitted = false
-		status = "rejected"
+		reservation.Status = overflowStatus
+		status = overflowStatus
 		reason = fmt.Sprintf("burst inflight limit: inflight=%d max=%d reserved_cpu=%.3f", inflight, maxInflight, reservedCPU)
 	}
 	reservation.Reason = reason

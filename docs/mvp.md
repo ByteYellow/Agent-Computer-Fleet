@@ -28,7 +28,7 @@ acfctl snapshot inspect ready
 acfctl snapshot plan ready
 acfctl fork ready --count 2
 acfctl snapshot resume ready --lease <lease_id>
-acfctl rollout start --task examples/tasks/bugfix.yaml --snapshot ready --fanout 3 \
+acfctl rollout start --task examples/tasks/bugfix.yaml --snapshot ready --runtime docker --fanout 3 \
   --strategy "probe::test -f hello.txt && echo passed::score=contains:passed::artifact=probe.log" \
   --strategy "score::printf 42::score=number::artifact=score.txt" \
   --strategy "slow::sleep 1; echo passed::score=contains:passed::artifact=slow.log"
@@ -155,7 +155,7 @@ fanout cost and saved cost when early stop or max fanout avoids extra work.
 ```sh
 acfctl snapshot stack --task examples/tasks/bugfix.yaml
 ACF_IO_MAX_FANOUT_PER_LOWER=100 ACF_BURST_MAX_INFLIGHT=2 \
-  acfctl rollout start --task examples/tasks/bugfix.yaml --snapshot ready --fanout 3 \
+  acfctl rollout start --task examples/tasks/bugfix.yaml --snapshot ready --runtime docker --fanout 3 \
   --strategy "probe::test -f README.md && echo passed::score=contains:passed::artifact=probe.log" \
   --strategy "score::printf 42::score=number::artifact=score.txt" \
   --strategy "slow::sleep 1; echo passed::score=contains:passed::artifact=slow.log"
@@ -167,10 +167,12 @@ acfctl cost show run-demo-bugfix
 ```
 
 This is the v0.1 Agent Rollout Control Plane path. It starts from a ready
-snapshot, forks attempt workspaces, creates one `tool_call` per strategy,
-requires BurstGuard admission before command execution, writes compact evidence,
-materializes `rollout -> attempt -> tool_call` graph edges asynchronously, and
-promotes the winning attempt through the promotion barrier.
+snapshot, forks attempt workspaces, creates one short-lived Docker session and
+one `tool_call` per admitted strategy, requires BurstGuard admission before
+command execution, switches the container from `think` to `tool` CPU profile,
+writes compact evidence, materializes `rollout -> attempt -> tool_call ->
+session` graph edges asynchronously, and promotes the winning attempt through
+the promotion barrier.
 
 ### demo_metadata_egress_quarantine
 
@@ -279,8 +281,10 @@ unbounded raw samples.
 
 BurstGuard adds a forward-looking admission gate for synchronized tool phases:
 `exec` must reserve burst budget before the session can switch from `think` to
-`tool`. If too many sessions enter tool phase at once, exec is rejected before
-CPU weight is raised.
+`tool`. If too many sessions enter tool phase at once, the default policy
+rejects before CPU weight is raised. Set `ACF_BURST_OVERFLOW_POLICY=delay` and
+`ACF_BURST_QUEUE_TIMEOUT_MS=<ms>` to queue briefly until a burst slot is
+released.
 
 ### demo_cpu_weight_control
 
@@ -302,7 +306,9 @@ SESSIONS=50 BURST_MAX_INFLIGHT=4 ./scripts/demo_v01_50_concurrency.sh
 
 The output includes admitted/rejected exec counts, `burst_reject` telemetry,
 and `scheduler status` fields such as `tool_phase_inflight`,
-`burst_reserved_cpu`, `burst_debt`, and `burst_reject_count`.
+`burst_reserved_cpu`, `burst_debt`, and `burst_reject_count`. Delay mode records
+superseded queue attempts as `delayed` and admits the final reservation when a
+slot becomes available.
 
 ### demo_ioaware_snapshot_planner
 
@@ -324,8 +330,8 @@ not selected.
 - CPU weight control uses Docker `ContainerUpdate` / `CpuShares`. On Linux
   cgroup v2 this maps to cgroup CPU weight behavior; a direct node-agent
   `cpu.weight` writer is a future Linux-specific hardening path.
-- BurstGuard currently rejects excess synchronized tool phases; queue/delay is
-  a follow-up policy.
+- BurstGuard rejects excess synchronized tool phases by default and supports a
+  bounded delay/queue mode with `ACF_BURST_OVERFLOW_POLICY=delay`.
 - IO-aware snapshot planning estimates copy-up and metadata risk. It does not
   yet create real OverlayFS/reflink/COW mounts.
 - Directory snapshot/fork/resume is supported; memory snapshots are

@@ -95,7 +95,7 @@ func TraceRun(db *sql.DB, runID string, out io.Writer) error {
 		return err
 	}
 
-	procRows, err := db.Query(`SELECT id, session_id, command, status, COALESCE(exit_code, 0), started_at, COALESCE(ended_at, '') FROM processes
+	procRows, err := db.Query(`SELECT id, session_id, COALESCE(tool_call_id, ''), command, status, COALESCE(exit_code, 0), started_at, COALESCE(ended_at, '') FROM processes
 		WHERE session_id IN (SELECT id FROM sessions WHERE run_id = ?) ORDER BY started_at ASC`, runID)
 	if err != nil {
 		return err
@@ -103,12 +103,12 @@ func TraceRun(db *sql.DB, runID string, out io.Writer) error {
 	defer procRows.Close()
 	fmt.Fprintln(out, "processes:")
 	for procRows.Next() {
-		var id, sessionID, command, status, startedAt, endedAt string
+		var id, sessionID, toolCallID, command, status, startedAt, endedAt string
 		var exitCode int
-		if err := procRows.Scan(&id, &sessionID, &command, &status, &exitCode, &startedAt, &endedAt); err != nil {
+		if err := procRows.Scan(&id, &sessionID, &toolCallID, &command, &status, &exitCode, &startedAt, &endedAt); err != nil {
 			return err
 		}
-		fmt.Fprintf(out, "  process=%s session=%s status=%s exit=%d command=%q started_at=%s ended_at=%s\n", id, sessionID, status, exitCode, command, startedAt, endedAt)
+		fmt.Fprintf(out, "  process=%s session=%s tool_call=%s status=%s exit=%d command=%q started_at=%s ended_at=%s\n", id, sessionID, toolCallID, status, exitCode, command, startedAt, endedAt)
 	}
 	if err := procRows.Err(); err != nil {
 		return err
@@ -169,7 +169,7 @@ func TraceRun(db *sql.DB, runID string, out io.Writer) error {
 		return err
 	}
 
-	evidenceRows, err := db.Query(`SELECT id, rollout_id, attempt_id, tool_call_id, snapshot_id, event_type, priority, status, created_at, COALESCE(processed_at, '')
+	evidenceRows, err := db.Query(`SELECT id, rollout_id, attempt_id, session_id, tool_call_id, snapshot_id, event_type, priority, status, created_at, COALESCE(processed_at, '')
 		FROM evidence_events WHERE run_id = ? ORDER BY created_at ASC`, runID)
 	if err != nil {
 		return err
@@ -177,11 +177,11 @@ func TraceRun(db *sql.DB, runID string, out io.Writer) error {
 	defer evidenceRows.Close()
 	fmt.Fprintln(out, "evidence_events:")
 	for evidenceRows.Next() {
-		var id, rolloutID, attemptID, toolCallID, snapshotID, eventType, priority, status, createdAt, processedAt string
-		if err := evidenceRows.Scan(&id, &rolloutID, &attemptID, &toolCallID, &snapshotID, &eventType, &priority, &status, &createdAt, &processedAt); err != nil {
+		var id, rolloutID, attemptID, sessionID, toolCallID, snapshotID, eventType, priority, status, createdAt, processedAt string
+		if err := evidenceRows.Scan(&id, &rolloutID, &attemptID, &sessionID, &toolCallID, &snapshotID, &eventType, &priority, &status, &createdAt, &processedAt); err != nil {
 			return err
 		}
-		fmt.Fprintf(out, "  evidence=%s rollout=%s attempt=%s tool_call=%s snapshot=%s type=%s priority=%s status=%s created_at=%s processed_at=%s\n", id, rolloutID, attemptID, toolCallID, snapshotID, eventType, priority, status, createdAt, processedAt)
+		fmt.Fprintf(out, "  evidence=%s rollout=%s attempt=%s session=%s tool_call=%s snapshot=%s type=%s priority=%s status=%s created_at=%s processed_at=%s\n", id, rolloutID, attemptID, sessionID, toolCallID, snapshotID, eventType, priority, status, createdAt, processedAt)
 	}
 	if err := evidenceRows.Err(); err != nil {
 		return err

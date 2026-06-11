@@ -42,6 +42,14 @@ type SessionInfo struct {
 	UpdatedAt             string
 }
 
+type WorkspaceSessionRequest struct {
+	RunID            string
+	TaskPath         string
+	WorkspacePath    string
+	ParentSnapshotID string
+	AttemptID        string
+}
+
 const (
 	CPUProfileThink = "think"
 	CPUProfileTool  = "tool"
@@ -141,6 +149,88 @@ func (s Service) CreateSession(leaseID string) (string, error) {
 	_, _ = s.DB.Exec(`UPDATE leases SET status = 'allocated', updated_at = ? WHERE id = ?`, now, leaseID)
 	_, _ = s.DB.Exec(`INSERT INTO cost_samples (id, run_id, session_id, wall_seconds, created_at)
 		VALUES (?, ?, ?, ?, ?)`, ids.New("cost"), runID, sessionID, float64(startupColdMS)/1000, now)
+	return sessionID, nil
+}
+
+func (s Service) CreateSessionFromWorkspace(req WorkspaceSessionRequest) (string, error) {
+	if req.TaskPath == "" {
+		return "", fmt.Errorf("task path is required")
+	}
+	if req.WorkspacePath == "" {
+		return "", fmt.Errorf("workspace path is required")
+	}
+	task, raw, err := LoadTask(req.TaskPath)
+	if err != nil {
+		return "", err
+	}
+	runID := req.RunID
+	if runID == "" {
+		runID = task.RunID
+	}
+	if runID == "" {
+		runID = ids.New("run")
+	}
+	sessionID := ids.New("sbx")
+	leaseID := ids.New("lease")
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := s.DB.Exec(`INSERT INTO leases (id, run_id, task_path, task_yaml, status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'allocated', ?, ?)`, leaseID, runID, req.TaskPath, string(raw), now, now); err != nil {
+		return "", err
+	}
+	decision, err := (scheduler.Scheduler{DB: s.DB}).Admit(scheduler.Request{
+		RunID:      runID,
+		SessionID:  sessionID,
+		Runtime:    s.runtimeName(),
+		RiskTier:   task.RiskTier,
+		CPURequest: task.CPURequest,
+		MemoryMB:   task.MemoryMB,
+		SnapshotID: req.ParentSnapshotID,
+	})
+	if err != nil {
+		return "", err
+	}
+	if !decision.Admitted {
+		return "", fmt.Errorf("admission rejected: reject_reason=%s effective_cpu=%.3f debt=%.3f burst_risk=%s overcommit_ratio=%.2f queue_pressure=%s memory_pressure=%s memory_allocated_mb=%d memory_request_mb=%d memory_capacity_mb=%d",
+			decision.RejectReason, decision.EffectiveCPU, decision.ActiveCPUDebt, decision.BurstRisk, decision.OvercommitRatio, decision.QueuePressure, decision.MemoryPressure, decision.MemoryAllocatedMB, decision.MemoryRequestMB, decision.MemoryCapacityMB)
+	}
+	var egressProxy egress.ProxyInfo
+	if s.isDockerRuntime() {
+		egressProxy, err = (egress.Service{DB: s.DB, Paths: s.Paths}).EnsureSessionProxy(runID, sessionID)
+		if err != nil {
+			return "", err
+		}
+	}
+	start := time.Now()
+	containerID, err := s.createRuntimeSession(runtimeplane.CreateSessionRequest{
+		SessionID:         sessionID,
+		LeaseID:           leaseID,
+		RunID:             runID,
+		Image:             task.Image,
+		WorkspaceHostPath: req.WorkspacePath,
+		MemoryMB:          task.MemoryMB,
+		CPURequest:        task.CPURequest,
+		NetworkMode:       task.NetworkMode,
+		ProxyURL:          egressProxy.ContainerProxyURL,
+		NoProxy:           "localhost,127.0.0.1,::1",
+		DockerNetworkName: egressProxy.NetworkName,
+	})
+	if err != nil {
+		return "", err
+	}
+	_ = s.setContainerCPUProfile(runID, sessionID, containerID, CPUProfileThink)
+	startupColdMS := time.Since(start).Milliseconds()
+	now = time.Now().UTC().Format(time.RFC3339Nano)
+	runtimeName := s.runtimeName()
+	if _, err := s.DB.Exec(`INSERT INTO sessions (id, lease_id, run_id, container_id, workspace_host_path, runtime, parent_snapshot_id, status, startup_cold_ms, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)`, sessionID, leaseID, runID, containerID, req.WorkspacePath, runtimeName, req.ParentSnapshotID, startupColdMS, now, now); err != nil {
+		return "", err
+	}
+	_, _ = s.DB.Exec(`INSERT INTO events (id, run_id, session_id, process_id, snapshot_id, source, event_type, payload, created_at)
+		VALUES (?, ?, ?, ?, ?, 'control_plane', 'rollout_attempt_session_create', ?, ?)`,
+		ids.New("evt"), runID, sessionID, req.AttemptID, req.ParentSnapshotID,
+		fmt.Sprintf(`{"container_id":%q,"workspace":%q,"startup_cold_ms":%d,"runtime":%q,"scheduler_decision":%q,"node_id":%q}`, containerID, req.WorkspacePath, startupColdMS, runtimeName, decision.Reason, decision.NodeID), now)
+	_, _ = s.DB.Exec(`INSERT INTO cost_samples (id, run_id, session_id, node_id, wall_seconds, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)`, ids.New("cost"), runID, sessionID, "local", float64(startupColdMS)/1000, now)
 	return sessionID, nil
 }
 

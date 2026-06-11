@@ -37,14 +37,14 @@ func rolloutStartCmd(dataDir *string) *cobra.Command {
 			fmt.Fprintf(cmd.OutOrStdout(), "rollout_id=%s run_id=%s status=%s base_snapshot=%s fanout=%d winner=%s promotion=%s risk=%s cost=%.6f\n",
 				item.ID, item.RunID, item.Status, item.BaseSnapshotID, item.Fanout, winner.AttemptID, promotion.ID, promotion.RiskStatus, item.CostEstimate)
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "ATTEMPT\tTOOL_CALL\tSTRATEGY\tSTATUS\tEXIT\tWALL_MS\tSCORE\tCOST\tWINNER\tWORKSPACE")
+			fmt.Fprintln(w, "ATTEMPT\tTOOL_CALL\tSESSION\tPROCESS\tSTRATEGY\tSTATUS\tEXIT\tWALL_MS\tSCORE\tCOST\tWINNER\tWORKSPACE")
 			for _, result := range results {
 				winnerMark := ""
 				if result.IsWinner {
 					winnerMark = "yes"
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%d\t%.3f\t%.6f\t%s\t%s\n",
-					result.AttemptID, result.ToolCallID, result.Strategy, result.Status, result.ExitCode, result.WallMS, result.Score, result.CostEstimate, winnerMark, result.WorkspacePath)
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%.3f\t%.6f\t%s\t%s\n",
+					result.AttemptID, result.ToolCallID, result.SessionID, result.ProcessID, result.Strategy, result.Status, result.ExitCode, result.WallMS, result.Score, result.CostEstimate, winnerMark, result.WorkspacePath)
 			}
 			return w.Flush()
 		},
@@ -57,6 +57,7 @@ func rolloutStartCmd(dataDir *string) *cobra.Command {
 	c.Flags().IntVar(&req.BudgetSeconds, "budget-seconds", 0, "rollout budget in seconds for accounting")
 	c.Flags().Float64Var(&req.MaxCost, "max-cost", 0, "maximum fanout cost budget before stopping")
 	c.Flags().BoolVar(&req.EarlyStop, "early-stop", false, "stop when a high-scoring passing attempt is found")
+	c.Flags().StringVar(&req.Runtime, "runtime", "local", "attempt execution runtime: local or docker")
 	_ = c.MarkFlagRequired("snapshot")
 	_ = c.MarkFlagRequired("strategy")
 	return c

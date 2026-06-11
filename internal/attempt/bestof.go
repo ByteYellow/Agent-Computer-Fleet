@@ -13,9 +13,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/byteyellow/agent-computer-fleet/internal/control"
 	"github.com/byteyellow/agent-computer-fleet/internal/ids"
+	runtimeplane "github.com/byteyellow/agent-computer-fleet/internal/runtime"
 	"github.com/byteyellow/agent-computer-fleet/internal/scheduler"
 	"github.com/byteyellow/agent-computer-fleet/internal/state"
+	"github.com/byteyellow/agent-computer-fleet/internal/store"
 )
 
 type Service struct {
@@ -26,6 +29,8 @@ type Service struct {
 type Result struct {
 	AttemptID      string
 	ToolCallID     string
+	SessionID      string
+	ProcessID      string
 	WorkspacePath  string
 	Strategy       string
 	Command        string
@@ -55,6 +60,11 @@ type Options struct {
 	RunID           string
 	BurstCPURequest float64
 	BurstTTL        time.Duration
+	Runtime         string
+	TaskPath        string
+	BaseSnapshotID  string
+	Paths           store.Paths
+	Driver          runtimeplane.Driver
 }
 
 type Strategy struct {
@@ -121,8 +131,8 @@ func (s Service) BestOfWithOptions(snapshotNameOrID string, strategies []string,
 		}
 		endedAt := time.Now().UTC().Format(time.RFC3339Nano)
 		if _, err := s.DB.Exec(`UPDATE tool_calls
-			SET status = ?, exit_code = ?, wall_ms = ?, cost_estimate = ?, result_ref = ?, policy_decision = 'allow', started_at = COALESCE(NULLIF(started_at, ''), created_at), ended_at = ?
-			WHERE id = ?`, result.Status, result.ExitCode, result.WallMS, result.CostEstimate, result.ArtifactResult, endedAt, result.ToolCallID); err != nil {
+			SET session_id = ?, status = ?, exit_code = ?, wall_ms = ?, cost_estimate = ?, result_ref = ?, policy_decision = 'allow', started_at = COALESCE(NULLIF(started_at, ''), created_at), ended_at = ?
+			WHERE id = ?`, result.SessionID, result.Status, result.ExitCode, result.WallMS, result.CostEstimate, result.ArtifactResult, endedAt, result.ToolCallID); err != nil {
 			return results, Result{}, err
 		}
 		if winnerIndex == -1 || better(result, results[winnerIndex]) {
@@ -151,6 +161,9 @@ func (s Service) BestOfWithOptions(snapshotNameOrID string, strategies []string,
 }
 
 func (s Service) runAttemptWithBurst(attemptID, toolCallID, workspacePath string, strategy Strategy, opts Options) Result {
+	if strings.EqualFold(opts.Runtime, "docker") {
+		return s.runDockerAttempt(attemptID, toolCallID, workspacePath, strategy, opts)
+	}
 	cpuRequest := opts.BurstCPURequest
 	if cpuRequest <= 0 {
 		cpuRequest = 1
@@ -200,6 +213,96 @@ func (s Service) runAttemptWithBurst(attemptID, toolCallID, workspacePath string
 	result.BurstReason = reservation.Reason
 	_ = (scheduler.Scheduler{DB: s.DB}).ReleaseBurst(reservation.ID)
 	return result
+}
+
+func (s Service) runDockerAttempt(attemptID, toolCallID, workspacePath string, strategy Strategy, opts Options) Result {
+	if opts.TaskPath == "" {
+		return rejectedResult(attemptID, toolCallID, workspacePath, strategy, "docker rollout requires task path")
+	}
+	if opts.Driver == nil {
+		return rejectedResult(attemptID, toolCallID, workspacePath, strategy, "docker rollout requires runtime driver")
+	}
+	ctrl := control.Service{DB: s.DB, Paths: opts.Paths, Driver: opts.Driver}
+	sessionID, err := ctrl.CreateSessionFromWorkspace(control.WorkspaceSessionRequest{
+		RunID:            opts.RunID,
+		TaskPath:         opts.TaskPath,
+		WorkspacePath:    workspacePath,
+		ParentSnapshotID: opts.BaseSnapshotID,
+		AttemptID:        attemptID,
+	})
+	if err != nil {
+		return rejectedResult(attemptID, toolCallID, workspacePath, strategy, err.Error())
+	}
+	defer func() { _ = ctrl.RemoveSession(sessionID) }()
+	var output bytes.Buffer
+	start := time.Now()
+	processID, execErr := ctrl.ExecStream(sessionID, []string{"sh", "-lc", strategy.Command}, &output, &output)
+	wallMS := time.Since(start).Milliseconds()
+	exitCode := 0
+	status := "passed"
+	if execErr != nil {
+		status = "failed"
+		exitCode = 1
+		if processID != "" {
+			_ = s.DB.QueryRow(`SELECT COALESCE(exit_code, 1) FROM processes WHERE id = ?`, processID).Scan(&exitCode)
+		}
+		if exitCode == 125 {
+			status = "rejected"
+		}
+	}
+	if processID != "" {
+		var dbExit int
+		if err := s.DB.QueryRow(`SELECT COALESCE(exit_code, ?) FROM processes WHERE id = ?`, exitCode, processID).Scan(&dbExit); err == nil {
+			exitCode = dbExit
+		}
+		_, _ = s.DB.Exec(`UPDATE processes SET tool_call_id = ? WHERE id = ?`, toolCallID, processID)
+		_, _ = s.DB.Exec(`UPDATE events SET tool_call_id = ? WHERE process_id = ?`, toolCallID, processID)
+	}
+	score := scoreOutput(output.String(), strategy.ScoreParser, wallMS, exitCode)
+	if exitCode != 0 {
+		score = -1000.0 - float64(exitCode)
+	}
+	cost := float64(wallMS) / 1000.0 * 0.001
+	result := Result{
+		AttemptID:      attemptID,
+		ToolCallID:     toolCallID,
+		SessionID:      sessionID,
+		ProcessID:      processID,
+		WorkspacePath:  workspacePath,
+		Strategy:       strategy.Name,
+		Command:        strategy.Command,
+		Status:         status,
+		ExitCode:       exitCode,
+		WallMS:         wallMS,
+		OutputSummary:  summarize(output.String()),
+		Score:          score,
+		BudgetSeconds:  strategy.BudgetSeconds,
+		ArtifactResult: strategy.ArtifactResult,
+		CostEstimate:   cost,
+		BurstStatus:    "runtime",
+	}
+	if execErr != nil && result.OutputSummary == "" {
+		result.OutputSummary = execErr.Error()
+	}
+	return result
+}
+
+func rejectedResult(attemptID, toolCallID, workspacePath string, strategy Strategy, reason string) Result {
+	return Result{
+		AttemptID:      attemptID,
+		ToolCallID:     toolCallID,
+		WorkspacePath:  workspacePath,
+		Strategy:       strategy.Name,
+		Command:        strategy.Command,
+		Status:         "rejected",
+		ExitCode:       125,
+		OutputSummary:  reason,
+		Score:          -2000,
+		BudgetSeconds:  strategy.BudgetSeconds,
+		ArtifactResult: strategy.ArtifactResult,
+		BurstStatus:    "rejected",
+		BurstReason:    reason,
+	}
 }
 
 func argsHash(command string) string {

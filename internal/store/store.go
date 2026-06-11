@@ -117,6 +117,7 @@ func EnsureSchema(db *sql.DB) error {
 			session_id TEXT NOT NULL,
 			container_id TEXT,
 			exec_id TEXT,
+			tool_call_id TEXT NOT NULL DEFAULT '',
 			command TEXT NOT NULL,
 			status TEXT NOT NULL,
 			exit_code INTEGER,
@@ -488,6 +489,7 @@ func EnsureSchema(db *sql.DB) error {
 	alterStmts := []string{
 		`ALTER TABLE sessions ADD COLUMN startup_cold_ms INTEGER NOT NULL DEFAULT 0;`,
 		`ALTER TABLE processes ADD COLUMN exit_code INTEGER;`,
+		`ALTER TABLE processes ADD COLUMN tool_call_id TEXT NOT NULL DEFAULT '';`,
 		`ALTER TABLE snapshots ADD COLUMN kind TEXT NOT NULL DEFAULT 'directory';`,
 		`ALTER TABLE snapshots ADD COLUMN source TEXT NOT NULL DEFAULT 'session';`,
 		`ALTER TABLE snapshots ADD COLUMN snapshot_create_ms INTEGER NOT NULL DEFAULT 0;`,

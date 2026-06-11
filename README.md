@@ -74,6 +74,7 @@ acfctl snapshot create "$SESSION_ID" --type directory --path /workspace --name r
 acfctl rollout start \
   --task examples/tasks/bugfix.yaml \
   --snapshot ready \
+  --runtime docker \
   --fanout 3 \
   --strategy 'probe::test -f hello.txt && echo passed::score=contains:passed' \
   --strategy 'fast::printf 42::score=number' \
@@ -104,9 +105,10 @@ The current repository is a local-first MVP. It currently supports:
 - local preview URL proxy
 - directory snapshot, fork, and resume
 - template → ready snapshot → attempt workspace lineage
-- rollout fanout and best-of-forks
-- BurstGuard admission before synchronized tool phases
+- rollout fanout and best-of-forks, including Docker-backed short-lived attempt sessions via `--runtime docker`
+- BurstGuard admission before synchronized tool phases, with default reject and optional delay/queue policy
 - Docker CPU profile switching between `think` and `tool`
+- promotion barrier with evidence drain, risk finalization, and taint rejection
 - active CPU / idle / wall-time cost accounting
 - async evidence and cleanup pipeline
 - I/O-aware snapshot planning
@@ -145,7 +147,7 @@ SESSION_ID=$(./acfctl session create --lease "$LEASE_ID")
 ./acfctl exec "$SESSION_ID" --stream -- sh -lc 'echo hello > hello.txt'
 ./acfctl snapshot create "$SESSION_ID" --type directory --path /workspace --name ready
 
-./acfctl rollout start --task examples/tasks/bugfix.yaml --snapshot ready --fanout 3 \
+./acfctl rollout start --task examples/tasks/bugfix.yaml --snapshot ready --runtime docker --fanout 3 \
   --strategy 'probe::test -f hello.txt && echo passed::score=contains:passed' \
   --strategy 'fast::printf 42::score=number' \
   --strategy 'slow::sleep 1; echo passed::score=contains:passed'
@@ -218,6 +220,12 @@ acfctl snapshot create <session_id> --type directory --path /workspace --name re
 acfctl snapshot plan ready
 acfctl fork ready --count 3
 acfctl snapshot resume ready --lease <lease_id>
+
+acfctl rollout start --task examples/tasks/bugfix.yaml --snapshot ready --runtime docker --fanout 3 \
+  --strategy "probe::test -f task.yaml && echo passed::score=contains:passed" \
+  --strategy "score::printf 42::score=number" \
+  --strategy "slow::sleep 1; echo passed::score=contains:passed"
+acfctl rollout winner <rollout_id_or_run_id>
 
 acfctl attempt best-of --snapshot ready \
   --max-fanout 2 --max-cost 1 --early-stop \
@@ -332,7 +340,7 @@ SESSIONS=50 ./scripts/demo_v01_50_concurrency.sh
 
 The CPU weight demo verifies the control-plane loop with Docker `CpuShares`: `think=2`, `tool=1024`, then back to `think=2` after exec. On Linux cgroup v2, Docker maps this control path to cgroup CPU weight behavior; a direct `cpu.weight` node-agent writer is a later Linux-specific optimization.
 
-The concurrency demo sets `ACF_BURST_MAX_INFLIGHT` and proves that not every simultaneous tool call is promoted to the high-priority CPU profile.
+The concurrency demo sets `ACF_BURST_MAX_INFLIGHT` and proves that not every simultaneous tool call is promoted to the high-priority CPU profile. Set `ACF_BURST_OVERFLOW_POLICY=delay` with `ACF_BURST_QUEUE_TIMEOUT_MS` to let excess tool phases wait for a burst slot instead of failing immediately.
 
 The I/O-aware snapshot demo shows hot metadata path detection, I/O fanout rejection, and graph trace reasons for not choosing overlay.
 
@@ -341,7 +349,7 @@ The I/O-aware snapshot demo shows hot metadata path detection, I/O fanout reject
 Near term:
 
 - JSON output mode for automation
-- Stronger promotion barrier: telemetry watermark, risk finalization, and taint freeze
+- Promotion barrier hardening beyond local evidence drain: external telemetry watermarks and taint freeze
 - Snapshot taint propagation
 - Stronger process manager and process tree enforcement
 - Raw TCP policy enforcement for non-HTTP protocols

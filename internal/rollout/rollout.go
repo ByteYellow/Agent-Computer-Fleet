@@ -4,10 +4,13 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/byteyellow/agent-computer-fleet/internal/attempt"
+	"github.com/byteyellow/agent-computer-fleet/internal/evidence"
 	"github.com/byteyellow/agent-computer-fleet/internal/ids"
+	runtimeplane "github.com/byteyellow/agent-computer-fleet/internal/runtime"
 	"github.com/byteyellow/agent-computer-fleet/internal/state"
 	"github.com/byteyellow/agent-computer-fleet/internal/store"
 	"gopkg.in/yaml.v3"
@@ -27,6 +30,7 @@ type StartRequest struct {
 	BudgetSeconds int
 	MaxCost       float64
 	EarlyStop     bool
+	Runtime       string
 }
 
 type Rollout struct {
@@ -94,6 +98,12 @@ func (s Service) Start(req StartRequest) (Rollout, []attempt.Result, attempt.Res
 	if req.Fanout <= 0 || req.Fanout > len(req.Strategies) {
 		req.Fanout = len(req.Strategies)
 	}
+	if req.Runtime == "" {
+		req.Runtime = "local"
+	}
+	if req.Runtime != "local" && req.Runtime != "docker" {
+		return Rollout{}, nil, attempt.Result{}, Promotion{}, fmt.Errorf("unsupported rollout runtime %q", req.Runtime)
+	}
 	baseSnapshotID, err := s.resolveSnapshotID(req.Snapshot)
 	if err != nil {
 		return Rollout{}, nil, attempt.Result{}, Promotion{}, err
@@ -109,7 +119,16 @@ func (s Service) Start(req StartRequest) (Rollout, []attempt.Result, attempt.Res
 	}
 	stateSvc := state.Service{DB: s.DB, Paths: s.Paths}
 	attemptSvc := attempt.Service{DB: s.DB, State: stateSvc}
-	results, winner, err := attemptSvc.BestOfWithOptions(baseSnapshotID, req.Strategies, attempt.Options{MaxFanout: req.Fanout, MaxCost: req.MaxCost, EarlyStop: req.EarlyStop, RunID: req.RunID})
+	opts := attempt.Options{MaxFanout: req.Fanout, MaxCost: req.MaxCost, EarlyStop: req.EarlyStop, RunID: req.RunID, Runtime: req.Runtime, TaskPath: req.TaskPath, BaseSnapshotID: baseSnapshotID, Paths: s.Paths}
+	if req.Runtime == "docker" {
+		driver, err := runtimeplane.NewDriver("docker", s.Paths)
+		if err != nil {
+			_, _ = s.DB.Exec(`UPDATE rollouts SET status = 'failed', updated_at = ? WHERE id = ?`, time.Now().UTC().Format(time.RFC3339Nano), rolloutID)
+			return Rollout{}, nil, attempt.Result{}, Promotion{}, err
+		}
+		opts.Driver = driver
+	}
+	results, winner, err := attemptSvc.BestOfWithOptions(baseSnapshotID, req.Strategies, opts)
 	if err != nil {
 		_, _ = s.DB.Exec(`UPDATE rollouts SET status = 'failed', updated_at = ? WHERE id = ?`, time.Now().UTC().Format(time.RFC3339Nano), rolloutID)
 		return Rollout{}, results, attempt.Result{}, Promotion{}, err
@@ -119,8 +138,8 @@ func (s Service) Start(req StartRequest) (Rollout, []attempt.Result, attempt.Res
 		totalCost += result.CostEstimate
 		_, _ = s.DB.Exec(`UPDATE fork_attempts SET rollout_id = ?, tool_call_id = ? WHERE id = ?`, rolloutID, result.ToolCallID, result.AttemptID)
 		_, _ = s.DB.Exec(`UPDATE tool_calls SET rollout_id = ?, run_id = ? WHERE id = ?`, rolloutID, req.RunID, result.ToolCallID)
-		_ = s.appendEvidence(req.RunID, rolloutID, result.AttemptID, result.ToolCallID, baseSnapshotID, "attempt_finished", "normal",
-			fmt.Sprintf(`{"status":%q,"strategy":%q,"score":%.3f,"cost":%.6f,"burst_status":%q}`, result.Status, result.Strategy, result.Score, result.CostEstimate, result.BurstStatus))
+		_ = s.appendEvidence(req.RunID, rolloutID, result.AttemptID, result.SessionID, result.ToolCallID, baseSnapshotID, "attempt_finished", "normal",
+			fmt.Sprintf(`{"status":%q,"strategy":%q,"score":%.3f,"cost":%.6f,"burst_status":%q,"process_id":%q}`, result.Status, result.Strategy, result.Score, result.CostEstimate, result.BurstStatus, result.ProcessID))
 	}
 	promotion, err := s.promoteWithBarrier(rolloutID, baseSnapshotID, winner.AttemptID)
 	if err != nil {
@@ -311,7 +330,7 @@ func (s Service) inspectAttempt(attemptID string) (AttemptInfo, error) {
 func (s Service) promoteWithBarrier(rolloutID, baseSnapshotID, attemptID string) (Promotion, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	promotionID := ids.New("promo")
-	watermark := "mock-watermark-" + attemptID
+	watermark := now
 	_, err := s.DB.Exec(`INSERT INTO promotions
 		(id, rollout_id, attempt_id, base_snapshot_id, status, telemetry_watermark, risk_status, reason, created_at, updated_at)
 		VALUES (?, ?, ?, ?, 'promote_candidate', ?, 'pending', 'telemetry drain requested', ?, ?)`,
@@ -325,7 +344,7 @@ func (s Service) promoteWithBarrier(rolloutID, baseSnapshotID, attemptID string)
 
 	updated := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err = s.DB.Exec(`UPDATE promotions
-		SET status = 'telemetry_drain_pending', reason = 'mock telemetry drain pending', updated_at = ?
+		SET status = 'telemetry_drain_pending', reason = 'telemetry/evidence drain pending', updated_at = ?
 		WHERE id = ?`, updated, promotionID)
 	if err != nil {
 		return Promotion{}, err
@@ -334,10 +353,22 @@ func (s Service) promoteWithBarrier(rolloutID, baseSnapshotID, attemptID string)
 		SELECT ?, run_id, 'rollout', 'telemetry_drain_pending', ?, ? FROM rollouts WHERE id = ?`,
 		ids.New("evt"), fmt.Sprintf(`{"rollout_id":%q,"attempt_id":%q,"promotion_id":%q,"telemetry_watermark":%q}`, rolloutID, attemptID, promotionID, watermark), updated, rolloutID)
 
+	drained, drainReason := s.drainPromotionEvidence(attemptID)
+	if !drained {
+		updated = time.Now().UTC().Format(time.RFC3339Nano)
+		_, _ = s.DB.Exec(`UPDATE promotions
+			SET status = 'rejected', risk_status = 'pending', reason = ?, updated_at = ?
+			WHERE id = ?`, drainReason, updated, promotionID)
+		_, _ = s.DB.Exec(`INSERT INTO events (id, run_id, source, event_type, payload, created_at)
+			SELECT ?, run_id, 'rollout', 'promotion_rejected', ?, ? FROM rollouts WHERE id = ?`,
+			ids.New("evt"), fmt.Sprintf(`{"rollout_id":%q,"attempt_id":%q,"promotion_id":%q,"reason":%q}`, rolloutID, attemptID, promotionID, drainReason), updated, rolloutID)
+		return s.inspectPromotion(promotionID)
+	}
+
 	updated = time.Now().UTC().Format(time.RFC3339Nano)
 	_, err = s.DB.Exec(`UPDATE promotions
-		SET status = 'risk_finalized', risk_status = 'clean', reason = 'mock telemetry drain complete; risk finalized clean', updated_at = ?
-		WHERE id = ?`, updated, promotionID)
+		SET status = 'risk_finalized', risk_status = 'clean', reason = ?, updated_at = ?
+		WHERE id = ?`, drainReason+"; risk finalized clean", updated, promotionID)
 	if err != nil {
 		return Promotion{}, err
 	}
@@ -358,8 +389,8 @@ func (s Service) promoteWithBarrier(rolloutID, baseSnapshotID, attemptID string)
 
 	updated = time.Now().UTC().Format(time.RFC3339Nano)
 	_, err = s.DB.Exec(`UPDATE promotions
-		SET status = 'promoted', risk_status = 'clean', reason = 'mock telemetry drain complete; risk finalized clean', updated_at = ?
-		WHERE id = ?`, updated, promotionID)
+		SET status = 'promoted', risk_status = 'clean', reason = ?, updated_at = ?
+		WHERE id = ?`, drainReason+"; risk finalized clean", updated, promotionID)
 	if err != nil {
 		return Promotion{}, err
 	}
@@ -367,6 +398,34 @@ func (s Service) promoteWithBarrier(rolloutID, baseSnapshotID, attemptID string)
 		SELECT ?, run_id, 'rollout', 'winner_promoted', ?, ? FROM rollouts WHERE id = ?`,
 		ids.New("evt"), fmt.Sprintf(`{"rollout_id":%q,"attempt_id":%q,"promotion_id":%q}`, rolloutID, attemptID, promotionID), updated, rolloutID)
 	return s.inspectPromotion(promotionID)
+}
+
+func (s Service) drainPromotionEvidence(attemptID string) (bool, string) {
+	timeout := time.Duration(envInt64("ACF_PROMOTION_DRAIN_TIMEOUT_MS", 1000)) * time.Millisecond
+	if timeout < 0 {
+		timeout = 0
+	}
+	deadline := time.Now().Add(timeout)
+	processedTotal := 0
+	for {
+		var queued int
+		_ = s.DB.QueryRow(`SELECT COALESCE(COUNT(*), 0) FROM evidence_events
+			WHERE attempt_id = ? AND status = 'queued'`, attemptID).Scan(&queued)
+		if queued == 0 {
+			return true, fmt.Sprintf("telemetry/evidence drained: processed=%d", processedTotal)
+		}
+		result, err := (evidence.Service{DB: s.DB, Paths: s.Paths}).ProcessEvidence(100)
+		if err != nil {
+			return false, "telemetry/evidence drain failed: " + err.Error()
+		}
+		processedTotal += result.Processed
+		if time.Now().After(deadline) {
+			return false, fmt.Sprintf("telemetry/evidence drain timeout: queued=%d processed=%d timeout_ms=%d", queued, processedTotal, timeout.Milliseconds())
+		}
+		if result.Processed == 0 {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
 }
 
 func (s Service) attemptTainted(attemptID, baseSnapshotID string) (bool, string) {
@@ -393,12 +452,12 @@ func (s Service) attemptTainted(attemptID, baseSnapshotID string) (bool, string)
 	return false, ""
 }
 
-func (s Service) appendEvidence(runID, rolloutID, attemptID, toolCallID, snapshotID, eventType, priority, payload string) error {
+func (s Service) appendEvidence(runID, rolloutID, attemptID, sessionID, toolCallID, snapshotID, eventType, priority, payload string) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := s.DB.Exec(`INSERT INTO evidence_events
-		(id, run_id, rollout_id, attempt_id, tool_call_id, snapshot_id, event_type, priority, payload, status, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)`,
-		ids.New("evidence"), runID, rolloutID, attemptID, toolCallID, snapshotID, eventType, priority, payload, now)
+		(id, run_id, rollout_id, attempt_id, session_id, tool_call_id, snapshot_id, event_type, priority, payload, status, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)`,
+		ids.New("evidence"), runID, rolloutID, attemptID, sessionID, toolCallID, snapshotID, eventType, priority, payload, now)
 	return err
 }
 
@@ -427,4 +486,16 @@ func (s Service) resolveSnapshotID(nameOrID string) (string, error) {
 		return "", fmt.Errorf("resolve snapshot %q: %w", nameOrID, err)
 	}
 	return id, nil
+}
+
+func envInt64(name string, fallback int64) int64 {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }

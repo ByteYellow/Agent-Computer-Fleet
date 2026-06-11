@@ -11,12 +11,21 @@ import (
 )
 
 type Capabilities struct {
-	Exec           bool
-	Stop           bool
-	Snapshot       bool
-	Fork           bool
-	Resume         bool
-	MemorySnapshot bool
+	Exec               bool
+	Stop               bool
+	Pause              bool
+	Resume             bool
+	Snapshot           bool
+	Fork               bool
+	MemorySnapshot     bool
+	CPUWeight          bool
+	FilesystemSnapshot string
+	MemorySnapshotType string
+	ResumeLatencyClass string
+	IsolationLevel     string
+	QuotaSupport       string
+	NetworkPolicy      string
+	TelemetryBinding   []string
 }
 
 type Backend struct {
@@ -61,6 +70,7 @@ type Driver interface {
 	CreateDirectorySnapshot(context.Context, string, string) (state.Manifest, error)
 	ForkDirectorySnapshot(context.Context, string, string) (state.Manifest, error)
 	ResumeDirectorySnapshot(context.Context, string, string) (state.Manifest, error)
+	SetCPUWeight(context.Context, string, int64) error
 }
 
 func NewDriver(name string, paths store.Paths) (Driver, error) {
@@ -115,12 +125,21 @@ func Inspect(paths store.Paths, name string) (Backend, error) {
 
 func dockerCapabilities() Capabilities {
 	return Capabilities{
-		Exec:           true,
-		Stop:           true,
-		Snapshot:       true,
-		Fork:           true,
-		Resume:         true,
-		MemorySnapshot: false,
+		Exec:               true,
+		Stop:               true,
+		Pause:              false,
+		Snapshot:           true,
+		Fork:               true,
+		Resume:             true,
+		MemorySnapshot:     false,
+		CPUWeight:          true,
+		FilesystemSnapshot: "copy",
+		MemorySnapshotType: "none",
+		ResumeLatencyClass: "cold",
+		IsolationLevel:     "container",
+		QuotaSupport:       "cgroup",
+		NetworkPolicy:      "proxy",
+		TelemetryBinding:   []string{"label", "container_id"},
 	}
 }
 
@@ -130,12 +149,21 @@ func stubBackend(name, notes string) Backend {
 		Status:    "planned",
 		Available: false,
 		Capabilities: Capabilities{
-			Exec:           false,
-			Stop:           false,
-			Snapshot:       false,
-			Fork:           false,
-			Resume:         false,
-			MemorySnapshot: false,
+			Exec:               false,
+			Stop:               false,
+			Pause:              false,
+			Snapshot:           false,
+			Fork:               false,
+			Resume:             false,
+			MemorySnapshot:     false,
+			CPUWeight:          false,
+			FilesystemSnapshot: "none",
+			MemorySnapshotType: "none",
+			ResumeLatencyClass: "none",
+			IsolationLevel:     "unknown",
+			QuotaSupport:       "none",
+			NetworkPolicy:      "none",
+			TelemetryBinding:   nil,
 		},
 		Notes: notes,
 	}
@@ -182,4 +210,7 @@ func (d StubDriver) ForkDirectorySnapshot(context.Context, string, string) (stat
 }
 func (d StubDriver) ResumeDirectorySnapshot(context.Context, string, string) (state.Manifest, error) {
 	return state.Manifest{}, fmt.Errorf("runtime backend %q does not support resume", d.NameValue)
+}
+func (d StubDriver) SetCPUWeight(context.Context, string, int64) error {
+	return fmt.Errorf("runtime backend %q does not support CPU weight control", d.NameValue)
 }

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -144,6 +145,39 @@ func TestCreateStackFromTemplateRecordsBundleLineage(t *testing.T) {
 	}
 	if ready.ParentID != templateID || len(lineage) != 2 || lineage[1].ID != templateID {
 		t.Fatalf("unexpected lineage: ready=%+v lineage=%+v", ready, lineage)
+	}
+}
+
+func TestAnalyzeIOProfileDetectsHotMetadataPaths(t *testing.T) {
+	root := t.TempDir()
+	paths := []string{
+		filepath.Join(root, ".git", "objects", "aa", "obj"),
+		filepath.Join(root, "node_modules", "pkg", "index.js"),
+		filepath.Join(root, ".venv", "lib", "site-packages", "pkg.py"),
+		filepath.Join(root, "src", "main.go"),
+	}
+	for _, path := range paths {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	profile, err := AnalyzeIOProfile(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.CopyUpRisk != "high" {
+		t.Fatalf("copy_up_risk=%s, want high", profile.CopyUpRisk)
+	}
+	if profile.MetadataOpsEstimate <= int64(len(paths)) {
+		t.Fatalf("metadata estimate did not account for hot paths: %+v", profile)
+	}
+	for _, want := range []string{".git", ".venv", "node_modules"} {
+		if !strings.Contains(strings.Join(profile.HotMetadataPaths, ","), want) {
+			t.Fatalf("hot paths %+v missing %s", profile.HotMetadataPaths, want)
+		}
 	}
 }
 

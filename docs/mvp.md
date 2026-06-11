@@ -28,6 +28,11 @@ acfctl snapshot inspect ready
 acfctl snapshot plan ready
 acfctl fork ready --count 2
 acfctl snapshot resume ready --lease <lease_id>
+acfctl rollout start --task examples/tasks/bugfix.yaml --snapshot ready --fanout 3 \
+  --strategy "probe::test -f hello.txt && echo passed::score=contains:passed::artifact=probe.log" \
+  --strategy "score::printf 42::score=number::artifact=score.txt" \
+  --strategy "slow::sleep 1; echo passed::score=contains:passed::artifact=slow.log"
+acfctl rollout winner run-demo-bugfix
 acfctl attempt best-of --snapshot ready --max-fanout 2 --max-cost 1 --early-stop \
   --strategy "probe::printf 42::budget=2::score=number::artifact=probe.txt" \
   --strategy "full::test -f hello.txt && echo passed::budget=5::score=contains:passed::artifact=hello.txt"
@@ -145,6 +150,28 @@ marks the winning attempt. Strategy metadata can include `budget`,
 `score=contains:<text>` or `score=number`, and `artifact`. Cost output includes
 fanout cost and saved cost when early stop or max fanout avoids extra work.
 
+### demo_rollout_control_plane
+
+```sh
+acfctl snapshot stack --task examples/tasks/bugfix.yaml
+ACF_IO_MAX_FANOUT_PER_LOWER=100 ACF_BURST_MAX_INFLIGHT=2 \
+  acfctl rollout start --task examples/tasks/bugfix.yaml --snapshot ready --fanout 3 \
+  --strategy "probe::test -f README.md && echo passed::score=contains:passed::artifact=probe.log" \
+  --strategy "score::printf 42::score=number::artifact=score.txt" \
+  --strategy "slow::sleep 1; echo passed::score=contains:passed::artifact=slow.log"
+acfctl rollout attempts <rollout_id>
+acfctl rollout winner <rollout_id>
+acfctl evidence process
+acfctl graph trace --run run-demo-bugfix
+acfctl cost show run-demo-bugfix
+```
+
+This is the v0.1 Agent Rollout Control Plane path. It starts from a ready
+snapshot, forks attempt workspaces, creates one `tool_call` per strategy,
+requires BurstGuard admission before command execution, writes compact evidence,
+materializes `rollout -> attempt -> tool_call` graph edges asynchronously, and
+promotes the winning attempt through the promotion barrier.
+
 ### demo_metadata_egress_quarantine
 
 ```sh
@@ -189,7 +216,8 @@ acfctl cost show run-demo-bugfix
 The output includes run-level `active_cpu_seconds`, `idle_seconds`,
 `wall_seconds`, `snapshot_bytes`, `policy_block_count`, `quarantine_count`,
 `overcommit_ratio`, `active_cpu_debt`, `queue_pressure`, and `cost_per_run`,
-plus session-level and node-level cost rows.
+plus session-level and node-level cost rows. CPU and idle cost now come from
+10s/60s resource windows, while raw Docker stats are short-retention input.
 
 ### demo_provenance_trace
 
@@ -209,6 +237,7 @@ acfctl pool create --template bugfix --size 2
 acfctl pool status
 acfctl node register --address localhost --runtime docker --cpu 8 --memory-mb 8192
 acfctl node list
+acfctl scheduler status
 ```
 
 Warm pool entries track hit count, cold-start savings, memory, disk footprint,
@@ -232,9 +261,73 @@ overcommitted. The bursty mode simulates periodic active-CPU spikes and reports
 `effective_cpu`, `active_cpu_debt`, `burst_risk`, overcommit ratio, memory
 pressure, and structured reject reason.
 
+In daemon mode, resource sampling is bounded and windowed:
+
+```sh
+acfctl daemon serve \
+  --sample-interval 5s \
+  --sample-limit 64 \
+  --sample-timeout 2s \
+  --raw-retention 10m \
+  --max-raw-samples 512
+```
+
+Each sampling round writes short-lived raw samples, aggregates them into
+`session_resource_windows` and `node_resource_windows`, then applies raw sample
+retention. Scheduler admission reads the window tables rather than scanning
+unbounded raw samples.
+
+BurstGuard adds a forward-looking admission gate for synchronized tool phases:
+`exec` must reserve burst budget before the session can switch from `think` to
+`tool`. If too many sessions enter tool phase at once, exec is rejected before
+CPU weight is raised.
+
+### demo_cpu_weight_control
+
+```sh
+./scripts/demo_cpu_weight_control.sh
+```
+
+This verifies the v0.1 CPU time-sharing control loop. A new Docker session is
+placed in the low-priority `think` profile, tool execution switches the
+container to `tool`, and `exec` returns it to `think` after the command exits.
+The demo checks Docker `CpuShares` directly and prints `cpu_weight_set`
+telemetry events.
+
+For a larger local rehearsal:
+
+```sh
+SESSIONS=50 BURST_MAX_INFLIGHT=4 ./scripts/demo_v01_50_concurrency.sh
+```
+
+The output includes admitted/rejected exec counts, `burst_reject` telemetry,
+and `scheduler status` fields such as `tool_phase_inflight`,
+`burst_reserved_cpu`, `burst_debt`, and `burst_reject_count`.
+
+### demo_ioaware_snapshot_planner
+
+```sh
+./scripts/demo_ioaware_snapshot_planner.sh
+```
+
+This creates hot metadata paths such as `.git`, `node_modules`, and `.venv`,
+then shows `snapshot plan` output with `copy_up_risk`,
+`metadata_ops_estimate`, `shared_lower_fanout`, `io_fanout_budget`,
+`upperdir_shard`, `upperdir_device`, and `hot_metadata_paths`. It also
+demonstrates I/O fanout rejection with
+`ACF_IO_MAX_FANOUT_PER_LOWER=1` and uses `graph trace` to show why overlay was
+not selected.
+
 ## MVP limits
 
 - Docker must be running for `session`, `exec`, and `process` commands.
+- CPU weight control uses Docker `ContainerUpdate` / `CpuShares`. On Linux
+  cgroup v2 this maps to cgroup CPU weight behavior; a direct node-agent
+  `cpu.weight` writer is a future Linux-specific hardening path.
+- BurstGuard currently rejects excess synchronized tool phases; queue/delay is
+  a follow-up policy.
+- IO-aware snapshot planning estimates copy-up and metadata risk. It does not
+  yet create real OverlayFS/reflink/COW mounts.
 - Directory snapshot/fork/resume is supported; memory snapshots are
   intentionally not.
 - Runtime backends are capability-gated. Docker is active; Firecracker, gVisor,

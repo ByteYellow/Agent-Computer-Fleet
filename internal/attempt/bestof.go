@@ -3,13 +3,18 @@ package attempt
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/byteyellow/agent-computer-fleet/internal/ids"
+	"github.com/byteyellow/agent-computer-fleet/internal/scheduler"
 	"github.com/byteyellow/agent-computer-fleet/internal/state"
 )
 
@@ -20,6 +25,7 @@ type Service struct {
 
 type Result struct {
 	AttemptID      string
+	ToolCallID     string
 	WorkspacePath  string
 	Strategy       string
 	Command        string
@@ -33,6 +39,9 @@ type Result struct {
 	CostEstimate   float64
 	SavedCost      float64
 	IsWinner       bool
+	BurstID        string
+	BurstStatus    string
+	BurstReason    string
 }
 
 func (s Service) BestOf(snapshotNameOrID string, strategies []string) ([]Result, Result, error) {
@@ -40,9 +49,12 @@ func (s Service) BestOf(snapshotNameOrID string, strategies []string) ([]Result,
 }
 
 type Options struct {
-	MaxFanout int
-	MaxCost   float64
-	EarlyStop bool
+	MaxFanout       int
+	MaxCost         float64
+	EarlyStop       bool
+	RunID           string
+	BurstCPURequest float64
+	BurstTTL        time.Duration
 }
 
 type Strategy struct {
@@ -61,32 +73,60 @@ func (s Service) BestOfWithOptions(snapshotNameOrID string, strategies []string,
 	if opts.MaxFanout <= 0 || opts.MaxFanout > len(parsed) {
 		opts.MaxFanout = len(parsed)
 	}
+	if opts.MaxCost > 0 {
+		maxByCost := int(opts.MaxCost / 0.001)
+		if maxByCost < 1 {
+			maxByCost = 1
+		}
+		if maxByCost < opts.MaxFanout {
+			opts.MaxFanout = maxByCost
+		}
+	}
 	parsed = parsed[:opts.MaxFanout]
 	forks, err := s.State.Fork(snapshotNameOrID, len(parsed))
 	if err != nil {
 		return nil, Result{}, err
 	}
-	results := make([]Result, 0, len(parsed))
+	toolCallIDs := make([]string, len(parsed))
+	createdAt := time.Now().UTC().Format(time.RFC3339Nano)
+	for i, strategy := range parsed {
+		toolCallID := ids.New("tool")
+		toolCallIDs[i] = toolCallID
+		if _, err := s.DB.Exec(`INSERT INTO tool_calls
+			(id, run_id, attempt_id, command, args_hash, status, created_at)
+			VALUES (?, ?, ?, ?, ?, 'prepared', ?)`,
+			toolCallID, opts.RunID, forks[i].AttemptID, strategy.Command, argsHash(strategy.Command), createdAt); err != nil {
+			return nil, Result{}, err
+		}
+	}
+	results := make([]Result, len(parsed))
+	var wg sync.WaitGroup
+	for i, fork := range forks {
+		wg.Add(1)
+		go func(i int, fork state.ForkResult, strategy Strategy, toolCallID string) {
+			defer wg.Done()
+			results[i] = s.runAttemptWithBurst(fork.AttemptID, toolCallID, fork.WorkspacePath, strategy, opts)
+		}(i, fork, parsed[i], toolCallIDs[i])
+	}
+	wg.Wait()
+
 	winnerIndex := -1
 	var totalCost float64
-	for i, fork := range forks {
-		strategy := parsed[i]
-		if opts.MaxCost > 0 && totalCost >= opts.MaxCost {
-			break
-		}
-		result := runAttempt(fork.AttemptID, fork.WorkspacePath, strategy)
+	for i, result := range results {
 		totalCost += result.CostEstimate
 		if _, err := s.DB.Exec(`UPDATE fork_attempts
-			SET strategy = ?, command = ?, status = ?, exit_code = ?, wall_ms = ?, output_summary = ?, score = ?, budget_seconds = ?, artifact_result = ?, cost_estimate = ?, saved_cost = ?
-			WHERE id = ?`, result.Strategy, result.Command, result.Status, result.ExitCode, result.WallMS, result.OutputSummary, result.Score, result.BudgetSeconds, result.ArtifactResult, result.CostEstimate, result.SavedCost, result.AttemptID); err != nil {
+			SET tool_call_id = ?, strategy = ?, command = ?, status = ?, exit_code = ?, wall_ms = ?, output_summary = ?, score = ?, budget_seconds = ?, artifact_result = ?, cost_estimate = ?, saved_cost = ?
+			WHERE id = ?`, result.ToolCallID, result.Strategy, result.Command, result.Status, result.ExitCode, result.WallMS, result.OutputSummary, result.Score, result.BudgetSeconds, result.ArtifactResult, result.CostEstimate, result.SavedCost, result.AttemptID); err != nil {
 			return results, Result{}, err
 		}
-		results = append(results, result)
+		endedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		if _, err := s.DB.Exec(`UPDATE tool_calls
+			SET status = ?, exit_code = ?, wall_ms = ?, cost_estimate = ?, result_ref = ?, policy_decision = 'allow', started_at = COALESCE(NULLIF(started_at, ''), created_at), ended_at = ?
+			WHERE id = ?`, result.Status, result.ExitCode, result.WallMS, result.CostEstimate, result.ArtifactResult, endedAt, result.ToolCallID); err != nil {
+			return results, Result{}, err
+		}
 		if winnerIndex == -1 || better(result, results[winnerIndex]) {
 			winnerIndex = i
-		}
-		if opts.EarlyStop && result.ExitCode == 0 && result.Score >= 1000 {
-			break
 		}
 	}
 	if winnerIndex == -1 {
@@ -108,6 +148,63 @@ func (s Service) BestOfWithOptions(snapshotNameOrID string, strategies []string,
 		FROM snapshots sn LEFT JOIN sessions s ON sn.session_id = s.id WHERE sn.id = (SELECT snapshot_id FROM fork_attempts WHERE id = ?)
 		LIMIT 1`, totalCost, saved, time.Now().UTC().Format(time.RFC3339Nano), winner.AttemptID)
 	return results, winner, nil
+}
+
+func (s Service) runAttemptWithBurst(attemptID, toolCallID, workspacePath string, strategy Strategy, opts Options) Result {
+	cpuRequest := opts.BurstCPURequest
+	if cpuRequest <= 0 {
+		cpuRequest = 1
+	}
+	ttl := opts.BurstTTL
+	if ttl <= 0 {
+		ttl = 30 * time.Second
+	}
+	runID := opts.RunID
+	if runID == "" {
+		runID = "unknown"
+	}
+	startedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	_, _ = s.DB.Exec(`UPDATE tool_calls SET status = 'burst_pending', started_at = ? WHERE id = ?`, startedAt, toolCallID)
+	reservation, err := (scheduler.Scheduler{DB: s.DB}).ReserveBurst(runID, attemptID, toolCallID, cpuRequest, ttl)
+	if err != nil {
+		reason := reservation.Reason
+		if reason == "" {
+			reason = err.Error()
+		}
+		endedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		_, _ = s.DB.Exec(`UPDATE tool_calls
+			SET status = 'rejected', exit_code = 125, result_ref = ?, policy_decision = 'allow', ended_at = ?
+			WHERE id = ?`, reason, endedAt, toolCallID)
+		return Result{
+			AttemptID:      attemptID,
+			ToolCallID:     toolCallID,
+			WorkspacePath:  workspacePath,
+			Strategy:       strategy.Name,
+			Command:        strategy.Command,
+			Status:         "rejected",
+			ExitCode:       125,
+			OutputSummary:  reason,
+			Score:          -2000,
+			BudgetSeconds:  strategy.BudgetSeconds,
+			ArtifactResult: strategy.ArtifactResult,
+			BurstID:        reservation.ID,
+			BurstStatus:    "rejected",
+			BurstReason:    reason,
+		}
+	}
+	_, _ = s.DB.Exec(`UPDATE tool_calls SET status = 'running' WHERE id = ?`, toolCallID)
+	result := runAttempt(attemptID, workspacePath, strategy)
+	result.ToolCallID = toolCallID
+	result.BurstID = reservation.ID
+	result.BurstStatus = "released"
+	result.BurstReason = reservation.Reason
+	_ = (scheduler.Scheduler{DB: s.DB}).ReleaseBurst(reservation.ID)
+	return result
+}
+
+func argsHash(command string) string {
+	sum := sha256.Sum256([]byte(command))
+	return hex.EncodeToString(sum[:])
 }
 
 func parseStrategies(raws []string) []Strategy {

@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/byteyellow/agent-computer-fleet/internal/control"
+	"github.com/byteyellow/agent-computer-fleet/internal/scheduler"
 )
 
 type Client struct {
@@ -54,6 +56,10 @@ func (c Client) InspectSession(sessionID string) (control.SessionInfo, error) {
 
 func (c Client) StopSession(sessionID string) error {
 	return c.postJSON("/v1/sessions/"+sessionID+"/stop", map[string]any{}, nil)
+}
+
+func (c Client) SetSessionCPUProfile(sessionID, profile string) error {
+	return c.postJSON("/v1/sessions/"+sessionID+"/cpu-profile", map[string]any{"profile": profile}, nil)
 }
 
 func (c Client) RemoveSession(sessionID string) error {
@@ -103,6 +109,18 @@ func (c Client) ResumeSnapshot(snapshotNameOrID, leaseID string) (string, error)
 	}
 	err := c.postJSON("/v1/snapshots/"+snapshotNameOrID+"/resume", map[string]any{"lease_id": leaseID}, &resp)
 	return resp.SessionID, err
+}
+
+func (c Client) SchedulerStatus(snapshot string) (scheduler.NodeState, error) {
+	path := "/v1/scheduler/status"
+	if snapshot != "" {
+		path += "?snapshot=" + url.QueryEscape(snapshot)
+	}
+	var resp struct {
+		Node scheduler.NodeState `json:"node"`
+	}
+	err := c.getJSON(path, &resp)
+	return resp.Node, err
 }
 
 type SnapshotCreateResponse struct {

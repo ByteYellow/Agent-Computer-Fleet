@@ -91,6 +91,32 @@ func sessionCmd(dataDir, daemonURL *string) *cobra.Command {
 			return nil
 		},
 	}
+	var cpuProfile string
+	profile := &cobra.Command{
+		Use:   "cpu-profile <session_id>",
+		Short: "set sandbox CPU profile for think/tool phases",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if client, ok := daemonClient(*daemonURL); ok {
+				if err := client.SetSessionCPUProfile(args[0], cpuProfile); err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "session_id=%s cpu_profile=%s\n", args[0], cpuProfile)
+				return nil
+			}
+			svc, closeFn, err := controlSvc(*dataDir)
+			if err != nil {
+				return err
+			}
+			defer closeFn()
+			if err := svc.SetSessionCPUProfile(args[0], cpuProfile); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "session_id=%s cpu_profile=%s\n", args[0], cpuProfile)
+			return nil
+		},
+	}
+	profile.Flags().StringVar(&cpuProfile, "profile", "think", "CPU profile: think or tool")
 	remove := &cobra.Command{
 		Use:     "rm <session_id>",
 		Aliases: []string{"remove"},
@@ -121,6 +147,7 @@ func sessionCmd(dataDir, daemonURL *string) *cobra.Command {
 	cmd.AddCommand(list)
 	cmd.AddCommand(inspect)
 	cmd.AddCommand(stop)
+	cmd.AddCommand(profile)
 	cmd.AddCommand(remove)
 	return cmd
 }

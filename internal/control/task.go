@@ -23,9 +23,17 @@ func LoadTask(path string) (Task, []byte, error) {
 	if err != nil {
 		return Task{}, nil, err
 	}
+	task, err := ParseTask(raw)
+	if err != nil {
+		return Task{}, nil, err
+	}
+	return task, raw, nil
+}
+
+func ParseTask(raw []byte) (Task, error) {
 	var task Task
 	if err := yaml.Unmarshal(raw, &task); err != nil {
-		return Task{}, nil, err
+		return Task{}, err
 	}
 	if task.RiskTier == "" {
 		task.RiskTier = "medium"
@@ -36,5 +44,5 @@ func LoadTask(path string) (Task, []byte, error) {
 	if task.Workspace == "" {
 		task.Workspace = "/workspace"
 	}
-	return task, raw, nil
+	return task, nil
 }

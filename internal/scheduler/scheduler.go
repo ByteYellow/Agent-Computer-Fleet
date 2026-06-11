@@ -1,13 +1,17 @@
 package scheduler
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"math"
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
+	"time"
 
+	"github.com/byteyellow/agent-computer-fleet/internal/ids"
 	"gopkg.in/yaml.v3"
 )
 
@@ -38,6 +42,13 @@ type NodeState struct {
 	WarmPoolReady     int
 	SnapshotLocal     bool
 	QueuePressure     string
+	ToolPhaseInflight int64
+	BurstInflight     int64
+	BurstReservedCPU  float64
+	BurstDebt         float64
+	BurstRejectCount  int64
+	BurstMaxInflight  int64
+	TelemetryPressure string
 }
 
 type Decision struct {
@@ -63,6 +74,16 @@ type Decision struct {
 	RejectReason      string
 }
 
+type BurstReservation struct {
+	ID          string
+	Admitted    bool
+	Reason      string
+	Inflight    int64
+	ReservedCPU float64
+	MaxInflight int64
+	ExpiresAt   string
+}
+
 type Scheduler struct {
 	DB *sql.DB
 }
@@ -84,6 +105,7 @@ func (s Scheduler) NodeState(snapshotID string) (NodeState, error) {
 		MemoryTotalMB:     envInt64("ACF_NODE_MEMORY_MB", 8192),
 		MemorySafetyRatio: envFloat("ACF_MEMORY_SAFETY_RATIO", 0.9),
 		QueuePressure:     "low",
+		TelemetryPressure: "low",
 	}
 	if state.PhysicalCPU <= 0 {
 		state.PhysicalCPU = 1
@@ -97,9 +119,16 @@ func (s Scheduler) NodeState(snapshotID string) (NodeState, error) {
 	if state.MemorySafetyRatio <= 0 || state.MemorySafetyRatio > 1 {
 		state.MemorySafetyRatio = 0.9
 	}
+	state.BurstMaxInflight = envInt64("ACF_BURST_MAX_INFLIGHT", int64(math.Max(1, math.Floor(state.PhysicalCPU))))
+	if state.BurstMaxInflight <= 0 {
+		state.BurstMaxInflight = 1
+	}
 	if s.DB == nil {
 		return state, nil
 	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, _ = s.DB.Exec(`UPDATE burst_reservations SET status = 'expired', released_at = ?
+		WHERE status = 'active' AND expires_at < ?`, now, now)
 	rows, err := s.DB.Query(`SELECT l.task_yaml FROM sessions s JOIN leases l ON s.lease_id = l.id WHERE s.status IN ('running', 'idle', 'quarantined')`)
 	if err == nil {
 		defer rows.Close()
@@ -116,12 +145,40 @@ func (s Scheduler) NodeState(snapshotID string) (NodeState, error) {
 			state.MemoryAllocatedMB += task.MemoryMB
 		}
 	}
-	_ = s.DB.QueryRow(`SELECT COALESCE(SUM(active_cpu_seconds - wall_seconds), 0) FROM cost_samples WHERE node_id = ?`, state.NodeID).Scan(&state.ActiveCPUDebt)
+	cutoff := time.Now().UTC().Add(-2 * time.Minute).Format(time.RFC3339Nano)
+	var recentActive float64
+	_ = s.DB.QueryRow(`SELECT
+			COALESCE(MAX(ewma_active_cpu), 0),
+			COALESCE(SUM(throttling_count), 0),
+			COALESCE(SUM(active_cpu_seconds), 0)
+		FROM node_resource_windows
+		WHERE node_id = ? AND window_seconds = 60 AND window_start >= ?`,
+		state.NodeID, cutoff).Scan(&state.EWMAActiveCPU, &state.ThrottlingCount, &recentActive)
+	state.ActiveCPUDebt = recentActive - state.PhysicalCPU
 	if state.ActiveCPUDebt < 0 {
 		state.ActiveCPUDebt = 0
 	}
 	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM warm_pool_items WHERE status = 'ready'`).Scan(&state.WarmPoolReady)
-	_ = s.DB.QueryRow(`SELECT COALESCE(AVG(ewma_active_cpu), 0), COALESCE(SUM(CASE WHEN throttling != '' AND throttling != 'unknown' THEN 1 ELSE 0 END), 0) FROM cpu_samples WHERE node_id = ?`, state.NodeID).Scan(&state.EWMAActiveCPU, &state.ThrottlingCount)
+	_ = s.DB.QueryRow(`SELECT COALESCE(COUNT(*), 0), COALESCE(SUM(cpu_request), 0)
+		FROM burst_reservations WHERE node_id = ? AND status = 'active' AND expires_at >= ?`, state.NodeID, now).Scan(&state.BurstInflight, &state.BurstReservedCPU)
+	state.ToolPhaseInflight = state.BurstInflight
+	state.BurstDebt = state.BurstReservedCPU - state.PhysicalCPU
+	if state.BurstDebt < 0 {
+		state.BurstDebt = 0
+	}
+	rejectCutoff := time.Now().UTC().Add(-5 * time.Minute).Format(time.RFC3339Nano)
+	_ = s.DB.QueryRow(`SELECT COALESCE(COUNT(*), 0) FROM burst_reservations
+		WHERE node_id = ? AND status = 'rejected' AND created_at >= ?`, state.NodeID, rejectCutoff).Scan(&state.BurstRejectCount)
+	telemetryCutoff := time.Now().UTC().Add(-1 * time.Minute).Format(time.RFC3339Nano)
+	var recentEvents int64
+	_ = s.DB.QueryRow(`SELECT COALESCE(COUNT(*), 0) FROM events WHERE created_at >= ?`, telemetryCutoff).Scan(&recentEvents)
+	telemetryHigh := envInt64("ACF_TELEMETRY_PRESSURE_HIGH_EVENTS_PER_MIN", 10000)
+	telemetryMedium := envInt64("ACF_TELEMETRY_PRESSURE_MEDIUM_EVENTS_PER_MIN", 1000)
+	if recentEvents >= telemetryHigh {
+		state.TelemetryPressure = "high"
+	} else if recentEvents >= telemetryMedium {
+		state.TelemetryPressure = "medium"
+	}
 	if state.ThrottlingCount > 0 {
 		state.OvercommitRatio *= 0.8
 		if state.OvercommitRatio < 1 {
@@ -137,6 +194,139 @@ func (s Scheduler) NodeState(snapshotID string) (NodeState, error) {
 		state.QueuePressure = "medium"
 	}
 	return state, nil
+}
+
+func (s Scheduler) ReserveBurst(runID, sessionID, processID string, cpuRequest float64, ttl time.Duration) (BurstReservation, error) {
+	if s.DB == nil {
+		return BurstReservation{}, fmt.Errorf("scheduler database is required")
+	}
+	if ttl <= 0 {
+		ttl = 30 * time.Second
+	}
+	if cpuRequest <= 0 {
+		cpuRequest = 1
+	}
+	nodeID := envString("ACF_NODE_ID", "local")
+	physicalCPU := envFloat("ACF_NODE_CPU", float64(runtime.NumCPU()))
+	if physicalCPU <= 0 {
+		physicalCPU = 1
+	}
+	maxInflight := envInt64("ACF_BURST_MAX_INFLIGHT", int64(math.Max(1, math.Floor(physicalCPU))))
+	if maxInflight <= 0 {
+		maxInflight = 1
+	}
+	nowTime := time.Now().UTC()
+	now := nowTime.Format(time.RFC3339Nano)
+	expiresAt := nowTime.Add(ttl).Format(time.RFC3339Nano)
+	ctx := context.Background()
+	conn, err := s.DB.Conn(ctx)
+	if err != nil {
+		return BurstReservation{}, err
+	}
+	defer conn.Close()
+	if err := beginImmediateWithRetry(ctx, conn, 2*time.Second); err != nil {
+		return BurstReservation{}, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(ctx, `ROLLBACK`)
+		}
+	}()
+	_, _ = conn.ExecContext(ctx, `UPDATE burst_reservations SET status = 'expired', released_at = ?
+		WHERE status = 'active' AND expires_at < ?`, now, now)
+	var inflight int64
+	var reservedCPU float64
+	if err := conn.QueryRowContext(ctx, `SELECT COALESCE(COUNT(*), 0), COALESCE(SUM(cpu_request), 0)
+		FROM burst_reservations WHERE node_id = ? AND status = 'active' AND expires_at >= ?`, nodeID, now).Scan(&inflight, &reservedCPU); err != nil {
+		return BurstReservation{}, err
+	}
+	reservation := BurstReservation{
+		ID:          ids.New("burst"),
+		Admitted:    true,
+		Inflight:    inflight,
+		ReservedCPU: reservedCPU,
+		MaxInflight: maxInflight,
+		ExpiresAt:   expiresAt,
+	}
+	status := "active"
+	reason := "admitted"
+	if inflight >= maxInflight {
+		reservation.Admitted = false
+		status = "rejected"
+		reason = fmt.Sprintf("burst inflight limit: inflight=%d max=%d reserved_cpu=%.3f", inflight, maxInflight, reservedCPU)
+	}
+	reservation.Reason = reason
+	_, err = conn.ExecContext(ctx, `INSERT INTO burst_reservations (id, run_id, session_id, process_id, node_id, cpu_request, status, reason, expires_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		reservation.ID, runID, sessionID, processID, nodeID, cpuRequest, status, reason, expiresAt, now)
+	if err != nil {
+		return BurstReservation{}, err
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return BurstReservation{}, err
+	}
+	committed = true
+	if !reservation.Admitted {
+		return reservation, fmt.Errorf("%s", reason)
+	}
+	return reservation, nil
+}
+
+type connExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func beginImmediateWithRetry(ctx context.Context, conn connExecer, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		_, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !isSQLiteBusy(err) || time.Now().After(deadline) {
+			return lastErr
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func isSQLiteBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "database is locked") || strings.Contains(msg, "sqlite_busy")
+}
+
+func (s Scheduler) ReleaseBurst(reservationID string) error {
+	if s.DB == nil || reservationID == "" {
+		return nil
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	return execWithBusyRetry(2*time.Second, func() error {
+		_, err := s.DB.Exec(`UPDATE burst_reservations SET status = 'released', released_at = ?
+			WHERE id = ? AND status = 'active'`, now, reservationID)
+		return err
+	})
+}
+
+func execWithBusyRetry(timeout time.Duration, fn func() error) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		err := fn()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !isSQLiteBusy(err) || time.Now().After(deadline) {
+			return lastErr
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func AdmitRequest(req Request, state NodeState) Decision {

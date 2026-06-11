@@ -2,11 +2,11 @@
 
 <h1>Agent Computer Fleet</h1>
 
-### A local-first control plane for agent sandboxes.
+### A Snapshot-aware / Cost-aware / Risk-aware control plane for AI agent rollouts.
 
 <p>
-Lease sandbox computers, run commands, snapshot workspaces, fork attempts,
-enforce egress policy, and account for cost, from one CLI-first control plane.
+Fan out agent attempts from reusable snapshots, admit synchronized tool bursts,
+promote winners through a risk barrier, and keep cost/evidence lineage intact.
 </p>
 
 [![Go](https://img.shields.io/badge/go-1.23+-00ADD8.svg?style=flat-square)](https://go.dev/)
@@ -24,18 +24,20 @@ enforce egress policy, and account for cost, from one CLI-first control plane.
 <tr>
 <td width="50%" valign="top">
 
-#### Agent computer
+#### Agent rollout semantics
 
-A sandbox is not just a disposable container. It has a lease, session,
-workspace, process history, telemetry, snapshots, and cost.
+ACF owns the agent-side objects that generic infrastructure does not:
+`run`, `rollout`, `attempt`, `tool_call`, promotion, snapshot lineage, cost,
+risk, and evidence.
 
 </td>
 <td width="50%" valign="top">
 
-#### Fleet control plane
+#### Pluggable substrates
 
-The first backend is local Docker. The interfaces are shaped so Docker can
-later be swapped for gVisor, bubblewrap, Firecracker, or a remote node agent.
+ACF does not replace Docker, OpenSandbox, Kubernetes, Ray, Falco, Tetragon, or
+LoongCollector. It uses them through capability-gated runtime, orchestrator,
+snapshot, and telemetry drivers.
 
 </td>
 </tr>
@@ -62,7 +64,7 @@ operations:
 | | You do | You get |
 |---|---|---|
 | **Control** | `acfctl session create`, `acfctl exec`, `acfctl port expose` | A running sandbox session with process records, telemetry, and preview URLs |
-| **Branch** | `acfctl snapshot create`, `acfctl fork`, `acfctl attempt best-of` | Reproducible attempt workspaces with lineage, taint status, and fanout cost |
+| **Rollout** | `acfctl snapshot stack`, `acfctl rollout start`, `acfctl rollout winner` | Concurrent attempts with burst admission, `tool_call` lineage, promotion barrier, async evidence, and fanout cost |
 
 The project treats every run as a traceable object. A command, file event,
 network decision, snapshot, artifact, and cost sample can all be tied back to
@@ -85,18 +87,19 @@ a full-price container leaves a large resource gap: CPU is reserved but idle,
 state is rebuilt instead of reused, and security evidence is scattered across
 logs, containers, filesystems, and model/tool context.
 
-Agent Computer Fleet is an attempt to make that substrate explicit. It models
-an agent sandbox as a leaseable, resumable, forkable, observable, and
-cost-accounted computer. The control plane should know which run owns a process,
-which snapshot produced an artifact, which tool call caused a network edge, how
-much active CPU was actually consumed, and whether a branch came from tainted
-state.
+Agent Computer Fleet is an attempt to make that rollout layer explicit. It is
+not a generic sandbox runtime, telemetry collector, or Kubernetes/Ray
+replacement. ACF owns agent rollout semantics: which run owns a process, which
+attempt produced an artifact, which tool call caused a network edge, which
+snapshot is safe to promote, how much active CPU was actually consumed, and
+whether a branch came from tainted state.
 
 The current repository is a local-first MVP. It proves the control-plane shape
-with Docker, SQLite, directory snapshots, scheduler admission, and egress
-sidecars. The longer-term target is a high-density sandbox fleet that can pair
-runtime-level snapshot/resume with scheduler-level time sharing and kernel-level
-telemetry.
+with Docker, SQLite, directory snapshots, rollout fanout, BurstGuard admission,
+async evidence/GC, scheduler cost windows, and capability-gated drivers. The
+longer-term target is a high-density rollout control plane that can pair
+runtime-level snapshot/resume with scheduler-level time sharing and
+kernel-level telemetry.
 
 ## Industrial pain points
 
@@ -126,7 +129,11 @@ SESSION_ID=$(./acfctl session create --lease "$LEASE_ID")
 
 ./acfctl exec "$SESSION_ID" --stream -- sh -lc 'echo hello > hello.txt'
 ./acfctl snapshot create "$SESSION_ID" --type directory --path /workspace --name ready
-./acfctl fork ready --count 3
+./acfctl rollout start --task examples/tasks/bugfix.yaml --snapshot ready --fanout 3 \
+  --strategy 'probe::test -f hello.txt && echo passed::score=contains:passed' \
+  --strategy 'fast::printf 42::score=number' \
+  --strategy 'slow::sleep 1; echo passed::score=contains:passed'
+./acfctl rollout winner run-demo-bugfix
 RESUME_LEASE_ID=$(./acfctl lease create --task examples/tasks/bugfix.yaml)
 ./acfctl snapshot resume ready --lease "$RESUME_LEASE_ID"
 ./acfctl cost show run-demo-bugfix
@@ -168,6 +175,9 @@ Focused demos are kept as shell scripts so they can double as smoke tests:
 ./scripts/demo_egress_proxy.sh
 ./scripts/demo_cost_accounting.sh
 ./scripts/demo_provenance_trace.sh
+./scripts/demo_cpu_weight_control.sh
+./scripts/demo_ioaware_snapshot_planner.sh
+SESSIONS=50 ./scripts/demo_v01_50_concurrency.sh
 ```
 
 See [docs/mvp.md](docs/mvp.md) for command-by-command walkthroughs.
@@ -194,41 +204,55 @@ scheduler.
 
 ## Architecture
 
-The long-term shape is six planes:
+The long-term shape is an Agent Rollout Control Plane with six ACF-owned
+planes and pluggable substrates underneath:
 
 ```mermaid
-flowchart LR
-    CLI["acfctl CLI / API client"] --> Control["Control Plane\nlease, session, admission"]
-    Control <--> Economics["Economics Plane\nactive CPU, quota, warm pool"]
-    Control --> State["State Plane\nsnapshot metadata, lineage, topology"]
-    State --> Control
-    Control --> Node["Node Plane\nruntime adapter, process manager"]
-    Control -->|"snapshot topology / mount plan"| Node
-    Node --> Docker["Docker sandbox\ninternal network"]
-    Docker --> Egress["Egress proxy sidecar\nallowlist, deny, credential injection"]
-    State -.->|"read-only snapshot store / COW base"| Node
-    Docker --> Kernel["Host Kernel\neBPF / cgroup / runtime events"]
-    Kernel --> Telemetry["Telemetry Plane\nprocess, file, network, resource"]
-    Telemetry -->|"context lookup"| Control
-    Telemetry -->|"lineage / taint lookup"| State
-    Telemetry --> Security["Security Plane\npolicy, response, forensics"]
-    State --> Security
-    Security --> Control
+flowchart TB
+    Client["Agentix / trainer / evaluator / acfctl"] --> Ingress["Fleet Ingress Gateway"]
+    Ingress --> ACF["ACF Control Plane"]
+
+    subgraph ACF["ACF Control Plane"]
+        Rollout["Rollout Plane\nrun, rollout, attempt, tool_call\nfanout, best-of, budget"]
+        State["State Plane\nsnapshot DAG, resume intent\ntaint and artifact lineage"]
+        Economics["Economics Plane\nactive CPU, burst admission\nwarm reuse, cost windows"]
+        Risk["Risk Plane\ntelemetry-context correlation\nbaseline, decision, response"]
+        Evidence["Evidence Plane\nprovenance graph, forensics\nasync GC and replay metadata"]
+        Driver["Driver Plane\nruntime, orchestrator\ntelemetry, snapshot drivers"]
+    end
+
+    Rollout <--> Economics
+    Rollout --> State
+    State --> Rollout
+    Risk --> Rollout
+    Rollout --> Evidence
+    Risk --> Evidence
+    Driver --> Rollout
+    Driver --> State
+    Driver --> Risk
+
+    Driver --> Runtime["Runtime substrate\nDocker, OpenSandbox\nFirecracker, gVisor, Kata"]
+    Driver --> Orchestrator["Orchestration substrate\nK8s, Ray, Batch\ncloud provider"]
+    Driver --> Telemetry["Telemetry substrate\nLoongCollector, Falco\nTetragon, eBPF, K8s events"]
+    Runtime --> Kernel["Host kernel / cgroup / namespace boundary"]
+    Kernel --> Telemetry
+    Telemetry -->|"filtered high-value events"| Risk
 ```
 
-Control owns placement and state transitions; State owns snapshot metadata and
-physical topology; Node executes the mount/restore/fork plan selected by
-Control. Telemetry is modeled as an independent host-kernel/runtime event path,
-then correlated back to Control and State context.
+ACF owns rollout semantics, not generic infrastructure. Runtime, orchestrator,
+snapshot, and telemetry implementations are queried through a capability matrix
+before execution. If a backend cannot do memory snapshot or low-latency resume,
+the scheduler must degrade to filesystem/directory fork instead of pretending
+the capability exists.
 
 | Plane | Responsibility |
 |---|---|
-| **Ingress** | CLI/API, lease, streaming exec, preview URL |
-| **Control** | Session allocation, state machine, admission, quota |
-| **Node** | Runtime adapters, process manager, node heartbeat |
-| **State** | Template, workspace, snapshot, fork, lineage, taint |
-| **Security** | Policy, telemetry correlation, response, forensics |
-| **Economics** | Active CPU, warm pool, overcommit, cost accounting |
+| **Rollout** | `run`, `rollout`, `attempt`, `tool_call`, fanout, best-of-forks, promotion |
+| **State** | Template, ready snapshot, attempt workspace, snapshot DAG, taint lineage |
+| **Economics** | Active CPU windows, burst admission, warm reuse, snapshot physical cost, budget |
+| **Risk** | Telemetry-context correlation, policy decision, baseline feature, response |
+| **Evidence** | Async provenance graph, forensics bundle, replay metadata, background GC |
+| **Driver** | Capability-gated runtime, orchestrator, telemetry, and snapshot substrates |
 
 The current binary is `acfctl`. It can run in direct local mode, or act as a
 client for the local daemon/API server.
@@ -246,6 +270,10 @@ client for the local daemon/API server.
 - Directory snapshots can be resumed into new running Docker sessions.
 - Templates can derive `template -> ready snapshot -> attempt workspace`
   lineage.
+- `acfctl rollout start` fans out concurrent attempts from a ready snapshot,
+  creates one `tool_call` per strategy, applies BurstGuard before command
+  execution, records compact evidence, and promotes a winner through the
+  promotion barrier.
 - Best-of-forks can run multiple strategies and select a winner.
 - Telemetry, policy decisions, provenance trace, and forensics export have MVP
   implementations.
@@ -257,17 +285,35 @@ client for the local daemon/API server.
   written into workspace files, container environment, SQLite event payloads, or
   normal logs.
 - Cost output includes run-level CPU, wall time, snapshot bytes, policy block
-  count, quarantine count, fanout cost, saved cost, session-level cost,
-  node-level cost, and a simple cost estimate.
+  count, quarantine count, fanout cost, saved cost, session-level,
+  rollout-level, attempt-level, `tool_call`-level, snapshot-level, node-level,
+  and a simple cost estimate.
 - Session creation goes through a single-node scheduler/admission path that
   reads node capacity, active sessions, memory pressure, warm pool signals, and
   snapshot locality.
-- Active CPU accounting samples Docker stats into `cpu_samples`, keeps an EWMA
-  active-CPU signal, tracks throttling and memory pressure, and shrinks the
-  effective CPU overcommit ratio when throttling is observed.
+- Active CPU accounting samples Docker stats into short-retention
+  `cpu_samples`, rolls them into `session_resource_windows` and
+  `node_resource_windows`, keeps an EWMA active-CPU signal, tracks throttling
+  and memory pressure, and shrinks the effective CPU overcommit ratio when
+  throttling is observed.
+- Docker sessions support dynamic CPU weight control. New sessions start in the
+  low-priority `think` profile, `exec` switches to the high-priority `tool`
+  profile before running a command, and the session is returned to `think`
+  afterward. Each switch is recorded as a `cpu_weight_set` telemetry event.
+- BurstGuard admission reserves tool-phase CPU before `exec` can raise CPU
+  weight. If synchronized tool starts exceed the node burst budget, exec is
+  rejected before the sandbox is promoted from `think` to `tool`.
+- Evidence and cleanup are async. Hot paths enqueue compact `evidence_events`
+  and `gc_jobs`; background workers materialize `graph_edges` and reclaim losing
+  attempt workspaces without blocking rollout execution.
 - Snapshot planning records a file-level manifest and a snapshot edge DAG.
   `snapshot plan`, `fork`, `resume`, and `graph trace` expose the chosen plan,
   planner score, reason, lineage, taint, and storage bytes.
+- The snapshot planner is I/O-aware: manifests identify hot metadata paths such
+  as `.git`, `node_modules`, `.venv`, `site-packages`, `target`, and `dist`;
+  plans report `copy_up_risk`, `metadata_ops_estimate`,
+  `shared_lower_fanout`, `io_fanout_budget`, `upperdir_shard`, and
+  `upperdir_device`.
 - Warm pool items track hit count, last hit time, cold-start savings, memory,
   disk bytes, GDSF priority, and eviction reason. Session creation can consume a
   matching warm item.
@@ -281,12 +327,12 @@ Runtime backends are capability-gated. `acfctl runtime list` and
 `acfctl runtime inspect <backend>` report what each backend can actually do
 instead of presenting planned adapters as usable.
 
-| Backend | Exec | Stop | Snapshot | Fork | Resume | Memory snapshot | Status |
-|---|---:|---:|---:|---:|---:|---:|---|
-| Docker | yes | yes | directory | directory | directory | no | active |
-| gVisor | no | no | no | no | no | no | planned stub |
-| Firecracker | no | no | no | no | no | no | planned stub |
-| bubblewrap | no | no | no | no | no | no | planned stub |
+| Backend | Exec | Stop | Snapshot | Fork | Resume | CPU weight | Memory snapshot | Status |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| Docker | yes | yes | directory | directory | directory | yes | no | active |
+| gVisor | no | no | no | no | no | no | no | planned stub |
+| Firecracker | no | no | no | no | no | no | no | planned stub |
+| bubblewrap | no | no | no | no | no | no | no | planned stub |
 
 The Docker driver implements directory-level snapshot, fork, and resume by
 copying workspace state and then creating a new running session. Memory-level
@@ -318,12 +364,27 @@ acfctl daemon serve --listen 127.0.0.1:8574
 export ACF_DAEMON_URL=http://127.0.0.1:8574
 ```
 
+Daemon sampling is bounded and windowed:
+
+```sh
+acfctl daemon serve \
+  --sample-interval 5s \
+  --sample-limit 64 \
+  --sample-timeout 2s \
+  --raw-retention 10m \
+  --max-raw-samples 512
+```
+
+Raw Docker stats are treated as short-term input. Scheduler and cost views read
+10s/60s resource windows instead of scanning unbounded raw samples.
+
 Core workflow:
 
 ```sh
 acfctl init
 acfctl lease create --task examples/tasks/bugfix.yaml
 acfctl session create --lease <lease_id>
+acfctl session cpu-profile <session_id> --profile think
 acfctl exec <session_id> --stream -- <command...>
 acfctl port expose <session_id> <port>
 acfctl snapshot create <session_id> --type directory --path /workspace --name ready
@@ -358,11 +419,29 @@ acfctl runtime list
 acfctl runtime inspect docker
 acfctl node register --address localhost --runtime docker --cpu 8 --memory-mb 8192
 acfctl node list
+acfctl scheduler status
 acfctl pool create --template bugfix --size 2 --seed-workspace ./seed --max-size 2
 acfctl pool status
 acfctl cost sample <session_id>
 acfctl bench overcommit --sessions 20 --idle-ratio 0.8 --bursty --physical-cpu 8
 ```
+
+v0.1 hardening demos:
+
+```sh
+./scripts/demo_cpu_weight_control.sh
+SESSIONS=50 ./scripts/demo_v01_50_concurrency.sh
+./scripts/demo_ioaware_snapshot_planner.sh
+```
+
+The CPU weight demo verifies the control-plane loop with Docker `CpuShares`:
+`think=2`, `tool=1024`, then back to `think=2` after exec. On Linux cgroup v2,
+Docker maps this control path to cgroup CPU weight behavior; a direct
+`cpu.weight` node-agent writer is a later Linux-specific optimization.
+The concurrency demo sets `ACF_BURST_MAX_INFLIGHT` and proves that not every
+simultaneous tool call is promoted to the high-priority CPU profile. The
+IO-aware snapshot demo shows hot metadata path detection, I/O fanout rejection,
+and graph trace reasons for not choosing overlay.
 
 ## Roadmap
 

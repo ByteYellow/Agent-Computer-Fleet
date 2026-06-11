@@ -1,6 +1,7 @@
 package economics
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -26,7 +27,93 @@ type DockerStatsSample struct {
 	EWMAActiveCPU    float64
 }
 
+type SamplerResult struct {
+	Sampled int
+	Failed  int
+	Skipped int
+	Errors  []string
+}
+
+func SampleRunningDockerSessions(db *sql.DB) (SamplerResult, error) {
+	return SampleRunningDockerSessionsWithOptions(db, SamplerOptions{})
+}
+
+type SamplerOptions struct {
+	Limit            int
+	Timeout          time.Duration
+	RawRetention     time.Duration
+	MaxRawPerSession int
+}
+
+func SampleRunningDockerSessionsWithOptions(db *sql.DB, opts SamplerOptions) (SamplerResult, error) {
+	if opts.Limit <= 0 {
+		opts.Limit = 64
+	}
+	if opts.Timeout <= 0 {
+		opts.Timeout = 2 * time.Second
+	}
+	var total int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sessions
+		WHERE status IN ('running', 'idle', 'quarantined')
+		  AND COALESCE(runtime, 'docker') = 'docker'
+		  AND COALESCE(container_id, '') != ''`).Scan(&total); err != nil {
+		return SamplerResult{}, err
+	}
+	rows, err := db.Query(`SELECT s.id FROM sessions s
+		LEFT JOIN (
+			SELECT session_id, MAX(created_at) AS last_sampled_at
+			FROM cpu_samples
+			GROUP BY session_id
+		) cs ON cs.session_id = s.id
+		WHERE s.status IN ('running', 'idle', 'quarantined')
+		  AND COALESCE(s.runtime, 'docker') = 'docker'
+		  AND COALESCE(s.container_id, '') != ''
+		ORDER BY COALESCE(cs.last_sampled_at, ''), s.created_at ASC
+		LIMIT ?`, opts.Limit)
+	if err != nil {
+		return SamplerResult{}, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var sessionID string
+		if err := rows.Scan(&sessionID); err != nil {
+			return SamplerResult{}, err
+		}
+		ids = append(ids, sessionID)
+	}
+	if err := rows.Err(); err != nil {
+		return SamplerResult{}, err
+	}
+	result := SamplerResult{Skipped: total - len(ids)}
+	if result.Skipped < 0 {
+		result.Skipped = 0
+	}
+	for _, sessionID := range ids {
+		ctx, cancel := context.WithTimeout(context.Background(), opts.Timeout)
+		_, err := SampleDockerStatsContext(ctx, db, sessionID)
+		cancel()
+		if err != nil {
+			result.Failed++
+			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", sessionID, err))
+			continue
+		}
+		result.Sampled++
+	}
+	if err := AggregateResourceWindows(db, WindowOptions{Windows: []int{10, 60}}); err != nil {
+		return result, err
+	}
+	if err := RetainRawCPUSamples(db, WindowOptions{RawRetention: opts.RawRetention, MaxRawPerSession: opts.MaxRawPerSession}); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
 func SampleDockerStats(db *sql.DB, sessionID string) (DockerStatsSample, error) {
+	return SampleDockerStatsContext(context.Background(), db, sessionID)
+}
+
+func SampleDockerStatsContext(ctx context.Context, db *sql.DB, sessionID string) (DockerStatsSample, error) {
 	var runID, containerID string
 	if err := db.QueryRow(`SELECT run_id, COALESCE(container_id, '') FROM sessions WHERE id = ?`, sessionID).Scan(&runID, &containerID); err != nil {
 		return DockerStatsSample{}, err
@@ -34,7 +121,7 @@ func SampleDockerStats(db *sql.DB, sessionID string) (DockerStatsSample, error) 
 	if containerID == "" {
 		return DockerStatsSample{}, fmt.Errorf("session %s has no container id", sessionID)
 	}
-	raw, err := exec.Command("docker", "stats", "--no-stream", "--format", "{{json .}}", containerID).Output()
+	raw, err := exec.CommandContext(ctx, "docker", "stats", "--no-stream", "--format", "{{json .}}", containerID).Output()
 	if err != nil {
 		return DockerStatsSample{}, err
 	}
@@ -84,10 +171,9 @@ func SampleDockerStats(db *sql.DB, sessionID string) (DockerStatsSample, error) 
 		sample.EWMAActiveCPU = alpha*sample.ActiveCPUSeconds + (1-alpha)*prevEWMA
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, _ = db.Exec(`INSERT INTO cost_samples (id, run_id, session_id, node_id, active_cpu_seconds, idle_seconds, wall_seconds, created_at)
-		VALUES (?, ?, ?, 'local', ?, ?, 1, ?)`, ids.New("cost"), runID, sessionID, sample.ActiveCPUSeconds, sample.IdleSeconds, now)
 	_, _ = db.Exec(`INSERT INTO cpu_samples (id, run_id, session_id, node_id, active_cpu_seconds, idle_seconds, cpu_percent, ewma_active_cpu, throttling, memory_pressure, created_at)
 		VALUES (?, ?, ?, 'local', ?, ?, ?, ?, ?, ?, ?)`, ids.New("cpu"), runID, sessionID, sample.ActiveCPUSeconds, sample.IdleSeconds, sample.CPUPerc, sample.EWMAActiveCPU, sample.Throttling, sample.MemoryPressure, now)
+	_ = AggregateResourceWindows(db, WindowOptions{Windows: []int{10, 60}})
 	payload := fmt.Sprintf(`{"cpu_percent":%.3f,"memory_usage_bytes":%d,"memory_limit_bytes":%d,"throttling":%q,"memory_pressure":%q}`,
 		sample.CPUPerc, sample.MemoryUsageBytes, sample.MemoryLimitBytes, sample.Throttling, sample.MemoryPressure)
 	_, _ = db.Exec(`INSERT INTO events (id, run_id, session_id, source, event_type, payload, created_at)

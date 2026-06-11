@@ -11,7 +11,7 @@ import (
 )
 
 const DefaultDataDir = ".acf"
-const SchemaVersion = 2
+const SchemaVersion = 4
 
 type Paths struct {
 	Root       string
@@ -67,6 +67,14 @@ func Open(paths Paths) (*sql.DB, error) {
 		return nil, err
 	}
 	if _, err := db.Exec(`PRAGMA foreign_keys = ON;`); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if _, err := db.Exec(`PRAGMA journal_mode = WAL;`); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if _, err := db.Exec(`PRAGMA busy_timeout = 5000;`); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -133,6 +141,17 @@ func EnsureSchema(db *sql.DB) error {
 			delta_files_modified INTEGER NOT NULL DEFAULT 0,
 			delta_files_deleted INTEGER NOT NULL DEFAULT 0,
 			planner_score REAL NOT NULL DEFAULT 0,
+			snapshot_semantic_type TEXT NOT NULL DEFAULT 'directory',
+			snapshot_physical_type TEXT NOT NULL DEFAULT 'copy',
+			logical_bytes INTEGER NOT NULL DEFAULT 0,
+			physical_bytes INTEGER NOT NULL DEFAULT 0,
+			dirty_bytes_estimate INTEGER NOT NULL DEFAULT 0,
+			inode_estimate INTEGER NOT NULL DEFAULT 0,
+			storage_amplification_ratio REAL NOT NULL DEFAULT 1,
+			hot_metadata_paths TEXT NOT NULL DEFAULT '',
+			metadata_ops_estimate INTEGER NOT NULL DEFAULT 0,
+			copy_up_risk TEXT NOT NULL DEFAULT 'low',
+			upperdir_device TEXT NOT NULL DEFAULT '',
 			tainted INTEGER NOT NULL DEFAULT 0,
 			status TEXT NOT NULL,
 			created_at TEXT NOT NULL
@@ -157,6 +176,8 @@ func EnsureSchema(db *sql.DB) error {
 		);`,
 		`CREATE TABLE IF NOT EXISTS fork_attempts (
 			id TEXT PRIMARY KEY,
+			rollout_id TEXT NOT NULL DEFAULT '',
+			tool_call_id TEXT NOT NULL DEFAULT '',
 			snapshot_id TEXT NOT NULL,
 			workspace_path TEXT NOT NULL,
 			fork_ms INTEGER NOT NULL,
@@ -174,6 +195,91 @@ func EnsureSchema(db *sql.DB) error {
 			saved_cost REAL NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL,
 			FOREIGN KEY(snapshot_id) REFERENCES snapshots(id)
+		);`,
+		`CREATE TABLE IF NOT EXISTS tool_calls (
+			id TEXT PRIMARY KEY,
+			run_id TEXT NOT NULL DEFAULT '',
+			rollout_id TEXT NOT NULL DEFAULT '',
+			attempt_id TEXT NOT NULL DEFAULT '',
+			session_id TEXT NOT NULL DEFAULT '',
+			command TEXT NOT NULL DEFAULT '',
+			args_hash TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL,
+			exit_code INTEGER,
+			wall_ms INTEGER NOT NULL DEFAULT 0,
+			cost_estimate REAL NOT NULL DEFAULT 0,
+			result_ref TEXT NOT NULL DEFAULT '',
+			policy_decision TEXT NOT NULL DEFAULT 'allow',
+			created_at TEXT NOT NULL,
+			started_at TEXT NOT NULL DEFAULT '',
+			ended_at TEXT NOT NULL DEFAULT ''
+		);`,
+		`CREATE TABLE IF NOT EXISTS rollouts (
+			id TEXT PRIMARY KEY,
+			run_id TEXT NOT NULL,
+			task_path TEXT NOT NULL DEFAULT '',
+			base_snapshot_id TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL,
+			fanout INTEGER NOT NULL DEFAULT 0,
+			budget_seconds INTEGER NOT NULL DEFAULT 0,
+			max_cost REAL NOT NULL DEFAULT 0,
+			winner_attempt_id TEXT NOT NULL DEFAULT '',
+			promotion_id TEXT NOT NULL DEFAULT '',
+			cost_estimate REAL NOT NULL DEFAULT 0,
+			risk_status TEXT NOT NULL DEFAULT 'pending',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS promotions (
+			id TEXT PRIMARY KEY,
+			rollout_id TEXT NOT NULL,
+			attempt_id TEXT NOT NULL,
+			base_snapshot_id TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL,
+			telemetry_watermark TEXT NOT NULL DEFAULT '',
+			risk_status TEXT NOT NULL DEFAULT 'pending',
+			reason TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS evidence_events (
+			id TEXT PRIMARY KEY,
+			run_id TEXT NOT NULL DEFAULT '',
+			rollout_id TEXT NOT NULL DEFAULT '',
+			attempt_id TEXT NOT NULL DEFAULT '',
+			session_id TEXT NOT NULL DEFAULT '',
+			tool_call_id TEXT NOT NULL DEFAULT '',
+			snapshot_id TEXT NOT NULL DEFAULT '',
+			event_type TEXT NOT NULL,
+			priority TEXT NOT NULL DEFAULT 'normal',
+			payload TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'queued',
+			created_at TEXT NOT NULL,
+			processed_at TEXT NOT NULL DEFAULT ''
+		);`,
+		`CREATE TABLE IF NOT EXISTS gc_jobs (
+			id TEXT PRIMARY KEY,
+			run_id TEXT NOT NULL DEFAULT '',
+			rollout_id TEXT NOT NULL DEFAULT '',
+			attempt_id TEXT NOT NULL DEFAULT '',
+			workspace_path TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'queued',
+			reclaimed_bytes INTEGER NOT NULL DEFAULT 0,
+			reclaimed_inodes INTEGER NOT NULL DEFAULT 0,
+			gc_latency_ms INTEGER NOT NULL DEFAULT 0,
+			failure_reason TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS graph_edges (
+			id TEXT PRIMARY KEY,
+			run_id TEXT NOT NULL DEFAULT '',
+			rollout_id TEXT NOT NULL DEFAULT '',
+			from_id TEXT NOT NULL,
+			to_id TEXT NOT NULL,
+			edge_type TEXT NOT NULL,
+			source_event_id TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL
 		);`,
 		`CREATE TABLE IF NOT EXISTS events (
 			id TEXT PRIMARY KEY,
@@ -224,6 +330,50 @@ func EnsureSchema(db *sql.DB) error {
 			throttling TEXT NOT NULL DEFAULT '',
 			memory_pressure TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS session_resource_windows (
+			run_id TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			node_id TEXT NOT NULL DEFAULT 'local',
+			window_seconds INTEGER NOT NULL,
+			window_start TEXT NOT NULL,
+			active_cpu_seconds REAL NOT NULL DEFAULT 0,
+			idle_seconds REAL NOT NULL DEFAULT 0,
+			avg_cpu_percent REAL NOT NULL DEFAULT 0,
+			ewma_active_cpu REAL NOT NULL DEFAULT 0,
+			throttling_count INTEGER NOT NULL DEFAULT 0,
+			memory_pressure_count INTEGER NOT NULL DEFAULT 0,
+			sample_count INTEGER NOT NULL DEFAULT 0,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY(session_id, window_seconds, window_start)
+		);`,
+		`CREATE TABLE IF NOT EXISTS node_resource_windows (
+			node_id TEXT NOT NULL DEFAULT 'local',
+			window_seconds INTEGER NOT NULL,
+			window_start TEXT NOT NULL,
+			active_cpu_seconds REAL NOT NULL DEFAULT 0,
+			idle_seconds REAL NOT NULL DEFAULT 0,
+			avg_cpu_percent REAL NOT NULL DEFAULT 0,
+			ewma_active_cpu REAL NOT NULL DEFAULT 0,
+			throttling_count INTEGER NOT NULL DEFAULT 0,
+			memory_pressure_count INTEGER NOT NULL DEFAULT 0,
+			session_count INTEGER NOT NULL DEFAULT 0,
+			sample_count INTEGER NOT NULL DEFAULT 0,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY(node_id, window_seconds, window_start)
+		);`,
+		`CREATE TABLE IF NOT EXISTS burst_reservations (
+			id TEXT PRIMARY KEY,
+			run_id TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			process_id TEXT NOT NULL DEFAULT '',
+			node_id TEXT NOT NULL DEFAULT 'local',
+			cpu_request REAL NOT NULL DEFAULT 1,
+			status TEXT NOT NULL,
+			reason TEXT NOT NULL DEFAULT '',
+			expires_at TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			released_at TEXT NOT NULL DEFAULT ''
 		);`,
 		`CREATE TABLE IF NOT EXISTS ports (
 			id TEXT PRIMARY KEY,
@@ -372,6 +522,17 @@ func EnsureSchema(db *sql.DB) error {
 		`ALTER TABLE snapshots ADD COLUMN delta_files_modified INTEGER NOT NULL DEFAULT 0;`,
 		`ALTER TABLE snapshots ADD COLUMN delta_files_deleted INTEGER NOT NULL DEFAULT 0;`,
 		`ALTER TABLE snapshots ADD COLUMN planner_score REAL NOT NULL DEFAULT 0;`,
+		`ALTER TABLE snapshots ADD COLUMN snapshot_semantic_type TEXT NOT NULL DEFAULT 'directory';`,
+		`ALTER TABLE snapshots ADD COLUMN snapshot_physical_type TEXT NOT NULL DEFAULT 'copy';`,
+		`ALTER TABLE snapshots ADD COLUMN logical_bytes INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE snapshots ADD COLUMN physical_bytes INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE snapshots ADD COLUMN dirty_bytes_estimate INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE snapshots ADD COLUMN inode_estimate INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE snapshots ADD COLUMN storage_amplification_ratio REAL NOT NULL DEFAULT 1;`,
+		`ALTER TABLE snapshots ADD COLUMN hot_metadata_paths TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE snapshots ADD COLUMN metadata_ops_estimate INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE snapshots ADD COLUMN copy_up_risk TEXT NOT NULL DEFAULT 'low';`,
+		`ALTER TABLE snapshots ADD COLUMN upperdir_device TEXT NOT NULL DEFAULT '';`,
 		`ALTER TABLE snapshots ADD COLUMN tainted INTEGER NOT NULL DEFAULT 0;`,
 		`ALTER TABLE snapshot_edges ADD COLUMN plan_reason TEXT NOT NULL DEFAULT '';`,
 		`ALTER TABLE snapshot_edges ADD COLUMN planner_score REAL NOT NULL DEFAULT 0;`,
@@ -379,6 +540,8 @@ func EnsureSchema(db *sql.DB) error {
 		`ALTER TABLE fork_attempts ADD COLUMN artifact_result TEXT NOT NULL DEFAULT '';`,
 		`ALTER TABLE fork_attempts ADD COLUMN cost_estimate REAL NOT NULL DEFAULT 0;`,
 		`ALTER TABLE fork_attempts ADD COLUMN saved_cost REAL NOT NULL DEFAULT 0;`,
+		`ALTER TABLE fork_attempts ADD COLUMN rollout_id TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE fork_attempts ADD COLUMN tool_call_id TEXT NOT NULL DEFAULT '';`,
 		`ALTER TABLE warm_pool_items ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0;`,
 		`ALTER TABLE warm_pool_items ADD COLUMN last_hit_at TEXT NOT NULL DEFAULT '';`,
 		`ALTER TABLE warm_pool_items ADD COLUMN cold_start_saved_ms INTEGER NOT NULL DEFAULT 0;`,
@@ -396,7 +559,7 @@ func EnsureSchema(db *sql.DB) error {
 		return fmt.Errorf("record schema version: %w", err)
 	}
 	if _, err := db.Exec(`INSERT OR IGNORE INTO schema_versions (version, description, applied_at)
-		VALUES (?, 'forensics hash and v0.1 policy/schema metadata', datetime('now'))`, SchemaVersion); err != nil {
+		VALUES (?, 'agent rollout tool_call, evidence graph, and resource window schema', datetime('now'))`, SchemaVersion); err != nil {
 		return fmt.Errorf("record schema version: %w", err)
 	}
 	return nil

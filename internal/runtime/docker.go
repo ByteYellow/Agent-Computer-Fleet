@@ -92,6 +92,10 @@ func (d *DockerDriver) ResumeDirectorySnapshot(ctx context.Context, src, dst str
 	return state.BuildManifest(dst)
 }
 
+func (d *DockerDriver) SetCPUWeight(ctx context.Context, containerID string, weight int64) error {
+	return d.Runtime.SetCPUWeight(ctx, containerID, weight)
+}
+
 func dockerStatus() (bool, string) {
 	cmd := exec.Command("docker", "version", "--format", "{{.Server.Version}}")
 	var stderr bytes.Buffer

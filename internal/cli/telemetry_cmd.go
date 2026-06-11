@@ -46,5 +46,43 @@ func telemetryCmd(dataDir *string) *cobra.Command {
 	list.Flags().StringVar(&toolCallID, "tool-call", "", "filter by tool call id")
 	cmd := &cobra.Command{Use: "telemetry", Short: "telemetry inspection commands"}
 	cmd.AddCommand(list)
+	cmd.AddCommand(telemetryIngestCmd(dataDir))
 	return cmd
+}
+
+func telemetryIngestCmd(dataDir *string) *cobra.Command {
+	var event telemetry.IngestEvent
+	ingest := &cobra.Command{
+		Use:   "ingest",
+		Short: "ingest a filtered high-value telemetry event",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			paths, err := store.Init(*dataDir)
+			if err != nil {
+				return err
+			}
+			db, err := store.Open(paths)
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+			id, err := telemetry.IngestFiltered(db, event)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "event_id=%s type=%s source=%s\n", id, event.EventType, event.Source)
+			return nil
+		},
+	}
+	ingest.Flags().StringVar(&event.RunID, "run", "", "run id")
+	ingest.Flags().StringVar(&event.RolloutID, "rollout", "", "rollout id")
+	ingest.Flags().StringVar(&event.AttemptID, "attempt", "", "attempt id")
+	ingest.Flags().StringVar(&event.SessionID, "session", "", "session id")
+	ingest.Flags().StringVar(&event.ToolCallID, "tool-call", "", "tool call id")
+	ingest.Flags().StringVar(&event.ProcessID, "process", "", "process id")
+	ingest.Flags().StringVar(&event.SnapshotID, "snapshot", "", "snapshot id")
+	ingest.Flags().StringVar(&event.Source, "source", "filtered_telemetry", "telemetry source")
+	ingest.Flags().StringVar(&event.EventType, "type", "", "filtered event type")
+	ingest.Flags().StringVar(&event.Payload, "payload", "{}", "JSON payload")
+	_ = ingest.MarkFlagRequired("type")
+	return ingest
 }

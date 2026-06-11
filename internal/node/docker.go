@@ -145,6 +145,21 @@ func (r *DockerRuntime) Interrupt(containerID string) error {
 	return r.Client.ContainerKill(context.Background(), containerID, "SIGTERM")
 }
 
+func (r *DockerRuntime) SetCPUWeight(ctx context.Context, containerID string, weight int64) error {
+	if weight < 2 {
+		weight = 2
+	}
+	if weight > 262144 {
+		weight = 262144
+	}
+	_, err := r.Client.ContainerUpdate(ctx, containerID, container.UpdateConfig{
+		Resources: container.Resources{
+			CPUShares: weight,
+		},
+	})
+	return err
+}
+
 func (r *DockerRuntime) Stop(containerID string) error {
 	err := r.Client.ContainerStop(context.Background(), containerID, container.StopOptions{})
 	if errdefs.IsNotFound(err) {

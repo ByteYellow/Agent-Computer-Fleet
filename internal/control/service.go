@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/byteyellow/agent-computer-fleet/internal/egress"
@@ -20,9 +21,10 @@ import (
 )
 
 type Service struct {
-	DB     *sql.DB
-	Paths  store.Paths
-	Driver runtimeplane.Driver
+	DB      *sql.DB
+	Paths   store.Paths
+	Driver  runtimeplane.Driver
+	WriteMu *sync.Mutex
 }
 
 type SessionInfo struct {
@@ -39,6 +41,13 @@ type SessionInfo struct {
 	CreatedAt             string
 	UpdatedAt             string
 }
+
+const (
+	CPUProfileThink = "think"
+	CPUProfileTool  = "tool"
+	CPUWeightThink  = int64(2)
+	CPUWeightTool   = int64(1024)
+)
 
 func (s Service) CreateLease(taskPath string) (string, error) {
 	task, raw, err := LoadTask(taskPath)
@@ -118,6 +127,7 @@ func (s Service) CreateSession(leaseID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	_ = s.setContainerCPUProfile(runID, sessionID, containerID, CPUProfileThink)
 	startupColdMS := time.Since(start).Milliseconds()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	runtimeName := s.runtimeName()
@@ -152,15 +162,44 @@ func (s Service) exec(sessionID string, command []string, stream bool, stdout, s
 	}
 	processID := ids.New("proc")
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	s.lockWrites()
 	_, err := s.DB.Exec(`INSERT INTO processes (id, session_id, container_id, command, status, started_at)
 		VALUES (?, ?, ?, ?, 'running', ?)`, processID, sessionID, containerID, strings.Join(command, " "), now)
 	if err != nil {
+		s.unlockWrites()
 		return "", err
 	}
 	_, _ = s.DB.Exec(`INSERT INTO events (id, run_id, session_id, process_id, source, event_type, payload, created_at)
 		VALUES (?, ?, ?, ?, 'control_plane', 'exec_start', ?, ?)`, ids.New("evt"), runID, sessionID, processID, fmt.Sprintf(`{"command":%q,"stream":%t}`, strings.Join(command, " "), stream), now)
+	cpuRequest := s.sessionCPURequest(sessionID)
+	reservation, reserveErr := (scheduler.Scheduler{DB: s.DB}).ReserveBurst(runID, sessionID, processID, cpuRequest, 30*time.Second)
+	if reserveErr != nil {
+		ended := time.Now().UTC().Format(time.RFC3339Nano)
+		_, _ = s.DB.Exec(`UPDATE processes SET status = 'rejected', exit_code = 125, ended_at = ? WHERE id = ?`, ended, processID)
+		_, _ = s.DB.Exec(`INSERT INTO events (id, run_id, session_id, process_id, source, event_type, payload, created_at)
+			VALUES (?, ?, ?, ?, 'control_plane', 'burst_reject', ?, ?)`,
+			ids.New("evt"), runID, sessionID, processID, fmt.Sprintf(`{"reservation_id":%q,"reason":%q,"inflight":%d,"max_inflight":%d,"reserved_cpu":%.3f}`, reservation.ID, reservation.Reason, reservation.Inflight, reservation.MaxInflight, reservation.ReservedCPU), ended)
+		s.unlockWrites()
+		return processID, reserveErr
+	}
+	_, _ = s.DB.Exec(`INSERT INTO events (id, run_id, session_id, process_id, source, event_type, payload, created_at)
+		VALUES (?, ?, ?, ?, 'control_plane', 'burst_reserve', ?, ?)`,
+		ids.New("evt"), runID, sessionID, processID, fmt.Sprintf(`{"reservation_id":%q,"inflight_before":%d,"max_inflight":%d,"reserved_cpu_before":%.3f,"expires_at":%q}`, reservation.ID, reservation.Inflight, reservation.MaxInflight, reservation.ReservedCPU, reservation.ExpiresAt), time.Now().UTC().Format(time.RFC3339Nano))
+	s.unlockWrites()
 	start := time.Now()
+	if err := s.setContainerCPUProfile(runID, sessionID, containerID, CPUProfileTool); err != nil {
+		s.lockWrites()
+		_ = (scheduler.Scheduler{DB: s.DB}).ReleaseBurst(reservation.ID)
+		s.unlockWrites()
+		return processID, err
+	}
 	result, err := s.execRuntime(containerID, command, stream, stdout, stderr)
+	profileErr := s.setContainerCPUProfile(runID, sessionID, containerID, CPUProfileThink)
+	s.lockWrites()
+	releaseErr := (scheduler.Scheduler{DB: s.DB}).ReleaseBurst(reservation.ID)
+	_, _ = s.DB.Exec(`INSERT INTO events (id, run_id, session_id, process_id, source, event_type, payload, created_at)
+		VALUES (?, ?, ?, ?, 'control_plane', 'burst_release', ?, ?)`,
+		ids.New("evt"), runID, sessionID, processID, fmt.Sprintf(`{"reservation_id":%q}`, reservation.ID), time.Now().UTC().Format(time.RFC3339Nano))
 	wallSeconds := time.Since(start).Seconds()
 	status := "exited"
 	if err != nil {
@@ -172,7 +211,25 @@ func (s Service) exec(sessionID string, command []string, stream bool, stdout, s
 		VALUES (?, ?, ?, ?, 'control_plane', 'exec_end', ?, ?)`, ids.New("evt"), runID, sessionID, processID, fmt.Sprintf(`{"exec_id":%q,"exit_code":%d,"status":%q,"wall_seconds":%.6f}`, result.ExecID, result.ExitCode, status, wallSeconds), ended)
 	_, _ = s.DB.Exec(`INSERT INTO cost_samples (id, run_id, session_id, node_id, wall_seconds, active_cpu_seconds, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`, ids.New("cost"), runID, sessionID, "local", wallSeconds, wallSeconds, ended)
-	return processID, err
+	s.unlockWrites()
+	if err != nil {
+		return processID, err
+	}
+	if profileErr != nil {
+		return processID, profileErr
+	}
+	return processID, releaseErr
+}
+
+func (s Service) SetSessionCPUProfile(sessionID, profile string) error {
+	var containerID, runID string
+	if err := s.DB.QueryRow(`SELECT COALESCE(container_id, ''), run_id FROM sessions WHERE id = ?`, sessionID).Scan(&containerID, &runID); err != nil {
+		return err
+	}
+	if containerID == "" {
+		return fmt.Errorf("session %s has no container id", sessionID)
+	}
+	return s.setContainerCPUProfile(runID, sessionID, containerID, profile)
 }
 
 func (s Service) Interrupt(processID string) error {
@@ -196,6 +253,19 @@ func (s Service) ExposePort(sessionID string, port int) (string, error) {
 	_, _ = s.DB.Exec(`INSERT INTO events (id, run_id, session_id, source, event_type, payload, created_at)
 		VALUES (?, ?, ?, 'acfctl', 'port_expose', ?, ?)`, ids.New("evt"), runID, sessionID, fmt.Sprintf(`{"port":%d,"url":%q}`, port, url), now)
 	return url, nil
+}
+
+func (s Service) sessionCPURequest(sessionID string) float64 {
+	var raw string
+	err := s.DB.QueryRow(`SELECT l.task_yaml FROM sessions s JOIN leases l ON s.lease_id = l.id WHERE s.id = ?`, sessionID).Scan(&raw)
+	if err != nil {
+		return 1
+	}
+	task, err := ParseTask([]byte(raw))
+	if err != nil || task.CPURequest <= 0 {
+		return 1
+	}
+	return task.CPURequest
 }
 
 func (s Service) ListSessions() ([]SessionInfo, error) {
@@ -329,6 +399,7 @@ func (s Service) ResumeSnapshot(snapshotNameOrID, leaseID string) (string, error
 	if err != nil {
 		return "", err
 	}
+	_ = s.setContainerCPUProfile(runID, sessionID, containerID, CPUProfileThink)
 	startupColdMS := time.Since(start).Milliseconds()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	runtimeName := s.runtimeName()
@@ -376,6 +447,49 @@ func (s Service) removeRuntime(containerID string) error {
 		return s.Driver.Remove(context.Background(), containerID)
 	}
 	return fmt.Errorf("runtime driver is required")
+}
+
+func (s Service) setContainerCPUProfile(runID, sessionID, containerID, profile string) error {
+	weight, normalized, err := cpuWeightForProfile(profile)
+	if err != nil {
+		return err
+	}
+	start := time.Now()
+	if s.Driver == nil {
+		return fmt.Errorf("runtime driver is required")
+	}
+	if err := s.Driver.SetCPUWeight(context.Background(), containerID, weight); err != nil {
+		return err
+	}
+	switchMS := time.Since(start).Milliseconds()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, _ = s.DB.Exec(`INSERT INTO events (id, run_id, session_id, source, event_type, payload, created_at)
+		VALUES (?, ?, ?, 'control_plane', 'cpu_weight_set', ?, ?)`,
+		ids.New("evt"), runID, sessionID, fmt.Sprintf(`{"profile":%q,"cpu_weight":%d,"switch_ms":%d}`, normalized, weight, switchMS), now)
+	return nil
+}
+
+func (s Service) lockWrites() {
+	if s.WriteMu != nil {
+		s.WriteMu.Lock()
+	}
+}
+
+func (s Service) unlockWrites() {
+	if s.WriteMu != nil {
+		s.WriteMu.Unlock()
+	}
+}
+
+func cpuWeightForProfile(profile string) (int64, string, error) {
+	switch strings.ToLower(strings.TrimSpace(profile)) {
+	case "", CPUProfileThink, "idle":
+		return CPUWeightThink, CPUProfileThink, nil
+	case CPUProfileTool, "active":
+		return CPUWeightTool, CPUProfileTool, nil
+	default:
+		return 0, "", fmt.Errorf("unknown cpu profile %q", profile)
+	}
 }
 
 func (s Service) runtimeName() string {

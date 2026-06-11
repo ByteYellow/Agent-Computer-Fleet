@@ -14,10 +14,26 @@ import (
 
 type fakeDriver struct{}
 
+var fakeCPUWeights []int64
+
 func (fakeDriver) Name() string { return "fake" }
 
 func (fakeDriver) Capabilities() runtimeplane.Capabilities {
-	return runtimeplane.Capabilities{Exec: true, Stop: true, Snapshot: true, Fork: true, Resume: true}
+	return runtimeplane.Capabilities{
+		Exec:               true,
+		Stop:               true,
+		Snapshot:           true,
+		Fork:               true,
+		Resume:             true,
+		CPUWeight:          true,
+		FilesystemSnapshot: "copy",
+		MemorySnapshotType: "none",
+		ResumeLatencyClass: "cold",
+		IsolationLevel:     "container",
+		QuotaSupport:       "cgroup",
+		NetworkPolicy:      "proxy",
+		TelemetryBinding:   []string{"label"},
+	}
 }
 
 func (fakeDriver) CreateSession(ctx context.Context, req runtimeplane.CreateSessionRequest) (string, error) {
@@ -56,6 +72,11 @@ func (fakeDriver) ResumeDirectorySnapshot(ctx context.Context, src, dst string) 
 	return state.Manifest{}, nil
 }
 
+func (fakeDriver) SetCPUWeight(ctx context.Context, containerID string, weight int64) error {
+	fakeCPUWeights = append(fakeCPUWeights, weight)
+	return nil
+}
+
 func TestCreateLeaseAndSession(t *testing.T) {
 	root := t.TempDir()
 	paths, err := store.Init(filepath.Join(root, ".acf"))
@@ -75,6 +96,7 @@ func TestCreateLeaseAndSession(t *testing.T) {
 	}
 
 	svc := Service{DB: db, Paths: paths, Driver: fakeDriver{}}
+	fakeCPUWeights = nil
 	leaseID, err := svc.CreateLease(taskPath)
 	if err != nil {
 		t.Fatal(err)
@@ -96,6 +118,51 @@ func TestCreateLeaseAndSession(t *testing.T) {
 	}
 	if leaseStatus != "allocated" || sessionStatus != "running" {
 		t.Fatalf("statuses lease=%s session=%s", leaseStatus, sessionStatus)
+	}
+}
+
+func TestExecSwitchesCPUProfileForToolPhase(t *testing.T) {
+	root := t.TempDir()
+	paths, err := store.Init(filepath.Join(root, ".acf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	taskPath := filepath.Join(root, "task.yaml")
+	taskYAML := []byte("run_id: run-test\nimage: alpine:3.20\nworkspace: /workspace\nrisk_tier: medium\n")
+	if err := osWriteFile(taskPath, taskYAML); err != nil {
+		t.Fatal(err)
+	}
+	svc := Service{DB: db, Paths: paths, Driver: fakeDriver{}}
+	fakeCPUWeights = nil
+	leaseID, err := svc.CreateLease(taskPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID, err := svc.CreateSession(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Exec(sessionID, []string{"echo", "ok"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(fakeCPUWeights) < 3 {
+		t.Fatalf("expected create think + exec tool/think CPU weight updates, got %v", fakeCPUWeights)
+	}
+	if fakeCPUWeights[len(fakeCPUWeights)-2] != CPUWeightTool || fakeCPUWeights[len(fakeCPUWeights)-1] != CPUWeightThink {
+		t.Fatalf("expected exec to switch tool then think, got %v", fakeCPUWeights)
+	}
+	var events int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM events WHERE event_type = 'cpu_weight_set' AND session_id = ?`, sessionID).Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if events < 3 {
+		t.Fatalf("expected cpu_weight_set events, got %d", events)
 	}
 }
 

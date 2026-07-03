@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="620" viewBox="0 0 1280 620" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="660" viewBox="0 0 1280 660" role="img" aria-labelledby="title desc">
   <title id="title">AgentProvenance multi-agent evidence DAG</title>
   <desc id="desc">A causal graph from lead agent to sub-agents, peer message, tool call, kernel events, policy risk, response, artifact, manifest, and verification.</desc>
   <defs>
@@ -7,10 +7,11 @@
     </style>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#334155"/></marker>
   </defs>
-  <rect class="bg" width="1280" height="620"/>
+  <rect class="bg" width="1280" height="660"/>
   <text x="48" y="54" class="title">Signed evidence DAG: agent orchestration meets runtime ground truth</text>
   <text x="48" y="82" class="t">The graph records who delegated to whom, which message carried intent, which tool call ran, and which kernel event proved the effect.</text>
 
+  <g transform="translate(0,34)">
   <rect x="60" y="140" width="145" height="66" rx="14" class="agent"/>
   <text x="96" y="167" class="h">Lead agent</text>
   <text x="82" y="188" class="t">run scope / cgroup</text>
@@ -20,23 +21,23 @@
   <rect x="270" y="205" width="145" height="66" rx="14" class="agent"/>
   <text x="313" y="232" class="h">Bob</text>
   <text x="304" y="253" class="t">builder sub-agent</text>
-  <rect x="60" y="300" width="145" height="66" rx="14" class="bad"/>
-  <text x="96" y="327" class="h">recon</text>
-  <text x="74" y="348" class="t">refused · no egress</text>
+  <rect x="270" y="330" width="145" height="66" rx="14" class="bad"/>
+  <text x="306" y="357" class="h">recon</text>
+  <text x="284" y="378" class="t">refused · no egress</text>
 
   <path class="edge" d="M205 170C230 145 245 116 270 113"/>
   <text x="220" y="128" class="label">agent_spawn</text>
   <path class="edge" d="M205 176C232 200 244 232 270 238"/>
   <text x="219" y="222" class="label">agent_spawn</text>
-  <path class="edge" d="M132 206V300"/>
-  <text x="140" y="258" class="label">agent_spawn</text>
+  <path class="edge" d="M205 190C238 250 248 312 270 345"/>
+  <text x="196" y="300" class="label">agent_spawn</text>
 
-  <rect x="480" y="80" width="210" height="66" rx="14" class="msg"/>
-  <text x="510" y="107" class="h">Poisoned peer message</text>
-  <text x="504" y="128" class="t">objectified body hash + preview</text>
-  <path class="edge" d="M415 113H480"/>
-  <text x="428" y="101" class="label">agent_message</text>
-  <path class="edge" d="M585 146C552 184 454 223 415 235"/>
+  <rect x="530" y="80" width="210" height="66" rx="14" class="msg"/>
+  <text x="560" y="107" class="h">Poisoned peer message</text>
+  <text x="554" y="128" class="t">objectified body hash + preview</text>
+  <path class="edge" d="M415 113H530"/>
+  <text x="430" y="101" class="label">agent_message</text>
+  <path class="edge" d="M635 146C592 185 452 226 415 238"/>
 
   <rect x="730" y="205" width="150" height="66" rx="14" class="node"/>
   <text x="772" y="232" class="h">Tool call</text>
@@ -73,5 +74,6 @@
   <path class="edge" d="M415 453H520"/>
   <path class="edge" d="M665 453H770"/>
 
-  <text x="48" y="565" class="t">Recorded facts and derived edges are distinct: hooks establish orchestration context; kernel events establish runtime ground truth; data-flow and taint edges are derived with confidence and evidence refs.</text>
+  </g>
+  <text x="48" y="600" class="t">Recorded facts and derived edges are distinct: hooks establish orchestration context; kernel events establish runtime ground truth; data-flow and taint edges are derived with confidence and evidence refs.</text>
 </svg>

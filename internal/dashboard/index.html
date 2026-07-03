@@ -317,8 +317,10 @@ const KIND_COLOR={
   policy_decision:'var(--policy)', policy:'var(--policy)',
   risk_signal:'var(--risk)', risk:'var(--risk)',
   response_action:'var(--response)', response:'var(--response)',
-  snapshot:'var(--snapshot)', attempt:'var(--snapshot)', rollout:'var(--intent)', session:'var(--toolcall)', unknown:'#9a9aa0', other:'#64748b'};
+  snapshot:'var(--snapshot)', attempt:'var(--snapshot)', rollout:'var(--intent)', session:'var(--toolcall)',
+  agent:'var(--acc)', message:'#c026d3', refused:'var(--risk)', unknown:'#9a9aa0', other:'#64748b'};
 const EDGE_LABEL={llm_call:'request→response',llm_intent_caused:'intent→action',
+  agent_spawn:'spawns (delegation)',agent_message:'sends (peer)',agent_tool_call:'runs',agent_syscall:'→ syscall',
   runtime_event_policy_decision:'→ policy',policy_decision_risk_signal:'→ risk',
   risk_signal_response_action:'→ response',runtime_tool_call_event:'tool→event',
   runtime_process_event:'proc→event',possible_sensitive_data_flow:'data flow',
@@ -330,7 +332,7 @@ const EDGE_LABEL={llm_call:'request→response',llm_intent_caused:'intent→acti
 const LENS_LABEL={'default':'Default · causality','security':'Security · risk/policy/response',
   'process':'Process · tree + runtime','file-artifact':'File / Artifact · lineage',
   'network-egress':'Network · egress','data-flow-taint':'Data-flow · taint (secret→sink)',
-  'agent-intent':'Agent intent · prompt→action','trust-origin':'Trust · origin','sandbox-boundary':'Sandbox · boundary'};
+  'agent-intent':'Agent intent · prompt→action','orchestration':'Orchestration · agents (delegation/peer)','trust-origin':'Trust · origin','sandbox-boundary':'Sandbox · boundary'};
 const $=s=>document.querySelector(s);
 
 async function j(u){const r=await fetch(u);return r.json();}

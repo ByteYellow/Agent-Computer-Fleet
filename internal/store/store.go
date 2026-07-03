@@ -239,6 +239,24 @@ func EnsureSchema(db *sql.DB) error {
 			started_at TEXT NOT NULL DEFAULT '',
 			ended_at TEXT NOT NULL DEFAULT ''
 		);`,
+		// PRIMARY KEY is (run_id, id), NOT id alone: every run has its own "main"
+		// orchestrator (and agent ids can repeat across runs), so a single-column
+		// id PK would let one run's agent rows clobber another's -- breaking
+		// multi-run stores, forensics import, and dashboard replay. Agent identity
+		// is only ever resolved run-scoped (the lens/bridge always filter by
+		// run_id), so the graph node id stays "agent/<id>".
+		`CREATE TABLE IF NOT EXISTS agents (
+			id TEXT NOT NULL,
+			run_id TEXT NOT NULL DEFAULT '',
+			name TEXT NOT NULL DEFAULT '',
+			agent_type TEXT NOT NULL DEFAULT '',
+			parent_agent_id TEXT NOT NULL DEFAULT '',
+			binding_source TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			started_at TEXT NOT NULL DEFAULT '',
+			ended_at TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (run_id, id)
+		);`,
 		`CREATE TABLE IF NOT EXISTS rollouts (
 			id TEXT PRIMARY KEY,
 			run_id TEXT NOT NULL,
@@ -818,6 +836,13 @@ func EnsureSchema(db *sql.DB) error {
 		`ALTER TABLE baseline_profiles ADD COLUMN payload TEXT NOT NULL DEFAULT '{}';`,
 		`ALTER TABLE telemetry_spool_batches ADD COLUMN dropped_at TEXT NOT NULL DEFAULT '';`,
 		`ALTER TABLE telemetry_spool_batches ADD COLUMN drop_reason TEXT NOT NULL DEFAULT '';`,
+		// Multi-agent orchestration: which agent/sub-agent ran a tool call (from
+		// the harness hooks bridge). Empty for main-thread / non-agent calls.
+		`ALTER TABLE tool_calls ADD COLUMN agent_id TEXT NOT NULL DEFAULT '';`,
+		// Indexes for the agent tables/columns added above (run after the ALTER so
+		// the agent_id column exists; IF NOT EXISTS keeps them idempotent).
+		`CREATE INDEX IF NOT EXISTS idx_agents_run ON agents(run_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_tool_calls_run_agent ON tool_calls(run_id, agent_id);`,
 	}
 	for _, stmt := range alterStmts {
 		if _, err := db.Exec(stmt); err != nil && !isDuplicateColumn(err) {

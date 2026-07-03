@@ -20,6 +20,7 @@ var availableGraphLenses = []string{
 	"network-egress",
 	"data-flow-taint",
 	"agent-intent",
+	"orchestration",
 	"trust-origin",
 	"sandbox-boundary",
 }
@@ -309,7 +310,7 @@ func graphLensNodes(db *sql.DB, runID string) (map[string]GraphLensNode, map[str
 			ID:      ev.NodeID,
 			Kind:    "runtime_event",
 			Subtype: ev.Type,
-			Label:   ev.Type,
+			Label:   lensEventLabel(ev),
 			Risk:    riskForLensEvent(ev),
 			Data: map[string]any{
 				"event_id": ev.ID, "source": ev.Source, "pid": ev.PID, "ppid": ev.PPID,
@@ -322,6 +323,9 @@ func graphLensNodes(db *sql.DB, runID string) (map[string]GraphLensNode, map[str
 		return nil, nil, err
 	}
 	if err := addToolCallNodes(db, runID, add); err != nil {
+		return nil, nil, err
+	}
+	if err := addAgentNodes(db, runID, add); err != nil {
 		return nil, nil, err
 	}
 	if err := addProcessNodes(db, runID, add); err != nil {
@@ -415,19 +419,26 @@ func graphLensNodes(db *sql.DB, runID string) (map[string]GraphLensNode, map[str
 }
 
 func addToolCallNodes(db *sql.DB, runID string, add func(GraphLensNode)) error {
-	rows, err := db.Query(`SELECT id, COALESCE(attempt_id,''), COALESCE(command,''), COALESCE(status,''), COALESCE(result_ref,''), COALESCE(policy_decision,'')
+	rows, err := db.Query(`SELECT id, COALESCE(attempt_id,''), COALESCE(command,''), COALESCE(status,''), COALESCE(result_ref,''), COALESCE(policy_decision,''), COALESCE(agent_id,'')
 		FROM tool_calls WHERE run_id = ?`, runID)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var id, attempt, command, status, result, policy string
-		if err := rows.Scan(&id, &attempt, &command, &status, &result, &policy); err != nil {
+		var id, attempt, command, status, result, policy, agentID string
+		if err := rows.Scan(&id, &attempt, &command, &status, &result, &policy, &agentID); err != nil {
 			return err
 		}
-		add(GraphLensNode{ID: id, Kind: "tool_call", Subtype: status, Label: shortLabel(command, id), TrustOrigin: "agent_asserted", Data: map[string]any{
-			"attempt_id": attempt, "command": command, "status": status, "result_ref": result, "policy_decision": policy,
+		// A gate-denied proposal (Attempt A) or a model refusal is the app-side
+		// half of the blame chain -- surface it as a risk so the orchestration
+		// lens renders it distinctly from an ordinary tool call.
+		risk := ""
+		if status == "denied" || status == "refused" {
+			risk = "refused"
+		}
+		add(GraphLensNode{ID: id, Kind: "tool_call", Subtype: status, Label: shortLabel(command, id), Risk: risk, TrustOrigin: "agent_asserted", Data: map[string]any{
+			"attempt_id": attempt, "command": command, "status": status, "result_ref": result, "policy_decision": policy, "agent_id": agentID,
 		}})
 		if result != "" {
 			add(GraphLensNode{ID: result, Kind: "artifact", Label: lensShortRef(result), TrustOrigin: "agent_generated", Data: map[string]any{"result_ref": result, "tool_call_id": id}})
@@ -541,7 +552,39 @@ func addSnapshotAttemptNodes(db *sql.DB, runID string, add func(GraphLensNode)) 
 	return nil
 }
 
+// addAgentNodes renders the multi-agent orchestration actors (from the hooks
+// bridge): the main orchestrator and each sub-agent / teammate, keyed by the
+// "agent/<id>" node id the agent_spawn / agent_message / agent_tool_call edges
+// point at. Label is the resolved name (alice/bob) falling back to the agent id.
+func addAgentNodes(db *sql.DB, runID string, add func(GraphLensNode)) error {
+	rows, err := db.Query(`SELECT id, COALESCE(name,''), COALESCE(agent_type,''), COALESCE(parent_agent_id,''), COALESCE(started_at,''), COALESCE(ended_at,'')
+		FROM agents WHERE run_id = ?`, runID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, name, agentType, parent, startedAt, endedAt string
+		if err := rows.Scan(&id, &name, &agentType, &parent, &startedAt, &endedAt); err != nil {
+			return err
+		}
+		add(GraphLensNode{
+			ID:          "agent/" + id,
+			Kind:        "agent",
+			Subtype:     agentType,
+			Label:       fallback(name, id),
+			TrustOrigin: "agent_asserted",
+			Data: map[string]any{
+				"agent_id": id, "name": name, "agent_type": agentType,
+				"parent_agent_id": parent, "started_at": startedAt, "ended_at": endedAt,
+			},
+		})
+	}
+	return rows.Err()
+}
+
 func addProvenanceObjectNodes(db *sql.DB, runID string, add func(GraphLensNode)) error {
+	agentNames := agentNameMap(db, runID)
 	rows, err := db.Query(`SELECT hash, object_type, COALESCE(source_id,''), COALESCE(path,''), COALESCE(size_bytes,0)
 		FROM provenance_objects WHERE run_id = ? AND object_type IN ('artifact')`, runID)
 	if err != nil {
@@ -553,6 +596,25 @@ func addProvenanceObjectNodes(db *sql.DB, runID string, add func(GraphLensNode))
 		var sizeBytes int64
 		if err := rows.Scan(&hash, &objectType, &sourceID, &path, &sizeBytes); err != nil {
 			return err
+		}
+		// A peer SendMessage body is objectified for verifiability, but it
+		// should read as an agent-to-agent message, not a generic file artifact:
+		// render it as a distinct "message" node labelled sender -> recipient.
+		if from, to, ok := parseAgentMessageSource(sourceID); ok {
+			add(GraphLensNode{
+				ID:          hash,
+				Kind:        "message",
+				Subtype:     "peer",
+				Label:       "A2A " + agentLabel(agentNames, from) + " -> " + agentLabel(agentNames, to),
+				Risk:        "influence",
+				TrustOrigin: "content_addressed",
+				Data: map[string]any{
+					"hash": hash, "kind": "agent_message", "from": from, "to": to,
+					"from_name": agentLabel(agentNames, from), "to_name": agentLabel(agentNames, to),
+					"source_id": sourceID, "path": path,
+				},
+			})
+			continue
 		}
 		add(GraphLensNode{
 			ID:          hash,
@@ -566,6 +628,47 @@ func addProvenanceObjectNodes(db *sql.DB, runID string, add func(GraphLensNode))
 		})
 	}
 	return rows.Err()
+}
+
+// parseAgentMessageSource splits an objectified peer-message source id
+// ("agent_message/<from>-><to>/<seq>") into the sender and recipient agent ids.
+func parseAgentMessageSource(sourceID string) (from, to string, ok bool) {
+	rest, found := strings.CutPrefix(sourceID, "agent_message/")
+	if !found {
+		return "", "", false
+	}
+	if i := strings.LastIndex(rest, "/"); i >= 0 {
+		rest = rest[:i] // drop the trailing /<seq>
+	}
+	from, to, ok = strings.Cut(rest, "->")
+	return from, to, ok
+}
+
+// agentNameMap resolves agent id -> display name for the run.
+func agentNameMap(db *sql.DB, runID string) map[string]string {
+	m := map[string]string{}
+	rows, err := db.Query(`SELECT id, COALESCE(name,'') FROM agents WHERE run_id = ?`, runID)
+	if err != nil {
+		return m
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err == nil {
+			m[id] = name
+		}
+	}
+	return m
+}
+
+func agentLabel(names map[string]string, id string) string {
+	if n := names[id]; n != "" {
+		return n
+	}
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
 }
 
 func graphLensEdges(db *sql.DB, runID string) ([]GraphLensEdge, error) {
@@ -1180,6 +1283,13 @@ func edgeMatchesLens(lens, detail string, edge GraphLensEdge, nodes map[string]G
 		return edge.Derived || isSourceEvent(fromEvent.Type, fromEvent.Path) || isSourceEvent(toEvent.Type, toEvent.Path) || isTaintSinkEvent(fromEvent) || isTaintSinkEvent(toEvent)
 	case "agent-intent":
 		return strings.Contains(edge.EdgeType, "llm_") || from.Kind == "tool_call" || to.Kind == "tool_call" || strings.Contains(edge.EdgeType, "tool_call")
+	case "orchestration":
+		// Multi-agent structure: delegation (agent_spawn), peer influence
+		// (agent_message + the objectified body), and each agent's tool calls
+		// (incl. the refused Attempt-A node).
+		return strings.HasPrefix(edge.EdgeType, "agent_") || from.Kind == "agent" || to.Kind == "agent" ||
+			strings.HasPrefix(edge.FromID, "agent/") || strings.HasPrefix(edge.ToID, "agent/") ||
+			from.Risk == "refused" || to.Risk == "refused"
 	case "trust-origin":
 		return from.TrustOrigin != "" || to.TrustOrigin != "" || from.Kind == "artifact" || to.Kind == "artifact" || from.Kind == "tool_call" || to.Kind == "tool_call"
 	case "sandbox-boundary":
@@ -1210,7 +1320,8 @@ func isStructuralEdge(edgeType string) bool {
 	case "runtime_tool_call_process", "runtime_tool_call_file",
 		"runtime_process_file", "runtime_attempt_file",
 		"runtime_event_policy_decision", "policy_decision_risk_signal", "risk_signal_response_action",
-		"llm_call", "llm_intent_caused", "attempt_snapshot", "snapshot_parent", "promotion_winner":
+		"llm_call", "llm_intent_caused", "attempt_snapshot", "snapshot_parent", "promotion_winner",
+		"agent_spawn", "agent_message", "agent_tool_call", "agent_syscall":
 		return true
 	default:
 		return strings.Contains(edgeType, "policy") || strings.Contains(edgeType, "risk") ||
@@ -1220,7 +1331,7 @@ func isStructuralEdge(edgeType string) bool {
 
 func isGraphValueNode(node GraphLensNode) bool {
 	switch node.Kind {
-	case "tool_call", "process", "artifact", "file", "policy_decision", "risk_signal", "response_action", "attempt", "snapshot":
+	case "tool_call", "process", "artifact", "file", "policy_decision", "risk_signal", "response_action", "attempt", "snapshot", "agent", "message":
 		return true
 	default:
 		return false
@@ -1537,6 +1648,8 @@ func graphLensRules(lens string) []string {
 		return []string{"secret/file source events", "network sink events", "derived possible_sensitive_data_flow"}
 	case "agent-intent":
 		return []string{"llm_call", "llm_intent_caused", "tool_call edges"}
+	case "orchestration":
+		return []string{"agent_spawn (delegation)", "agent_message (peer, body objectified)", "each agent's tool calls incl. refused proposals"}
 	case "trust-origin":
 		return []string{"trust_origin annotations", "agent/tool/artifact nodes"}
 	case "sandbox-boundary":
@@ -1560,6 +1673,8 @@ func graphLensLayout(lens string) string {
 		return "source_to_sink"
 	case "agent-intent":
 		return "intent_to_action"
+	case "orchestration":
+		return "agent_topology"
 	case "trust-origin":
 		return "origin_overlay"
 	case "sandbox-boundary":
@@ -1577,6 +1692,8 @@ func inferLensNode(id string) GraphLensNode {
 		return GraphLensNode{ID: id, Kind: "runtime_process", Label: lensShortRef(id), TrustOrigin: "runtime_observed"}
 	case strings.HasPrefix(id, "workspace_file/"):
 		return GraphLensNode{ID: id, Kind: "file", Label: strings.TrimPrefix(id, "workspace_file/"), TrustOrigin: "workspace_state"}
+	case strings.HasPrefix(id, "agent/"):
+		return GraphLensNode{ID: id, Kind: "agent", Label: strings.TrimPrefix(id, "agent/"), TrustOrigin: "agent_asserted"}
 	case strings.HasPrefix(id, "egress_group/"):
 		return GraphLensNode{ID: id, Kind: "egress_group", Subtype: "risky_egress", Label: "risky egress group", Risk: "high", TrustOrigin: "derived_summary"}
 	case strings.HasPrefix(id, "policy_decision/"):
@@ -1749,6 +1866,41 @@ func riskForDecision(decision string) string {
 	default:
 		return ""
 	}
+}
+
+// lensEventLabel makes a runtime event self-explanatory: instead of a bare event
+// type ("secret_path", "metadata_ip"), show WHAT it touched, so the exfil reads at
+// a glance -- "secret_path .aws/credentials", "metadata_ip 169.254.169.254".
+func lensEventLabel(ev lensEvent) string {
+	switch ev.Type {
+	case "secret_path", "file_open", "file_write":
+		if p := shortPathTail(ev.Path); p != "" {
+			return ev.Type + " " + p
+		}
+	case "metadata_ip", "private_cidr", "network_connect", "dns_query":
+		if ev.Destination != "" {
+			return ev.Type + " " + ev.Destination
+		}
+	case "execve":
+		if c := payloadString(ev.Payload, "command", "cmdline", "comm"); c != "" {
+			return shortLabel(c, ev.Type)
+		}
+	}
+	return ev.Type
+}
+
+// shortPathTail returns the last two path segments (".aws/credentials"), enough to
+// identify the file without the noisy absolute prefix.
+func shortPathTail(p string) string {
+	p = strings.TrimRight(p, "/")
+	if p == "" {
+		return ""
+	}
+	segs := strings.Split(p, "/")
+	if len(segs) >= 2 {
+		return segs[len(segs)-2] + "/" + segs[len(segs)-1]
+	}
+	return segs[len(segs)-1]
 }
 
 func payloadString(payload string, keys ...string) string {

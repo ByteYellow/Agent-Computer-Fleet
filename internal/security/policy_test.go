@@ -51,6 +51,34 @@ func TestEvaluateSecretPathKills(t *testing.T) {
 	}
 }
 
+// TestSelfCredentialAccessNotAlerted proves the default policy does not alert on
+// the agent reading its OWN operational credentials (the recurring dashboard
+// noise), while a real target-secret read still kills -- ranked before the
+// secret_path kill rule, allow-decision so the event is still captured.
+func TestSelfCredentialAccessNotAlerted(t *testing.T) {
+	eng := DefaultEngine()
+	selfPaths := []string{
+		"/home/agent/.claude/.credentials.json",
+		"/home/agent/.agentprov-demo/deepseek-claude.env",
+	}
+	for _, p := range selfPaths {
+		d := eng.Evaluate(Event{EventType: "secret_path", Path: p})
+		if d.Decision != "allow" {
+			t.Errorf("self credential %q: decision = %s, want allow (no alert)", p, d.Decision)
+		}
+		if d.RuleID != "self_credential_access" {
+			t.Errorf("self credential %q: rule = %s, want self_credential_access", p, d.RuleID)
+		}
+	}
+	// Planted targets must STILL kill (the self allowlist must not shadow them).
+	for _, p := range []string{"/home/agent/.aws/credentials", "/home/agent/.config/agentprov-demo-secrets/api_token"} {
+		d := eng.Evaluate(Event{EventType: "secret_path", Path: p})
+		if d.Decision != "kill" {
+			t.Errorf("target secret %q: decision = %s, want kill", p, d.Decision)
+		}
+	}
+}
+
 func TestEvaluatePtraceQuarantines(t *testing.T) {
 	if d := DefaultEngine().Evaluate(Event{EventType: "ptrace"}); d.Decision != "quarantine" {
 		t.Fatalf("ptrace decision = %s, want quarantine", d.Decision)
@@ -65,6 +93,67 @@ func TestEvaluatePrivilegeEscalation(t *testing.T) {
 	// A benign privilege drop (no root marker) must NOT be flagged.
 	if d := DefaultEngine().Evaluate(Event{EventType: "setuid"}); d.Decision != "allow" {
 		t.Fatalf("benign setuid decision = %s, want allow", d.Decision)
+	}
+}
+
+// TestReevaluateRun proves the replay command: it recomputes the risk layer from
+// the current policy (self credential -> no alert; targets -> alert), leaves the
+// raw events intact, and is idempotent (no duplicate signals on re-run).
+func TestReevaluateRun(t *testing.T) {
+	paths, err := store.Init(filepath.Join(t.TempDir(), ".agentprov"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ins := func(id, etype, payload string) {
+		if _, err := db.Exec(`INSERT INTO events (id, run_id, source, event_type, payload, created_at)
+			VALUES (?, 'run-r', 'agentprov_ebpf', ?, ?, '2026-01-01T00:00:01Z')`, id, etype, payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ins("e-self", "secret_path", `{"payload":{"raw":{"path":"/home/a/.claude/.credentials.json"}}}`)
+	ins("e-aws", "secret_path", `{"payload":{"raw":{"path":"/home/a/.aws/credentials"}}}`)
+	ins("e-meta", "metadata_ip", `{"payload":{"raw":{"dst_ip":"169.254.169.254"}}}`)
+	ins("e-benign", "execve", `{"payload":{"raw":{"command":"ls -la"}}}`)
+
+	evaluated, alerts, err := ReevaluateRun(db, "run-r", DefaultEngine())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evaluated != 4 {
+		t.Errorf("evaluated = %d, want 4", evaluated)
+	}
+	if alerts != 2 {
+		t.Errorf("alerts = %d, want 2 (aws kill + metadata quarantine; self credential is allow)", alerts)
+	}
+	var secretEvents int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM events WHERE run_id='run-r' AND event_type='secret_path'`).Scan(&secretEvents); err != nil {
+		t.Fatal(err)
+	}
+	if secretEvents != 2 {
+		t.Errorf("secret_path events = %d, want 2 (raw data must be preserved)", secretEvents)
+	}
+	var selfRisks int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM risk_signals WHERE run_id='run-r' AND payload LIKE '%.claude%'`).Scan(&selfRisks); err != nil {
+		t.Fatal(err)
+	}
+	if selfRisks != 0 {
+		t.Errorf("self credential produced %d risk signals, want 0 (observed, not alerted)", selfRisks)
+	}
+	// Idempotent: a second pass must not duplicate the signals.
+	if _, alerts2, err := ReevaluateRun(db, "run-r", DefaultEngine()); err != nil || alerts2 != 2 {
+		t.Errorf("re-run alerts = %d (err %v), want 2 idempotent", alerts2, err)
+	}
+	var riskTotal int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM risk_signals WHERE run_id='run-r'`).Scan(&riskTotal); err != nil {
+		t.Fatal(err)
+	}
+	if riskTotal != 2 {
+		t.Errorf("risk_signals = %d after re-run, want 2 (no duplicates)", riskTotal)
 	}
 }
 

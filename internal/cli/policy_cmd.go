@@ -2,10 +2,12 @@ package cli
 
 import (
 	"fmt"
+	"os"
+	"text/tabwriter"
+
 	"github.com/byteyellow/agentprovenance/internal/security"
 	"github.com/byteyellow/agentprovenance/internal/store"
 	"github.com/spf13/cobra"
-	"text/tabwriter"
 )
 
 func policyCmd(dataDir *string) *cobra.Command {
@@ -59,8 +61,30 @@ func policyCmd(dataDir *string) *cobra.Command {
 		},
 	}
 	decisions.Flags().StringVar(&runID, "run", "", "filter decisions by run id")
+	var outPath string
+	rules := &cobra.Command{
+		Use:   "rules",
+		Short: "dump the default policy rules as an editable YAML file",
+		Long: "Emits the built-in policy (allow/detect/enforce rules) as YAML you can edit and " +
+			"load back with `policy test --rules <file>`. Use it to tune, e.g., which credential " +
+			"paths count as the agent's own infra (allow, no alert) vs an exfil target (kill).",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			data, err := security.DefaultRulesYAML()
+			if err != nil {
+				return err
+			}
+			if outPath != "" {
+				return os.WriteFile(outPath, data, 0o644)
+			}
+			_, err = cmd.OutOrStdout().Write(data)
+			return err
+		},
+	}
+	rules.Flags().StringVar(&outPath, "out", "", "write to this path instead of stdout")
 	cmd := &cobra.Command{Use: "policy", Short: "policy operations"}
 	cmd.AddCommand(test)
 	cmd.AddCommand(decisions)
+	cmd.AddCommand(rules)
 	return cmd
 }

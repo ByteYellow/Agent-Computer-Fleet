@@ -20,6 +20,49 @@ func securityCmd(dataDir, daemonURL *string) *cobra.Command {
 	cmd.AddCommand(securityRisksCmd(dataDir, daemonURL))
 	cmd.AddCommand(securityDeviationsCmd(dataDir, daemonURL))
 	cmd.AddCommand(securityResponsesCmd(dataDir, daemonURL))
+	cmd.AddCommand(securityReevaluateCmd(dataDir))
+	return cmd
+}
+
+// securityReevaluateCmd re-runs the policy engine over a captured run's stored
+// events, regenerating the decision/risk/response/signal layer from the current
+// (or a custom --rules) policy. Raw events are untouched. Use it to apply an
+// updated policy to already-captured runs without re-running the agent.
+func securityReevaluateCmd(dataDir *string) *cobra.Command {
+	var runID, rulesPath string
+	cmd := &cobra.Command{
+		Use:   "reevaluate",
+		Short: "re-run policy over a captured run's events (apply updated rules to history)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if runID == "" {
+				return fmt.Errorf("--run is required")
+			}
+			engine, err := securitymodel.LoadEngine(rulesPath)
+			if err != nil {
+				return err
+			}
+			db, cleanup, err := openLocalDB(*dataDir)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+			evaluated, alerts, err := securitymodel.ReevaluateRun(db, runID, engine)
+			if err != nil {
+				return err
+			}
+			enc := json.NewEncoder(cmd.OutOrStdout())
+			enc.SetIndent("", "  ")
+			return enc.Encode(map[string]any{
+				"schema_version":   "agentprovenance.security_reevaluate/v1",
+				"run":              runID,
+				"events_evaluated": evaluated,
+				"alerts":           alerts,
+			})
+		},
+	}
+	cmd.Flags().StringVar(&runID, "run", "", "run id to re-evaluate")
+	cmd.Flags().StringVar(&rulesPath, "rules", "", "YAML policy rules file (default: built-in policy)")
 	return cmd
 }
 

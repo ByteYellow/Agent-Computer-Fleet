@@ -1,0 +1,11 @@
+{
+  "hooks": {
+    "PreToolUse":    [{"hooks":[{"type":"command","command":"cat >> /tmp/hooklog2.jsonl; echo >> /tmp/hooklog2.jsonl"}]}],
+    "PostToolUse":   [{"hooks":[{"type":"command","command":"cat >> /tmp/hooklog2.jsonl; echo >> /tmp/hooklog2.jsonl"}]}],
+    "SubagentStart": [{"hooks":[{"type":"command","command":"cat >> /tmp/hooklog2.jsonl; echo >> /tmp/hooklog2.jsonl"}]}],
+    "SubagentStop":  [{"hooks":[{"type":"command","command":"cat >> /tmp/hooklog2.jsonl; echo >> /tmp/hooklog2.jsonl"}]}],
+    "TeammateIdle":  [{"hooks":[{"type":"command","command":"cat >> /tmp/hooklog2.jsonl; echo >> /tmp/hooklog2.jsonl"}]}],
+    "TaskCreated":   [{"hooks":[{"type":"command","command":"cat >> /tmp/hooklog2.jsonl; echo >> /tmp/hooklog2.jsonl"}]}],
+    "TaskCompleted": [{"hooks":[{"type":"command","command":"cat >> /tmp/hooklog2.jsonl; echo >> /tmp/hooklog2.jsonl"}]}]
+  }
+}

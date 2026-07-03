@@ -1,74 +1,76 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="620" viewBox="0 0 1280 620" role="img" aria-labelledby="title desc">
   <title id="title">AgentProvenance architecture</title>
-  <desc id="desc">Application context and runtime telemetry enter an ingest boundary, are correlated into a provenance graph, then exposed through query, policy, audit, and AI tool surfaces.</desc>
+  <desc id="desc">AgentProvenance correlates agent hooks and runtime telemetry at an ingest boundary, builds a signed causality graph, and exposes investigation surfaces while keeping current preview limitations explicit.</desc>
   <defs>
     <style>
-      .bg{fill:#f8fafc}.panel{fill:#fff;stroke:#cbd5e1;stroke-width:2}.core{fill:#eef2ff;stroke:#6366f1}.edge{stroke:#334155;stroke-width:2;fill:none;marker-end:url(#arrow)}.muted{fill:#64748b}.title{font:700 24px ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;fill:#0f172a}.h{font:700 17px ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;fill:#0f172a}.t{font:14px ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;fill:#334155}.small{font:12px ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;fill:#475569}.tag{fill:#ecfeff;stroke:#06b6d4}.risk{fill:#fff7ed;stroke:#f97316}.verify{fill:#f0fdf4;stroke:#22c55e}
+      .bg{fill:#f8fafc}.panel{fill:#fff;stroke:#cbd5e1;stroke-width:2}.core{fill:#eef2ff;stroke:#6366f1;stroke-width:2}.edge{stroke:#334155;stroke-width:2;fill:none;marker-end:url(#arrow)}.muted{fill:#64748b}.title{font:700 24px ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;fill:#0f172a}.h{font:700 17px ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;fill:#0f172a}.t{font:14px ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;fill:#334155}.small{font:12px ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;fill:#475569}.tag{fill:#ecfeff;stroke:#06b6d4;stroke-width:2}.risk{fill:#fff7ed;stroke:#f97316;stroke-width:2}.verify{fill:#f0fdf4;stroke:#22c55e;stroke-width:2}
     </style>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M0 0L10 5L0 10z" fill="#334155"/>
     </marker>
   </defs>
-  <rect class="bg" width="1280" height="720"/>
-  <text x="48" y="54" class="title"><tspan style="fill:#0071e3">Agent</tspan>Provenance: execution observability + verifiable provenance for sandboxed agents</text>
-  <text x="48" y="82" class="small">System telemetry and application context are correlated into a queryable, replayable, and auditable evidence graph.</text>
+  <rect class="bg" width="1280" height="760"/>
+  <text x="48" y="54" class="title"><tspan style="fill:#0071e3">Agent</tspan>Provenance: execution observability + Git-like evidence for sandboxed agents</text>
+  <text x="48" y="82" class="small">App-side agent context + system-side telemetry are correlated into a signed, queryable causality graph.</text>
 
-  <rect x="50" y="120" width="250" height="390" rx="16" class="panel"/>
-  <text x="78" y="158" class="h">Inputs</text>
+  <rect x="50" y="120" width="250" height="430" rx="16" class="panel"/>
+  <text x="78" y="158" class="h">Application Context</text>
   <rect x="78" y="185" width="194" height="58" rx="10" class="tag"/>
-  <text x="96" y="210" class="t">Application context</text>
-  <text x="96" y="231" class="small">run / session / tool_call</text>
+  <text x="96" y="210" class="t">Agent hooks</text>
+  <text x="96" y="231" class="small">lead / sub-agent / peer msg</text>
   <rect x="78" y="265" width="194" height="58" rx="10" class="tag"/>
-  <text x="96" y="290" class="t">Runtime telemetry</text>
-  <text x="96" y="311" class="small">eBPF / Falco / Tetragon</text>
+  <text x="96" y="290" class="t">Tool calls</text>
+  <text x="96" y="311" class="small">bash / read / write / refusal</text>
   <rect x="78" y="345" width="194" height="58" rx="10" class="tag"/>
-  <text x="96" y="370" class="t">Sandbox identity</text>
-  <text x="96" y="391" class="small">pid / cgroup / container</text>
+  <text x="96" y="370" class="t">Execution scopes</text>
+  <text x="96" y="391" class="small">run / attempt / agent_id</text>
   <rect x="78" y="425" width="194" height="58" rx="10" class="tag"/>
   <text x="96" y="450" class="t">Evaluator signals</text>
   <text x="96" y="471" class="small">quality / reward features</text>
 
-  <rect x="370" y="120" width="250" height="390" rx="16" class="panel"/>
-  <text x="398" y="158" class="h">API / Ingest Boundary</text>
-  <rect x="398" y="188" width="194" height="66" rx="10" class="panel"/>
-  <text x="416" y="215" class="t">Validation</text>
-  <text x="416" y="236" class="small">schema / redaction / auth</text>
-  <rect x="398" y="282" width="194" height="66" rx="10" class="panel"/>
-  <text x="416" y="309" class="t">Normalization</text>
-  <text x="416" y="330" class="small">native JSONL event model</text>
-  <rect x="398" y="376" width="194" height="66" rx="10" class="panel"/>
-  <text x="416" y="403" class="t">Spool + retention</text>
-  <text x="416" y="424" class="small">batch / pressure / windows</text>
+  <rect x="350" y="120" width="250" height="430" rx="16" class="panel"/>
+  <text x="378" y="158" class="h">Runtime Telemetry</text>
+  <rect x="378" y="185" width="194" height="58" rx="10" class="tag"/>
+  <text x="396" y="210" class="t">Own eBPF sensor</text>
+  <text x="396" y="231" class="small">exec / open / connect</text>
+  <rect x="378" y="265" width="194" height="58" rx="10" class="tag"/>
+  <text x="396" y="290" class="t">Falco / Tetragon</text>
+  <text x="396" y="311" class="small">bring-your-own telemetry</text>
+  <rect x="378" y="345" width="194" height="58" rx="10" class="tag"/>
+  <text x="396" y="370" class="t">Identity join keys</text>
+  <text x="396" y="391" class="small">cgroup / pid / command / time</text>
+  <rect x="378" y="425" width="194" height="58" rx="10" class="tag"/>
+  <text x="396" y="450" class="t">Raw event store</text>
+  <text x="396" y="471" class="small">paged, retained, drill-down</text>
 
-  <rect x="690" y="100" width="310" height="430" rx="18" class="core"/>
-  <text x="722" y="142" class="h">Observability + Provenance Core</text>
-  <rect x="722" y="175" width="246" height="54" rx="10" class="panel"/>
-  <text x="742" y="208" class="t">ToolCallScope correlation</text>
-  <rect x="722" y="250" width="246" height="54" rx="10" class="panel"/>
-  <text x="742" y="283" class="t">Execution timeline</text>
-  <rect x="722" y="325" width="246" height="54" rx="10" class="panel"/>
-  <text x="742" y="358" class="t">Runtime causality graph</text>
-  <rect x="722" y="400" width="246" height="54" rx="10" class="panel"/>
-  <text x="742" y="433" class="t">Git-like provenance DAG</text>
-  <rect x="722" y="475" width="246" height="54" rx="10" class="verify"/>
-  <text x="742" y="508" class="t">Evidence manifest + verify</text>
+  <rect x="650" y="112" width="292" height="448" rx="18" class="core"/>
+  <text x="682" y="152" class="h">Ingest + Correlation Core</text>
+  <rect x="682" y="184" width="228" height="50" rx="10" class="panel"/>
+  <text x="702" y="215" class="t">API / ingest boundary</text>
+  <rect x="682" y="252" width="228" height="50" rx="10" class="panel"/>
+  <text x="702" y="283" class="t">Schema + redaction</text>
+  <rect x="682" y="320" width="228" height="50" rx="10" class="panel"/>
+  <text x="702" y="351" class="t">Cross-layer correlation</text>
+  <rect x="682" y="388" width="228" height="50" rx="10" class="panel"/>
+  <text x="702" y="419" class="t">Causality graph materialize</text>
+  <rect x="682" y="456" width="228" height="50" rx="10" class="verify"/>
+  <text x="702" y="487" class="t">Hash manifest + signature</text>
 
-  <rect x="1065" y="120" width="170" height="390" rx="16" class="panel"/>
-  <text x="1090" y="158" class="h">Surfaces</text>
-  <rect x="1090" y="185" width="120" height="48" rx="10" class="panel"/>
-  <text x="1116" y="215" class="t">CLI / JSON</text>
-  <rect x="1090" y="253" width="120" height="48" rx="10" class="panel"/>
-  <text x="1111" y="283" class="t">Daemon API</text>
-  <rect x="1090" y="321" width="120" height="48" rx="10" class="panel"/>
-  <text x="1110" y="351" class="t">AI tools + MCP</text>
-  <rect x="1090" y="389" width="120" height="48" rx="10" class="risk"/>
-  <text x="1113" y="419" class="t">Risk gate</text>
-  <rect x="1090" y="457" width="120" height="48" rx="10" class="verify"/>
-  <text x="1114" y="487" class="t">Forensics</text>
+  <rect x="1000" y="120" width="220" height="430" rx="16" class="panel"/>
+  <text x="1028" y="158" class="h">Investigation Surfaces</text>
+  <rect x="1028" y="185" width="164" height="48" rx="10" class="panel"/>
+  <text x="1060" y="215" class="t">CLI / JSON</text>
+  <rect x="1028" y="253" width="164" height="48" rx="10" class="panel"/>
+  <text x="1054" y="283" class="t">Dashboard</text>
+  <rect x="1028" y="321" width="164" height="48" rx="10" class="panel"/>
+  <text x="1052" y="351" class="t">AI tools + MCP</text>
+  <rect x="1028" y="389" width="164" height="48" rx="10" class="risk"/>
+  <text x="1051" y="419" class="t">Risk / response</text>
+  <rect x="1028" y="457" width="164" height="48" rx="10" class="verify"/>
+  <text x="1050" y="487" class="t">Forensics verify</text>
 
-  <path class="edge" d="M300 315H370"/>
-  <path class="edge" d="M620 315H690"/>
-  <path class="edge" d="M1000 315H1065"/>
-  <path class="edge" d="M845 530V590H175V510"/>
-  <text x="210" y="610" class="small">feedback loop: risk, taint, response, audit, evaluator scoring</text>
+  <path class="edge" d="M300 330H650"/>
+  <path class="edge" d="M600 330H650"/>
+  <path class="edge" d="M942 330H1000"/>
+
 </svg>

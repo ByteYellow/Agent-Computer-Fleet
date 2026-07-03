@@ -597,20 +597,28 @@ func addProvenanceObjectNodes(db *sql.DB, runID string, add func(GraphLensNode))
 		if err := rows.Scan(&hash, &objectType, &sourceID, &path, &sizeBytes); err != nil {
 			return err
 		}
-		// A peer SendMessage body is objectified for verifiability, but it
-		// should read as an agent-to-agent message, not a generic file artifact:
-		// render it as a distinct "message" node labelled sender -> recipient.
+		// A SendMessage body is objectified for verifiability, but it should read
+		// as an agent-to-agent message, not a generic file artifact. Both messages
+		// here carry the SAME instruction; distinguish them only by TOPOLOGY, never
+		// by a benign/malicious verdict: peer (对等, sub-agent -> sub-agent) vs
+		// delegation (主从, orchestrator -> sub-agent). The graph shows every path
+		// the instruction reached the recipient; deciding which path is "the attack"
+		// is a separate analysis layer, not something this lens pre-judges.
 		if from, to, ok := parseAgentMessageSource(sourceID); ok {
+			fromName, toName := agentLabel(agentNames, from), agentLabel(agentNames, to)
+			kind, subtype, label := "message", "peer", "peer "+fromName+" -> "+toName
+			if from == "main" { // main/orchestrator -> sub-agent = delegation (主从), not a peer edge
+				kind, subtype, label = "relay", "delegation", "delegate "+fromName+" -> "+toName
+			}
 			add(GraphLensNode{
 				ID:          hash,
-				Kind:        "message",
-				Subtype:     "peer",
-				Label:       "A2A " + agentLabel(agentNames, from) + " -> " + agentLabel(agentNames, to),
-				Risk:        "influence",
+				Kind:        kind,
+				Subtype:     subtype,
+				Label:       label,
 				TrustOrigin: "content_addressed",
 				Data: map[string]any{
-					"hash": hash, "kind": "agent_message", "from": from, "to": to,
-					"from_name": agentLabel(agentNames, from), "to_name": agentLabel(agentNames, to),
+					"hash": hash, "kind": "agent_message", "topology": subtype, "from": from, "to": to,
+					"from_name": fromName, "to_name": toName,
 					"source_id": sourceID, "path": path,
 				},
 			})
@@ -1331,7 +1339,7 @@ func isStructuralEdge(edgeType string) bool {
 
 func isGraphValueNode(node GraphLensNode) bool {
 	switch node.Kind {
-	case "tool_call", "process", "artifact", "file", "policy_decision", "risk_signal", "response_action", "attempt", "snapshot", "agent", "message":
+	case "tool_call", "process", "artifact", "file", "policy_decision", "risk_signal", "response_action", "attempt", "snapshot", "agent", "message", "relay":
 		return true
 	default:
 		return false

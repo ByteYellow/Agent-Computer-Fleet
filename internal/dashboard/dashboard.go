@@ -1049,11 +1049,16 @@ func (s Server) nodeLabels(run string) (map[string]graphNode, error) {
 			msgRows.Close()
 			return nil, err
 		}
-		label := "A2A message"
+		label, kind, subtype := "message", "message", "peer"
 		if from, to, ok := parseAgentMsgSource(sourceID); ok {
-			label = "A2A " + agentDisplay(agentNameByID, from) + " -> " + agentDisplay(agentNameByID, to)
+			// Topology only, no benign/malicious verdict: peer (对等) vs delegation (主从).
+			label = "peer " + agentDisplay(agentNameByID, from) + " -> " + agentDisplay(agentNameByID, to)
+			if from == "main" { // main/orchestrator -> sub-agent = delegation
+				label = "delegate " + agentDisplay(agentNameByID, from) + " -> " + agentDisplay(agentNameByID, to)
+				kind, subtype = "relay", "delegation"
+			}
 		}
-		add(graphNode{ID: hash, Label: label, Kind: "message", Subtype: "peer", Detail: sourceID, Data: map[string]any{
+		add(graphNode{ID: hash, Label: label, Kind: kind, Subtype: subtype, Detail: sourceID, Data: map[string]any{
 			"source_id": sourceID,
 		}})
 	}

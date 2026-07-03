@@ -169,9 +169,9 @@ agentprov forensics verify-attestation \
 
 ## 8. Implementation Note
 
-The **time-windowed tiered correlation engine** (`internal/correlation`) that
-binds app-side context to kernel telemetry across cgroup / container / pid /
-time with confidence, while keeping `self_launched`, `context_asserted`, and
+The **time-windowed tiered correlation engine** (`internal/correlation`) binds
+app-side context to kernel telemetry across cgroup / container / pid / time with
+confidence, while keeping `self_launched`, `context_asserted`, and
 `kernel_correlated` semantics honest. In supervised mode the hard join is:
 `record` creates a real cgroup scope, `sensor stream` observes syscalls, and the
 correlator attaches those runtime events back to the run without requiring the

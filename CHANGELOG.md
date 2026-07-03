@@ -7,6 +7,34 @@ established*, and give record's own scopes a real kernel join key.
 
 ### Added
 
+- **Multi-agent orchestration provenance (`agentprov hooks bridge`,
+  `internal/hooksbridge`).** Translates a Claude Code (or compatible) agent team's
+  harness hooks into the graph: an `agents` table (`PRIMARY KEY (run_id, id)`, so
+  each run's `main` orchestrator stays distinct) + a `tool_calls.agent_id` column,
+  `agent_spawn` (delegation) and `agent_message` (peer — the `SendMessage` body
+  objectified as content-addressed evidence) edges, and a policy-scored tool_call
+  per action bound to the acting agent. In-process sub-agents share one cgroup, so
+  the exfil syscall is joined to the right sub-agent by **command-match**
+  (`agent_syscall` edge), not cgroup. A new `orchestration` graph lens draws the
+  topology; the dashboard renders agent, A2A-message, and `refused` nodes and
+  labels runtime events with their target (`secret_path .aws/credentials`,
+  `metadata_ip 169.254.169.254`). Proven end-to-end on a signed VM capture
+  (`demo/multiagent-provenance`).
+- **`agentprov security reevaluate --run [--rules]`.** Re-runs the policy engine
+  over a captured run's already-stored events, regenerating the
+  decision/risk/response/unified-signal layer (and its graph edges) from the
+  current or a custom policy. Raw events are untouched, it is idempotent, and
+  `graph verify` stays green — so an edited policy can be applied to
+  already-captured runs without re-running the agent or the sensor.
+- **`agentprov policy rules [--out]`.** Dumps the built-in policy as an editable
+  YAML rules file, to tune and load back via `policy test --rules` /
+  `security reevaluate --rules`.
+- **Default `self_credential_access` policy rule.** An agent reading its OWN
+  operational credentials (`.claude/.credentials.json`, its LLM API env) is still
+  captured as an event (full observability) but no longer raises a high
+  `secret_path` alert — ranked as an allow before the kill rule — so operational
+  self-reads stop burying the real target-secret reads. Configurable via the
+  dumped rules file.
 - **`SelfLaunched` as a dimension orthogonal to `CorrelationClass`.** An event
   can now be both `kernel_correlated` (independently witnessed) **and**
   `self_launched` (the process was started by us). It is derived from the event

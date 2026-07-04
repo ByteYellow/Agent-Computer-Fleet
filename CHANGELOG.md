@@ -2,8 +2,12 @@
 
 ## Unreleased
 
-App-context hardening: make the app↔system join *honest about how it was
-established*, and give record's own scopes a real kernel join key.
+## v0.5.0 - 2026-07-03
+
+Multi-agent orchestration provenance: attribute an attack across a Claude Code
+agent team (delegation + peer edges) against real kernel syscalls in one signed
+graph — plus policy replay/config and the app-context hardening that gives
+record's own scopes a real kernel join key.
 
 ### Added
 

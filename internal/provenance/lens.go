@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+	"os"
 	"sort"
 	"strings"
 )
@@ -583,6 +584,31 @@ func addAgentNodes(db *sql.DB, runID string, add func(GraphLensNode)) error {
 	return rows.Err()
 }
 
+// llmMessageMeta reads a stored llm_message object file and pulls out the model
+// and the model's decided tool names. Best-effort: any read/parse failure (e.g. a
+// bundle imported without its object files) degrades to a bare label.
+func llmMessageMeta(path string) (model string, tools []string) {
+	if path == "" {
+		return "", nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", nil
+	}
+	var obj struct {
+		Payload struct {
+			Model     string `json:"model"`
+			Semantics struct {
+				ToolCalls []string `json:"tool_calls"`
+			} `json:"semantics"`
+		} `json:"payload"`
+	}
+	if json.Unmarshal(raw, &obj) != nil {
+		return "", nil
+	}
+	return obj.Payload.Model, obj.Payload.Semantics.ToolCalls
+}
+
 func addProvenanceObjectNodes(db *sql.DB, runID string, add func(GraphLensNode)) error {
 	agentNames := agentNameMap(db, runID)
 	rows, err := db.Query(`SELECT hash, object_type, COALESCE(source_id,''), COALESCE(path,''), COALESCE(size_bytes,0)
@@ -598,16 +624,25 @@ func addProvenanceObjectNodes(db *sql.DB, runID string, add func(GraphLensNode))
 			return err
 		}
 		// The model's actual prompt/completion, captured at the TLS boundary and
-		// stored as content-addressed evidence.
+		// stored as content-addressed evidence. Label so the graph reads as a plain
+		// narrative: "LLM request" -> "LLM response" (carrying the tool the model
+		// decided) -> the syscall it caused.
 		if objectType == "llm_message" {
-			kind := "llm_prompt"
+			model, tools := llmMessageMeta(path)
+			kind, label := "llm_prompt", "LLM request"
 			if strings.HasPrefix(sourceID, "llm_response/") {
-				kind = "llm_completion"
+				kind, label = "llm_completion", "LLM response"
+				if len(tools) > 0 {
+					label += " · decided: " + strings.Join(tools, ", ")
+				}
+			}
+			if model != "" {
+				label += "  [" + model + "]"
 			}
 			add(GraphLensNode{
-				ID: hash, Kind: kind, Subtype: "llm_message", Label: lensShortRef(sourceID),
+				ID: hash, Kind: kind, Subtype: "llm_message", Label: label,
 				TrustOrigin: "content_addressed",
-				Data:        map[string]any{"hash": hash, "source_id": sourceID, "path": path},
+				Data:        map[string]any{"hash": hash, "source_id": sourceID, "path": path, "model": model, "tool_decision": tools},
 			})
 			continue
 		}
@@ -1718,7 +1753,7 @@ func inferLensNode(id string) GraphLensNode {
 	case strings.HasPrefix(id, "agent/"):
 		return GraphLensNode{ID: id, Kind: "agent", Label: strings.TrimPrefix(id, "agent/"), TrustOrigin: "agent_asserted"}
 	case strings.HasPrefix(id, "llm_call/"):
-		return GraphLensNode{ID: id, Kind: "llm_call", Label: "llm_call", TrustOrigin: "content_addressed"}
+		return GraphLensNode{ID: id, Kind: "llm_call", Label: "LLM call", TrustOrigin: "content_addressed"}
 	case strings.HasPrefix(id, "egress_group/"):
 		return GraphLensNode{ID: id, Kind: "egress_group", Subtype: "risky_egress", Label: "risky egress group", Risk: "high", TrustOrigin: "derived_summary"}
 	case strings.HasPrefix(id, "policy_decision/"):

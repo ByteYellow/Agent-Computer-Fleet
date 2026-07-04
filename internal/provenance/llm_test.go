@@ -1,6 +1,7 @@
 package provenance
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -115,5 +116,21 @@ func TestMaterializeLLMCalls(t *testing.T) {
 	db.QueryRow(`SELECT COUNT(*) FROM graph_edges WHERE run_id=? AND edge_type='llm_body'`, run).Scan(&bodyEdges)
 	if objs != 2 || bodyEdges != 2 {
 		t.Errorf("after re-run: objects=%d body edges=%d, want 2/2 (idempotent)", objs, bodyEdges)
+	}
+}
+
+func TestLLMMessageMeta(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "obj.json")
+	if err := os.WriteFile(f, []byte(`{"type":"llm_message","payload":{"model":"claude-opus-4-8","semantics":{"tool_calls":["bash","read_file"]}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	model, tools := llmMessageMeta(f)
+	if model != "claude-opus-4-8" || len(tools) != 2 || tools[0] != "bash" {
+		t.Errorf("llmMessageMeta = %q, %v", model, tools)
+	}
+	// Missing file degrades quietly.
+	if m, tt := llmMessageMeta(filepath.Join(dir, "nope.json")); m != "" || tt != nil {
+		t.Errorf("missing file should yield empty, got %q %v", m, tt)
 	}
 }

@@ -32,3 +32,4 @@ internal/sensor/vmlinux.h
 
 # 本地面试准备文档(不上传)
 面试解读.zh-CN.md
+docs/design-tls-intent-and-generality.md

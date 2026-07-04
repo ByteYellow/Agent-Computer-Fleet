@@ -687,6 +687,15 @@ func sslPayload(raw map[string]any, comm, direction string) string {
 		"length":         intAt(raw, "length"),
 		"comm":           comm,
 	}
+	if m := stringAt(raw, "model"); m != "" {
+		payload["model"] = m
+	}
+	// Privacy: the full reassembled body (the model's actual prompt/completion) is
+	// kept ONLY under an explicit opt-in, so `MaterializeLLMCalls` can objectify it
+	// as verifiable evidence. Default keeps just the hash + short preview.
+	if data != "" && os.Getenv("AGENTPROV_TLS_CAPTURE_BODY") == "1" {
+		payload["content"] = data
+	}
 	if meta := tlsMeta(data, direction); meta != nil {
 		payload["http"] = meta
 	}

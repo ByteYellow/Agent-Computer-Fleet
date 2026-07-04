@@ -586,7 +586,7 @@ func addAgentNodes(db *sql.DB, runID string, add func(GraphLensNode)) error {
 func addProvenanceObjectNodes(db *sql.DB, runID string, add func(GraphLensNode)) error {
 	agentNames := agentNameMap(db, runID)
 	rows, err := db.Query(`SELECT hash, object_type, COALESCE(source_id,''), COALESCE(path,''), COALESCE(size_bytes,0)
-		FROM provenance_objects WHERE run_id = ? AND object_type IN ('artifact')`, runID)
+		FROM provenance_objects WHERE run_id = ? AND object_type IN ('artifact','llm_message')`, runID)
 	if err != nil {
 		return err
 	}
@@ -596,6 +596,20 @@ func addProvenanceObjectNodes(db *sql.DB, runID string, add func(GraphLensNode))
 		var sizeBytes int64
 		if err := rows.Scan(&hash, &objectType, &sourceID, &path, &sizeBytes); err != nil {
 			return err
+		}
+		// The model's actual prompt/completion, captured at the TLS boundary and
+		// stored as content-addressed evidence.
+		if objectType == "llm_message" {
+			kind := "llm_prompt"
+			if strings.HasPrefix(sourceID, "llm_response/") {
+				kind = "llm_completion"
+			}
+			add(GraphLensNode{
+				ID: hash, Kind: kind, Subtype: "llm_message", Label: lensShortRef(sourceID),
+				TrustOrigin: "content_addressed",
+				Data:        map[string]any{"hash": hash, "source_id": sourceID, "path": path},
+			})
+			continue
 		}
 		// A SendMessage body is objectified for verifiability, but it should read
 		// as an agent-to-agent message, not a generic file artifact. Both messages
@@ -1328,7 +1342,8 @@ func isStructuralEdge(edgeType string) bool {
 	case "runtime_tool_call_process", "runtime_tool_call_file",
 		"runtime_process_file", "runtime_attempt_file",
 		"runtime_event_policy_decision", "policy_decision_risk_signal", "risk_signal_response_action",
-		"llm_call", "llm_intent_caused", "attempt_snapshot", "snapshot_parent", "promotion_winner",
+		"llm_call", "llm_intent_caused", "llm_body", "llm_request", "llm_response", "llm_caused",
+		"attempt_snapshot", "snapshot_parent", "promotion_winner",
 		"agent_spawn", "agent_message", "agent_tool_call", "agent_syscall":
 		return true
 	default:
@@ -1339,7 +1354,7 @@ func isStructuralEdge(edgeType string) bool {
 
 func isGraphValueNode(node GraphLensNode) bool {
 	switch node.Kind {
-	case "tool_call", "process", "artifact", "file", "policy_decision", "risk_signal", "response_action", "attempt", "snapshot", "agent", "message", "relay":
+	case "tool_call", "process", "artifact", "file", "policy_decision", "risk_signal", "response_action", "attempt", "snapshot", "agent", "message", "relay", "llm_call", "llm_prompt", "llm_completion":
 		return true
 	default:
 		return false
@@ -1702,6 +1717,8 @@ func inferLensNode(id string) GraphLensNode {
 		return GraphLensNode{ID: id, Kind: "file", Label: strings.TrimPrefix(id, "workspace_file/"), TrustOrigin: "workspace_state"}
 	case strings.HasPrefix(id, "agent/"):
 		return GraphLensNode{ID: id, Kind: "agent", Label: strings.TrimPrefix(id, "agent/"), TrustOrigin: "agent_asserted"}
+	case strings.HasPrefix(id, "llm_call/"):
+		return GraphLensNode{ID: id, Kind: "llm_call", Label: "llm_call", TrustOrigin: "content_addressed"}
 	case strings.HasPrefix(id, "egress_group/"):
 		return GraphLensNode{ID: id, Kind: "egress_group", Subtype: "risky_egress", Label: "risky egress group", Risk: "high", TrustOrigin: "derived_summary"}
 	case strings.HasPrefix(id, "policy_decision/"):

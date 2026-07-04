@@ -863,6 +863,12 @@ var causalEdgeTypes = map[string]bool{
 	"runtime_event_policy_decision": true,
 	"policy_decision_risk_signal":   true,
 	"risk_signal_response_action":   true,
+	// Multi-agent orchestration: delegation, peer influence, per-agent tool
+	// calls, and the command-match join from a tool call to the syscall it caused.
+	"agent_spawn":     true,
+	"agent_message":   true,
+	"agent_tool_call": true,
+	"agent_syscall":   true,
 }
 
 func (s Server) graph(w http.ResponseWriter, r *http.Request) {
@@ -988,7 +994,99 @@ func (s Server) nodeLabels(run string) (map[string]graphNode, error) {
 	}
 	raRows.Close()
 
+	// Multi-agent orchestration nodes (from the hooks bridge): the agents, each
+	// agent's tool calls (a denied/refused proposal renders as the "refused"
+	// kind), and the objectified peer-message bodies.
+	agentNameByID := map[string]string{}
+	agRows, err := s.DB.Query(`SELECT id, COALESCE(name,''), COALESCE(agent_type,'') FROM agents WHERE run_id = ?`, run)
+	if err != nil {
+		return nil, err
+	}
+	for agRows.Next() {
+		var id, name, atype string
+		if err := agRows.Scan(&id, &name, &atype); err != nil {
+			agRows.Close()
+			return nil, err
+		}
+		agentNameByID[id] = name
+		label := name
+		if label == "" {
+			label = id
+		}
+		add(graphNode{ID: "agent/" + id, Label: label, Kind: "agent", Subtype: atype, Data: map[string]any{
+			"agent_id": id, "name": name, "agent_type": atype,
+		}})
+	}
+	agRows.Close()
+
+	tcRows, err := s.DB.Query(`SELECT id, COALESCE(command,''), COALESCE(status,''), COALESCE(policy_decision,'') FROM tool_calls WHERE run_id = ? AND agent_id != ''`, run)
+	if err != nil {
+		return nil, err
+	}
+	for tcRows.Next() {
+		var id, command, status, policy string
+		if err := tcRows.Scan(&id, &command, &status, &policy); err != nil {
+			tcRows.Close()
+			return nil, err
+		}
+		kind := "tool_call"
+		if status == "denied" || status == "refused" {
+			kind = "refused"
+		}
+		add(graphNode{ID: id, Label: shortRef(command), Kind: kind, Subtype: status, Detail: policy, Data: map[string]any{
+			"command": command, "status": status, "policy_decision": policy,
+		}})
+	}
+	tcRows.Close()
+
+	msgRows, err := s.DB.Query(`SELECT hash, COALESCE(source_id,'') FROM provenance_objects WHERE run_id = ? AND source_id LIKE 'agent_message/%'`, run)
+	if err != nil {
+		return nil, err
+	}
+	for msgRows.Next() {
+		var hash, sourceID string
+		if err := msgRows.Scan(&hash, &sourceID); err != nil {
+			msgRows.Close()
+			return nil, err
+		}
+		label, kind, subtype := "message", "message", "peer"
+		if from, to, ok := parseAgentMsgSource(sourceID); ok {
+			// Topology only, no benign/malicious verdict: peer (对等) vs delegation (主从).
+			label = "peer " + agentDisplay(agentNameByID, from) + " -> " + agentDisplay(agentNameByID, to)
+			if from == "main" { // main/orchestrator -> sub-agent = delegation
+				label = "delegate " + agentDisplay(agentNameByID, from) + " -> " + agentDisplay(agentNameByID, to)
+				kind, subtype = "relay", "delegation"
+			}
+		}
+		add(graphNode{ID: hash, Label: label, Kind: kind, Subtype: subtype, Detail: sourceID, Data: map[string]any{
+			"source_id": sourceID,
+		}})
+	}
+	msgRows.Close()
+
 	return nodes, nil
+}
+
+// parseAgentMsgSource splits "agent_message/<from>-><to>/<seq>" into from/to ids.
+func parseAgentMsgSource(sourceID string) (from, to string, ok bool) {
+	rest, found := strings.CutPrefix(sourceID, "agent_message/")
+	if !found {
+		return "", "", false
+	}
+	if i := strings.LastIndex(rest, "/"); i >= 0 {
+		rest = rest[:i]
+	}
+	return strings.Cut(rest, "->")
+}
+
+func agentDisplay(names map[string]string, id string) string {
+	if n := names[id]; n != "" {
+		return n
+	}
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
 }
 
 func shortRef(ref string) string {

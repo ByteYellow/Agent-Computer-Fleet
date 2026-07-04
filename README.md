@@ -18,7 +18,7 @@ version-control system**: there is no merge, checkout, or mutable working tree.
 [![SQLite](https://img.shields.io/badge/state-SQLite-003B57.svg?style=flat-square)](https://www.sqlite.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg?style=flat-square)](LICENSE)
 
-**[Quickstart](#quickstart)** | **[Core Model](#core-model)** | **[Current Capability](#current-capability)** | **[Supply-chain demo](docs/supply-chain-demo.md)** | **[Roadmap](#roadmap)**
+**[Quickstart](#quickstart)** | **[Core Model](#core-model)** | **[Current Capability](#current-capability)** | **[Demos](demo/README.md)** | **[Roadmap](#roadmap)**
 
 </div>
 
@@ -170,8 +170,9 @@ it, and what response should happen?"
 The project currently implements the evidence graph, runtime correlation,
 diff/blame, telemetry batch manifests, policy decisions, normalized risk
 signals, baseline deviation records, response action records, taint,
-quarantine, and forensics/export foundations. Deeper eBPF receivers and
-Feishu/DingTalk response adapters belong to the next security-control phases.
+quarantine, forensics/export foundations, and a native eBPF sensor. Broader
+third-party receiver integrations and Feishu/DingTalk response adapters belong
+to the next security-control phases.
 
 ## Core Model
 
@@ -329,8 +330,8 @@ application context, runtime telemetry, evidence, policy decisions, risk
 signals, baseline deviations, response actions, and external effects into one
 time-ordered view. `--view causality` groups rows into agent context, runtime
 process, runtime telemetry, evidence, risk/policy, and external-effect lanes,
-with correlation status and drill-down commands. The JSON output is designed to
-feed a future UI.
+with correlation status and drill-down commands. The JSON output feeds the web
+dashboard (and external UIs).
 
 ## Deployment Modes
 
@@ -816,13 +817,51 @@ for the signed bundle and the capture scripts.
 
 > **Honesty note.** The sensor captures *every* credential read in the scope, not
 > only the planted ones — including the agent runtime reading its own
-> `~/.claude/.credentials.json` at startup. Both show up as `secret_path` risks.
-> That is realistic (the sensor cannot tell "the agent's own infra secret" from
-> "a planted target secret" — it sees the syscall), and it is the honest picture:
-> the exfil edge to `169.254.169.254` is the attack, while the runtime's own
-> credential read is benign-but-flagged. Distinguishing agent-owned infra secrets
-> from target secrets is a policy/labeling layer on top of the raw evidence, not
-> something the substrate fakes away.
+> `~/.claude/.credentials.json` at startup. All are recorded as `secret_path`
+> **events** (the sensor sees the syscall; it cannot tell "the agent's own infra
+> secret" from "a planted target"). The distinction is a policy/labeling layer on
+> top of the raw evidence: the default `self_credential_access` rule keeps the
+> agent's own infra reads observable-yet-**un-alerted**, so only the planted
+> target secrets raise risks — and that list is configurable, never faked away at
+> the substrate.
+
+### Demo: multi-agent causality (delegation, peer message, syscall evidence)
+
+The multi-agent demo captures an agent team where a lead agent delegates to
+sub-agents, one sub-agent passes a poisoned peer message, and a sub-agent
+unknowingly runs the poisoned install. Agent-side hooks provide the orchestration graph; runtime
+telemetry provides the independent ground truth for `openat` and `connect`.
+The result is one signed graph that can answer: **who instructed whom, which
+tool call ran, which syscall proved the effect, and which risk/response was
+attached to the branch**.
+
+```sh
+./agentprov --data-dir /tmp/multiagent-replay forensics import \
+  demo/multiagent-provenance/run-double-attempt.forensics.json \
+  --pub-key demo/multiagent-provenance/attestation.pub
+./agentprov --data-dir /tmp/multiagent-replay graph verify --run run-double-attempt
+./agentprov --data-dir /tmp/multiagent-replay graph lens --run run-double-attempt --lens orchestration
+./agentprov --data-dir /tmp/multiagent-replay dashboard serve
+```
+
+<p align="center">
+  <img src="docs/img/demo-multiagent-agent-network.gif" alt="Multi-agent agent-network replay captured from the dashboard's orchestration lens play button." width="100%">
+</p>
+<p align="center">
+  <img src="docs/img/demo-multiagent-orchestration.png" alt="Multi-agent orchestration lens showing lead agent, sub-agents, peer message, tool calls, and syscall attribution." width="100%">
+</p>
+<p align="center">
+  <img src="docs/img/demo-multiagent-risk-path.png" alt="Focused metadata-IP risk path showing the runtime event, policy decision, and response chain." width="100%">
+</p>
+<p align="center">
+  <img src="docs/img/demo-multiagent-network-egress.png" alt="Network egress lens showing outbound runtime evidence for the multi-agent run." width="100%">
+</p>
+
+See [`demo/multiagent-provenance/`](demo/multiagent-provenance) for the signed
+bundle, replay commands, capture assets, and the exact attempt split: an
+explicit malicious request is refused at the intent layer, while the hidden
+supply-chain path is caught by kernel telemetry and linked back to the agent
+orchestration graph.
 
 ## Graph Commands
 
@@ -891,7 +930,8 @@ What these mean:
 | Execution context | explicit ToolCallScope binding across run / session / attempt / tool_call / process / container / cgroup / pid |
 | Runtime causality | native `runtime_*` graph edges (tool call, process tree, snapshot, event, file) |
 | Provenance DAG | `graph trace / refs / log / materialize / objects / verify / replay` over content-addressed objects |
-| Graph Explorer lenses | `graph lens` projects the canonical graph into default, security, process, file-artifact, network-egress, data-flow-taint, agent-intent, trust-origin, and sandbox-boundary views; `summary` mode uses Run Overview plus `process_group`, `event_burst`, `file_group`, `risk_group`, `egress_group`, `intent_group`, `trust_group`, and `boundary_group` nodes while keeping raw events queryable; `expanded` keeps high-value details without low-value noise, and `raw` exposes full evidence for focused forensics; group nodes carry drill-down metadata for local expansion, node selection supports lineage/upstream/downstream/children/raw-events controls, and derived edges are marked with derivation rule, confidence, counts, and evidence refs |
+| Multi-agent orchestration | `hooks bridge` folds a Claude Code (or compatible) agent team's harness hooks into the graph — agent nodes, delegation (`agent_spawn`) + peer (`agent_message`, body objectified as evidence) edges, per-agent tool_calls, and command-match syscall attribution (`agent_syscall`) since in-process sub-agents share one cgroup |
+| Graph Explorer lenses | `graph lens` projects the canonical graph into default, security, process, file-artifact, network-egress, data-flow-taint, agent-intent, orchestration, trust-origin, and sandbox-boundary views; `summary` mode uses Run Overview plus `process_group`, `event_burst`, `file_group`, `risk_group`, `egress_group`, `intent_group`, `trust_group`, and `boundary_group` nodes while keeping raw events queryable; `expanded` keeps high-value details without low-value noise, and `raw` exposes full evidence for focused forensics; group nodes carry drill-down metadata for local expansion, node selection supports lineage/upstream/downstream/children/raw-events controls, and derived edges are marked with derivation rule, confidence, counts, and evidence refs |
 | Graph verify | checks object hashes, parent links, and the policy → risk → response → signal chain (white-box and external-telemetry runs) |
 | Correlation explain | `telemetry correlations` — raw identity, resolved context, matched binding, confidence, and time window per event |
 
@@ -910,7 +950,8 @@ What these mean:
 
 | Capability | What it does |
 |---|---|
-| Policy / risk / taint | policy decisions, risk signals, quarantine, taint + descendant checks, response-gate eligibility |
+| Policy / risk / taint | policy decisions, risk signals, quarantine, taint + descendant checks, response-gate eligibility; `self_credential_access` keeps the agent's own credential reads observable but un-alerted |
+| Policy replay + config | `policy rules` dumps the built-in policy as editable YAML; `security reevaluate --run [--rules]` re-runs it over a captured run's stored events (idempotent, raw events untouched) — apply updated rules to history without re-capturing |
 | Behavior baseline | `baseline learn / check` — process/file/network/resource features; deviations become risk signals |
 | Unified signals | one graph-attached `signals` table (behavior / cost / quality / security); security + quality are live producers |
 | Compliance | `compliance` maps evidence to OWASP Agentic + NIST AI profiles with coverage and gap reports |
@@ -1087,6 +1128,7 @@ internal/baseline/    behavior baseline learning and deviation records
 internal/attest/      in-toto/DSSE ed25519 evidence signing (tamper-evidence)
 internal/forensics/   evidence bundle export (optional signed attestation)
 internal/aitools/     AI-callable tool catalog (read surface + inline gate + context-write)
+internal/hooksbridge/ harness-hooks -> agent orchestration graph (delegation/peer edges, command-match attribution)
 internal/mcpserver/   stdio MCP (JSON-RPC 2.0) server over the aitools catalog
 internal/dashboard/   local read-only web dashboard (embedded UI)
 
@@ -1127,6 +1169,22 @@ central evidence service deferred to v2.
 
 Recently landed:
 
+- **Multi-agent orchestration provenance** (`internal/hooksbridge`,
+  `agentprov hooks bridge`) - a harness-hooks bridge turns a Claude Code (or
+  compatible) agent team's hooks into graph structure: agent nodes (`agents`
+  table + `tool_calls.agent_id`), delegation (`agent_spawn`) and peer
+  (`agent_message`, the SendMessage body objectified as evidence) edges, and a
+  policy-scored tool_call per action bound to the acting `agent_id`. In-process
+  sub-agents share one cgroup, so the exfil syscall is attributed to the right
+  sub-agent by **command-match** (`agent_syscall`); a new `orchestration` lens
+  draws the topology. Proven end-to-end on a signed VM capture
+  (`demo/multiagent-provenance`).
+- **Policy replay + self-credential default** - `agentprov security reevaluate`
+  re-runs the policy over a captured run's stored events (idempotent, raw events
+  untouched, verify stays green), so an edited policy (`agentprov policy rules`
+  dumps an editable copy) applies to history without re-capturing. A default
+  `self_credential_access` rule keeps the agent's OWN credential reads observable
+  but un-alerted, so only planted-target secrets raise risks.
 - **Unified signal model** (`internal/signals`, `agentprovenance.signals/v1`) -
   one graph-attached row type for behavior/cost/quality/security, replacing the
   per-dimension silos; security and quality are live producers, with idempotent
@@ -1169,27 +1227,21 @@ Next / open:
 ## Development
 
 ```sh
-go test ./...
-./scripts/accept_phase1.sh
-./scripts/accept_zero_sdk_realistic.sh
-./scripts/accept_falco_risk_realistic.sh
-./scripts/accept_forensics_bundle.sh
-./scripts/accept_batch_forensics.sh
-./scripts/accept_evidence_query_pagination.sh
-./scripts/accept_daemon_evidence_api.sh
-./scripts/accept_telemetry_spool_backpressure.sh
-./scripts/accept_telemetry_100k_pressure.sh
-./scripts/accept_telemetry_event_windows.sh
-./scripts/accept_signal_engine.sh
-./scripts/accept_python_helper.sh
-./scripts/accept_deploy1_batch_pipeline.sh
+go test ./...            # per-package unit tests
+go vet ./...
+gofmt -l internal cmd
+
+# end-to-end acceptance suite (each drives one path and asserts correlated
+# evidence + risk/response records + graph edges + a clean `graph verify`)
+for s in ./scripts/accept_*.sh; do "$s" || break; done
 ```
 
-`go test ./...`, `go vet ./...`, and `gofmt -l` are the per-package gates. The
-acceptance scripts are the end-to-end ones: each drives a single path —
-zero-SDK record, Falco/native-sensor risk, forensics bundle, daemon evidence
-API, telemetry spool/pressure/windows, the signal engine, the Python helper, the
-Deploy 1 batch pipeline, and query pagination — and asserts correlated evidence,
-risk/response records, graph edges, and a clean `graph verify`. The eBPF sensor
-is validated on a Linux host (`go generate ./internal/sensor`, then run
+`go test ./...`, `go vet ./...`, and `gofmt -l` are the per-package gates.
+`scripts/accept_*.sh` are the end-to-end ones — zero-SDK record,
+Falco/Tetragon/native-sensor risk, forensics bundle (+ evidence tamper
+detection), daemon evidence API, telemetry spool/pressure/windows, the signal
+engine (+ unified-signals attestation), LLM-intent causality, the Python helper,
+and the Deploy 1 batch pipeline. CI runs `accept_phase1.sh` plus the
+sensor-bindings drift check (`regen-sensor.sh --check`). The eBPF sensor is
+validated on a Linux host (`go generate ./internal/sensor`, then run
 `agentprov-sensor`).

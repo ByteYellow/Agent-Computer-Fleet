@@ -78,6 +78,9 @@ func (s Service) ExportBundle(runID string) (BundleInfo, error) {
 		{"execution_context_bindings", "execution_context_bindings", "run_id = ?", "created_at ASC, id ASC"},
 		{"rollouts", "rollouts", "run_id = ?", "created_at ASC, id ASC"},
 		{"tool_calls", "tool_calls", "run_id = ?", "created_at ASC, id ASC"},
+		// Multi-agent orchestration actors (names/types/parent) so a replayed
+		// orchestration lens shows alice/bob/recon, not bare agent ids.
+		{"agents", "agents", "run_id = ?", "id ASC"},
 		{"processes", "processes", "session_id IN (SELECT id FROM sessions WHERE run_id = ?)", "started_at ASC, id ASC"},
 		{"fork_attempts", "fork_attempts", "rollout_id IN (SELECT id FROM rollouts WHERE run_id = ?)", "created_at ASC, id ASC"},
 		// Snapshots a run references aren't all session-scoped: a rollout's base

@@ -42,6 +42,7 @@ var importTableOrder = []string{
 	"rollouts",
 	"snapshots",
 	"tool_calls",
+	"agents",
 	"fork_attempts",
 	"processes",
 	"events",

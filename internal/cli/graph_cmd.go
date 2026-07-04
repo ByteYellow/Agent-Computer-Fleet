@@ -341,7 +341,7 @@ func graphCmd(dataDir, daemonURL *string) *cobra.Command {
 		},
 	}
 	lensCmd.Flags().StringVar(&lensRunID, "run", "", "run id")
-	lensCmd.Flags().StringVar(&lensName, "lens", "default", "graph lens: default, security, process, file-artifact, network-egress, data-flow-taint, agent-intent, trust-origin, sandbox-boundary")
+	lensCmd.Flags().StringVar(&lensName, "lens", "default", "graph lens: default, security, process, file-artifact, network-egress, data-flow-taint, agent-intent, orchestration, trust-origin, sandbox-boundary")
 	lensCmd.Flags().StringVar(&lensFocus, "focus", "", "focus node id to keep selected across lenses")
 	lensCmd.Flags().StringVar(&lensDetail, "detail", "summary", "graph detail level: summary, expanded, raw")
 	lensCmd.Flags().StringArrayVar(&lensOverlays, "overlay", nil, "overlay annotations to add, repeatable or comma-separated: risk, trust, security")

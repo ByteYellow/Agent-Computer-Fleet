@@ -197,6 +197,20 @@ func DefaultRules() []Rule {
 			Controls: []string{"ASI02", "Q1", "Q2"},
 		},
 		{
+			// The agent reading its OWN operational credentials (Claude Code's
+			// creds, its LLM API env) is normal, not exfil. Ranked BEFORE
+			// secret_path_access and set to allow so these reads are still
+			// CAPTURED as events (full observability) but raise no alert. This is
+			// a DEFAULT-policy convenience, not a security judgement: override the
+			// list via a custom rules file (`agentprov policy rules` to get
+			// an editable copy) to match your own infra secret paths.
+			ID:       "self_credential_access",
+			Match:    RuleMatch{PathContains: []string{".claude/", "deepseek-claude.env", ".agentprov-demo/", ".agentprov/"}},
+			Decision: "allow",
+			Reason:   "agent's own credential/config access (not an exfil target)",
+			Controls: []string{"ASI03"},
+		},
+		{
 			ID:       "secret_path_access",
 			Match:    RuleMatch{PathContains: []string{".env", "id_rsa", "secret", "credentials"}},
 			Decision: "kill",
@@ -256,6 +270,14 @@ func DefaultRules() []Rule {
 			Controls: []string{"ASI08", "Q3"},
 		},
 	}
+}
+
+// DefaultRulesYAML renders the built-in policy as an editable YAML rules file, so
+// an operator can dump it, tune the allow/detect lists (e.g. which credential
+// paths count as the agent's own infra vs an exfil target), and load it back via
+// LoadEngine / `policy test --rules`.
+func DefaultRulesYAML() ([]byte, error) {
+	return yaml.Marshal(RuleFile{Rules: DefaultRules()})
 }
 
 func LoadEngine(path string) (Engine, error) {
@@ -373,6 +395,72 @@ func EvaluateRuntimeEventWithEngine(db *sql.DB, eventID string, engine Engine) (
 
 func PersistDecision(db *sql.DB, event Event, rawPayload string, decision Decision) (DecisionRecord, error) {
 	return persistDecision(db, event, rawPayload, decision)
+}
+
+// ReevaluateRun re-runs the policy engine over a run's already-captured runtime
+// events, replacing the derived security layer (policy_decisions -> risk_signals
+// -> response_actions -> unified signals + their graph edges) with fresh verdicts
+// from `engine`. The raw events are UNTOUCHED -- full observability is preserved;
+// only the "what did policy conclude" layer is recomputed. Deterministic (no
+// model, no sensor): same events + same rules = same result. Pairs with
+// `policy rules` for an edit-rules -> replay-history workflow.
+//
+// It is idempotent (the clear step below fully removes the prior layer), so a
+// re-run or a mid-way failure is safe to retry. It does NOT retroactively reset
+// session/process status a prior enforce set -- those record what the earlier
+// policy actually did.
+func ReevaluateRun(db *sql.DB, runID string, engine Engine) (evaluated int, alerts int, err error) {
+	if runID == "" {
+		return 0, 0, fmt.Errorf("reevaluate: run id is required")
+	}
+	if len(engine.Rules) == 0 {
+		engine = DefaultEngine()
+	}
+	clears := []struct {
+		q string
+		a []any
+	}{
+		{`DELETE FROM graph_edges WHERE run_id = ? AND edge_type IN ('policy_decision_risk_signal','runtime_event_policy_decision','policy_decision_session','risk_signal_response_action')`, []any{runID}},
+		{`DELETE FROM signals WHERE run_id = ? AND source_table = 'risk_signals'`, []any{runID}},
+		{`DELETE FROM response_actions WHERE run_id = ?`, []any{runID}},
+		{`DELETE FROM risk_signals WHERE run_id = ?`, []any{runID}},
+		{`DELETE FROM policy_decisions WHERE run_id = ?`, []any{runID}},
+		// Only the policy-derived cost rows (block/quarantine counters); token-cost
+		// samples have both counters zero and are left alone.
+		{`DELETE FROM cost_samples WHERE run_id = ? AND (policy_block_count > 0 OR quarantine_count > 0)`, []any{runID}},
+	}
+	for _, c := range clears {
+		if _, e := db.Exec(c.q, c.a...); e != nil {
+			return 0, 0, fmt.Errorf("reevaluate clear: %w", e)
+		}
+	}
+	// Collect event ids first (cursor closed before the re-eval writes, to avoid
+	// the single-connection nested-cursor footgun).
+	rows, e := db.Query(`SELECT id FROM events WHERE run_id = ? ORDER BY created_at ASC, id ASC`, runID)
+	if e != nil {
+		return 0, 0, e
+	}
+	var eventIDs []string
+	for rows.Next() {
+		var id string
+		if e := rows.Scan(&id); e != nil {
+			rows.Close()
+			return 0, 0, e
+		}
+		eventIDs = append(eventIDs, id)
+	}
+	rows.Close()
+	for _, id := range eventIDs {
+		_, persisted, e := EvaluateRuntimeEventWithEngine(db, id, engine)
+		if e != nil {
+			return evaluated, alerts, fmt.Errorf("reevaluate event %s: %w", id, e)
+		}
+		evaluated++
+		if persisted {
+			alerts++
+		}
+	}
+	return evaluated, alerts, nil
 }
 
 func ListDecisions(db *sql.DB, runID string) ([]DecisionRecord, error) {

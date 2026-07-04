@@ -221,49 +221,14 @@ manifests.
 > since), supervised cgroup capture, correlation, risk/policy/response, taint,
 > automatic artifact objectification, and signed forensics export.
 > Phase 6 is partial (content-addressed storage and the web dashboard are in;
-> retention/GC/scale hardening is ongoing). The table below is the original plan,
-> kept for context — it is not a list of unbuilt work.
+> retention/GC/scale hardening is ongoing). This is delivered work, not a list of
+> unbuilt plans.
 
-| Phase | Goal | Output |
-|---|---|---|
-| Phase 1 | Provenance Correlation MVP | ToolCallScope, raw telemetry correlation, runtime causality DAG, diff/blame, risk/deviation records, response-gate evidence, replay and trajectory manifests |
-| Phase 2 | Evidence / Causality Hardening | execution timeline JSON, stable explain JSON, content-addressed objects, object parent hashes, graph verification, bounded traversal, pagination, integrity metadata |
-| Phase 3 | Zero-SDK Recorder Hardening | process-tree capture, delayed child process handling, cwd/time/file-diff inference, orphan lifecycle evidence, low-intrusion record mode |
-| Phase 4 | Real Telemetry Integration | Falco/Tetragon/LoongCollector/auditd/eBPF receivers, cgroup/container/pid correlation, kernel-side filtering assumptions |
-| Phase 5 | Risk / Policy / Control | configurable risk signals, behavior baseline checks, response adapters, taint propagation, quarantine, response blocking, forensics export, Feishu/DingTalk/webhook hooks, isolation escalation hooks |
-| Phase 6 | Scale / UI / Productization | async evidence writer, retention, content-addressed storage, snapshot GC, resource windows, high-concurrency ingest/query tests, usable UI/API |
-
-## Phase 1 Definition Of Done
-
-Phase 1 is done when the project can prove:
-
-- A coding-agent fanout stress demo creates multiple attempts from one base
-  snapshot to exercise branch-heavy evidence.
-- `agentprov record -- <command>` records a command without SDK integration and
-  produces file diff, blame, process evidence, scope bindings, changed-file
-  artifact objects, post-root outlived-process markers, and runtime file
-  evidence.
-- Runtime events can be ingested without raw `tool_call_id`.
-- Events can be bound to execution context through process/container/cgroup/time
-  evidence, with supervised Linux capture using a real cgroup-per-scope join.
-- The graph records `execution_context -> tool_call -> process ->
-  runtime_event -> file_diff/artifact`.
-- PID/PPID/TGID runtime evidence creates process-tree causality edges.
-- Runtime file events create file nodes that can be explained with diff/blame.
-- `graph diff` and `graph blame` explain state changes.
-- `graph explain --json` can explain a file, event, process, tool call,
-  attempt, artifact, or risk decision by combining causality and provenance
-  evidence into an `agentprovenance.explain/v1` manifest with depth/limit/cursor
-  controlled `causality_path` and query metadata.
-- `graph lens` follows the "full observability, bounded graph" model: raw
-  telemetry remains queryable and exportable, while the default graph lens
-  promotes only high-value execution, file, network, policy, risk, response, and
-  structural context. `detail=expanded/raw` gives drill-down access without
-  making the dashboard render an unbounded syscall/event graph.
-- Risk marks taint and blocks unsafe reuse through a response gate.
-- Promotion records a telemetry/evidence drain watermark.
-- `graph replay`, `graph verify`, and `graph trajectories --json` produce
-  machine-readable audit manifests.
+The canonical phase table lives in the **[README Roadmap](../README.md#roadmap)**,
+and the current, machine-checked acceptance list (Phase 1 / v1 Definition of Done)
+is **[docs/v1-definition-of-done.md](v1-definition-of-done.md)**. To avoid drift,
+this doc no longer restates them — it keeps only the product framing above; see
+those two for the canonical roadmap and DoD.
 
 ## Final Effect
 

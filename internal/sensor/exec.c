@@ -40,6 +40,8 @@ char LICENSE[] SEC("license") = "GPL";
 #define ARG_SLOT 32
 #define MAX_ARGS 16
 #define ARGS_BUF (ARG_SLOT * MAX_ARGS)
+#define SSL_CHUNK 256      // bytes captured per TLS chunk (= sizeof path[])
+#define SSL_MAX_CHUNKS 16  // cap: up to SSL_CHUNK*SSL_MAX_CHUNKS bytes per SSL call
 
 struct sensor_event {
 	__u32 kind;
@@ -47,9 +49,10 @@ struct sensor_event {
 	__u32 tgid;
 	__u32 ppid;
 	__u64 cgroup_id;
-	__u32 daddr;     // connect: dst IPv4, network byte order
-	__u16 dport;     // connect: dst port, network byte order
-	__s32 exit_code; // exit: process exit code
+	__u64 conn;      // tls: the SSL* pointer identifying the connection (reassembly key)
+	__u32 daddr;     // connect: dst IPv4 (net order); tls: valid bytes in this chunk
+	__u16 dport;     // connect: dst port (net order); tls: 1 if the message was truncated at the chunk cap
+	__s32 exit_code; // exit: process exit code; tls: total plaintext length of the call
 	__u8 comm[16];
 	__u8 path[256];      // exec filename / open path
 	__u8 args[ARGS_BUF]; // exec: MAX_ARGS fixed slots of argv
@@ -464,69 +467,77 @@ int BPF_UPROBE(handle_getaddrinfo, const char *node) {
 	return 0;
 }
 
-// PoC boundary tracing: a uprobe on SSL_write(ssl, buf, num) captures the
-// plaintext an agent writes to a TLS socket (the LLM request body) without
-// instrumenting the agent. Userspace attaches this to a libssl path only when
-// --ssl-lib is given. We capture the first path[] bytes as a preview.
+// Boundary tracing: uprobes on SSL_write/SSL_read capture the plaintext an agent
+// sends/receives over TLS (the LLM request/response) without instrumenting it.
+// Attached to a libssl path only when --ssl-lib is given. We emit the FULL buffer
+// as ordered SSL_CHUNK-sized chunks keyed by the SSL* pointer (conn); userspace
+// reassembles them into complete HTTP/1.1 messages.
+static __always_inline void emit_ssl_chunks(__u32 kind, __u64 conn, const char *buf, int total) {
+	for (int i = 0; i < SSL_MAX_CHUNKS; i++) {
+		int off = i * SSL_CHUNK;
+		if (off >= total)
+			break;
+		// off < total here, so total - off > 0: cast to unsigned so the verifier
+		// knows the read size is non-negative, then clamp to the 256B path[].
+		__u32 len = (__u32)(total - off);
+		if (len > SSL_CHUNK)
+			len = SSL_CHUNK; // len in [1, SSL_CHUNK]
+		struct sensor_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+		if (!e) {
+			count_drop();
+			return;
+		}
+		e->kind = kind;
+		e->conn = conn;
+		e->daddr = len; // valid bytes in this chunk's path[]
+		e->dport = (total > SSL_CHUNK * SSL_MAX_CHUNKS && i == SSL_MAX_CHUNKS - 1) ? 1 : 0;
+		e->exit_code = total;
+		fill_common(e);
+		e->args[0] = 0;
+		bpf_probe_read_user(&e->path, len, buf + off);
+		bpf_ringbuf_submit(e, 0);
+	}
+}
+
 SEC("uprobe/SSL_write")
 int BPF_UPROBE(handle_ssl_write, void *ssl, const void *buf, int num) {
 	if (!buf || num <= 0)
 		return 0;
-	struct sensor_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
-	if (!e) {
-		count_drop();
-		return 0;
-	}
-	e->kind = EVENT_SSL;
-	e->daddr = 0;
-	e->dport = 0;
-	e->exit_code = num; // total plaintext length (preview may be shorter)
-	fill_common(e);
-	e->args[0] = 0;
-	bpf_probe_read_user(&e->path, sizeof(e->path), buf);
-	bpf_ringbuf_submit(e, 0);
+	emit_ssl_chunks(EVENT_SSL, (__u64)ssl, (const char *)buf, num);
 	return 0;
 }
 
 // SSL_read(ssl, buf, num): the plaintext lands in buf only AFTER the call, so we
-// stash buf at entry and read it on return (the return value is the byte count).
+// stash (buf, ssl) at entry and read it on return (the return value is the count).
+struct ssl_read_ctx {
+	__u64 buf;
+	__u64 ssl;
+};
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 4096);
 	__type(key, __u32);
-	__type(value, __u64);
+	__type(value, struct ssl_read_ctx);
 } ssl_read_bufs SEC(".maps");
 
 SEC("uprobe/SSL_read")
 int BPF_UPROBE(handle_ssl_read_enter, void *ssl, void *buf, int num) {
 	__u32 pid = (__u32)(bpf_get_current_pid_tgid() >> 32);
-	__u64 bufp = (__u64)buf;
-	bpf_map_update_elem(&ssl_read_bufs, &pid, &bufp, BPF_ANY);
+	struct ssl_read_ctx c = {.buf = (__u64)buf, .ssl = (__u64)ssl};
+	bpf_map_update_elem(&ssl_read_bufs, &pid, &c, BPF_ANY);
 	return 0;
 }
 
 SEC("uretprobe/SSL_read")
 int BPF_URETPROBE(handle_ssl_read_exit, int ret) {
 	__u32 pid = (__u32)(bpf_get_current_pid_tgid() >> 32);
-	__u64 *bufp = bpf_map_lookup_elem(&ssl_read_bufs, &pid);
-	if (!bufp)
+	struct ssl_read_ctx *c = bpf_map_lookup_elem(&ssl_read_bufs, &pid);
+	if (!c)
 		return 0;
-	__u64 buf = *bufp;
+	__u64 buf = c->buf, ssl = c->ssl;
 	bpf_map_delete_elem(&ssl_read_bufs, &pid);
 	if (ret <= 0 || buf == 0)
 		return 0;
-	struct sensor_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
-	if (!e) {
-		count_drop();
-		return 0;
-	}
-	e->kind = EVENT_SSL_READ;
-	e->daddr = 0;
-	e->dport = 0;
-	e->exit_code = ret;
-	fill_common(e);
-	e->args[0] = 0;
-	bpf_probe_read_user(&e->path, sizeof(e->path), (void *)buf);
-	bpf_ringbuf_submit(e, 0);
+	emit_ssl_chunks(EVENT_SSL_READ, ssl, (const char *)buf, ret);
 	return 0;
 }

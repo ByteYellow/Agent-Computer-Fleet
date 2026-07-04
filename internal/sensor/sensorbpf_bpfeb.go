@@ -20,6 +20,7 @@ type sensorbpfSensorEvent struct {
 	Tgid     uint32
 	Ppid     uint32
 	CgroupId uint64
+	Conn     uint64
 	Daddr    uint32
 	Dport    uint16
 	_        [2]byte
@@ -28,6 +29,11 @@ type sensorbpfSensorEvent struct {
 	Path     [256]uint8
 	Args     [512]uint8
 	_        [4]byte
+}
+
+type sensorbpfSslReadCtx struct {
+	Buf uint64
+	Ssl uint64
 }
 
 // loadSensorbpf returns the embedded CollectionSpec for sensorbpf.

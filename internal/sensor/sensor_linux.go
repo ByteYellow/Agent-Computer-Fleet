@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/byteyellow/agentprovenance/internal/tlsintent"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
@@ -179,6 +180,9 @@ func RunWithOptions(out io.Writer, opts Options) error {
 	defer close(done)
 	go watchDrops(objs.Drops, emit, done)
 
+	// The SSL_write/SSL_read probes emit ordered TLS-plaintext chunks; reassemble
+	// them into complete HTTP/1.1 request/response messages before emitting.
+	reasm := tlsintent.NewReassembler()
 	for {
 		rec, err := rd.Read()
 		if err != nil {
@@ -191,10 +195,69 @@ func RunWithOptions(out io.Writer, opts Options) error {
 		if err := binary.Read(bytes.NewReader(rec.RawSample), binary.LittleEndian, &e); err != nil {
 			continue
 		}
+		if e.Kind == eventSSL || e.Kind == eventSSLRead {
+			dir := tlsintent.Request
+			if e.Kind == eventSSLRead {
+				dir = tlsintent.Response
+			}
+			n := int(e.Daddr) // valid bytes in this chunk's path[]
+			if n < 0 || n > len(e.Path) {
+				n = len(e.Path)
+			}
+			for _, msg := range reasm.Add(tlsintent.Chunk{
+				PID: e.Pid, Conn: e.Conn, Direction: dir,
+				Data: append([]byte(nil), e.Path[:n]...), Truncated: e.Dport == 1,
+			}) {
+				emit(tlsMessageMap(msg, e, resolver))
+			}
+			continue
+		}
 		if m := normalize(e, resolver); m != nil {
 			emit(m)
 		}
 	}
+}
+
+// tlsMessageMap turns a reassembled HTTP/1.1 LLM message into the normalized
+// event map, reusing the last chunk's process/cgroup context.
+func tlsMessageMap(msg tlsintent.Message, e sensorbpfSensorEvent, resolver *cgroupResolver) map[string]any {
+	containerID := resolver.resolve(e.CgroupId)
+	if containerID == "" {
+		containerID = containerIDForPID(e.Pid)
+	}
+	etype := "tls_write"
+	if msg.Direction == tlsintent.Response {
+		etype = "tls_read"
+	}
+	ev := map[string]any{
+		"source":       "agentprov_ebpf",
+		"pid":          e.Pid,
+		"tgid":         e.Tgid,
+		"ppid":         e.Ppid,
+		"cgroup_id":    strconv.FormatUint(e.CgroupId, 10),
+		"container_id": containerID,
+		"timestamp":    time.Now().UTC().Format(time.RFC3339Nano),
+		"comm":         cstr(e.Comm[:]),
+		"event_type":   etype,
+		"data":         string(msg.Body),
+		"length":       len(msg.Body),
+		"protocol":     msg.Protocol,
+	}
+	if msg.Truncated {
+		ev["truncated"] = true
+	}
+	if msg.Model != "" {
+		ev["model"] = msg.Model
+	}
+	if msg.Endpoint != "" {
+		ev["endpoint"] = msg.Endpoint
+	}
+	if msg.Direction == tlsintent.Request {
+		ev["method"], ev["path"], ev["host"] = msg.Method, msg.Path, msg.Host
+	} else {
+		ev["status"] = msg.Status
+	}
+	return ev
 }
 
 // watchDrops polls the kernel drop counter and emits a resource_pressure event

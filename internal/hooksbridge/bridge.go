@@ -539,6 +539,12 @@ func normalizeRecipient(r string, agents map[string]*agentState) string {
 }
 
 func parseName(ti map[string]any) string {
+	// The Agent tool carries the sub-agent's name explicitly -- prefer it over
+	// regex-sniffing the prompt (which only catches "you are <name>" phrasings and
+	// missed agents whose dispatch prompt worded the role differently).
+	if n := strArg(ti, "name"); n != "" {
+		return strings.ToLower(n)
+	}
 	if m := nameRe.FindStringSubmatch(strArg(ti, "prompt", "description")); len(m) == 2 {
 		return strings.ToLower(m[1])
 	}

@@ -1294,6 +1294,23 @@ func buildIntentDAGEdges(runID string, nodes map[string]GraphLensNode, events ma
 	for i, m := range capStringSlice(msgs, 4) {
 		add(fmt.Sprintf("dag-send-%d", i), src, m, "send_msg")
 	}
+	// Blocked intents: the gate-denied Attempt-A exfil and the model refusals.
+	// Show them as a "⊘ blocked" branch off the run so the graph tells the whole
+	// story -- what was STOPPED at the intent layer, not only what ran.
+	var refused []string
+	for id, n := range nodes {
+		if n.Risk == "refused" {
+			refused = append(refused, id)
+		}
+	}
+	sort.Strings(refused)
+	for _, id := range refused {
+		if n := nodes[id]; !strings.HasPrefix(n.Label, "⊘") {
+			n.Label = "⊘ blocked: " + n.Label
+			nodes[id] = n
+		}
+		add("dag-refused-"+safeGraphID(id), rootID, id, "refused_intent")
+	}
 	return out
 }
 

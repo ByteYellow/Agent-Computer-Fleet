@@ -776,7 +776,7 @@ func summaryLensEdges(runID, lens, focus, detail string, nodes map[string]GraphL
 	case "data-flow-taint":
 		return buildDataFlowSummaryEdges(events), true
 	case "agent-intent":
-		return buildAgentIntentGroupEdges(runID, nodes, events), true
+		return buildAgentIntentGroupEdges(runID, nodes, events, edges), true
 	case "trust-origin":
 		return buildTrustOriginGroupEdges(runID, nodes), true
 	case "sandbox-boundary":
@@ -1156,9 +1156,74 @@ func buildDataFlowSummaryEdges(events map[string]lensEvent) []GraphLensEdge {
 	return deriveAggregatedDataFlowEdges(sources, sinks)
 }
 
-func buildAgentIntentGroupEdges(runID string, nodes map[string]GraphLensNode, events map[string]lensEvent) []GraphLensEdge {
+func dedupStrings(in []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range in {
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
+}
+
+func buildAgentIntentGroupEdges(runID string, nodes map[string]GraphLensNode, events map[string]lensEvent, edges []GraphLensEdge) []GraphLensEdge {
 	rootID := "run/" + runID
 	nodes[rootID] = GraphLensNode{ID: rootID, Kind: "run", Label: runID, Data: map[string]any{"run_id": runID}}
+	out := []GraphLensEdge{}
+
+	// Surface the model's action as a readable lifecycle spine (not aggregated),
+	// so the summary reads as a plain sequence:
+	//   ① prompt check → ② before tool call (decided) → ③ after tool call (caused
+	//   syscall) → ④ send msg.
+	var promptID, completionID string
+	var causedIDs, msgIDs []string
+	for _, e := range edges {
+		switch e.EdgeType {
+		case "llm_request":
+			promptID = e.ToID
+		case "llm_response":
+			completionID = e.ToID
+		case "llm_caused":
+			causedIDs = append(causedIDs, e.ToID)
+		case "agent_message":
+			// only the objectified message body, not the agent-to-agent edge
+			if n, ok := nodes[e.ToID]; ok && (n.Kind == "message" || n.Kind == "relay") {
+				msgIDs = append(msgIDs, e.ToID)
+			}
+		}
+	}
+	causedIDs = dedupStrings(causedIDs)
+	msgIDs = dedupStrings(msgIDs)
+	addLC := func(from, to, stage string) {
+		if from == "" || to == "" {
+			return
+		}
+		out = append(out, GraphLensEdge{ID: "lc-" + stage + "-" + safeGraphID(to), FromID: from, ToID: to, EdgeType: stage})
+	}
+	if promptID != "" || completionID != "" {
+		prev := rootID
+		addLC(prev, promptID, "lc_prompt")
+		if promptID != "" {
+			prev = promptID
+		}
+		addLC(prev, completionID, "lc_before_tool")
+		if completionID != "" {
+			prev = completionID
+		}
+		for _, c := range causedIDs {
+			addLC(prev, c, "lc_after_tool")
+		}
+		if len(causedIDs) > 0 {
+			prev = causedIDs[0]
+		}
+		for _, m := range capStringSlice(msgIDs, 3) {
+			addLC(prev, m, "lc_send_msg")
+		}
+	}
+
 	type intentGroup struct {
 		toolCallID string
 		events     map[string]int
@@ -1176,7 +1241,6 @@ func buildAgentIntentGroupEdges(runID string, nodes map[string]GraphLensNode, ev
 		group.evidence = append(group.evidence, ev.NodeID)
 	}
 	keys := sortedStringKeys(groups)
-	out := []GraphLensEdge{}
 	for _, key := range keys {
 		group := groups[key]
 		if group.toolCallID != "" {

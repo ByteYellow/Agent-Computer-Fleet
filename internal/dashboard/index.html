@@ -81,7 +81,8 @@
   .expandbar button.on{border-color:var(--acc);background:rgba(0,113,227,.1);color:var(--acc);font-weight:650}
   .preview .meta{font-size:11px;color:var(--mut);font-family:ui-monospace,monospace;margin-bottom:7px;display:flex;gap:9px;flex-wrap:wrap;align-items:center}
   .preview .redacted{color:#b25e00;background:rgba(255,159,10,.16);font-size:10px;font-weight:700;padding:2px 7px;border-radius:99px}
-  .preview pre{margin:0;max-height:300px;overflow:auto;background:#1d1d1f;color:#e8e8ed;border-radius:11px;padding:13px 15px;font:11.5px/1.55 ui-monospace,SFMono-Regular,monospace;white-space:pre;tab-size:2}
+  .preview pre{margin:0;max-height:60vh;overflow:auto;background:#1d1d1f;color:#e8e8ed;border-radius:11px;padding:13px 15px;font:11.5px/1.55 ui-monospace,SFMono-Regular,monospace;white-space:pre-wrap;overflow-wrap:anywhere;tab-size:2}
+  .preview pre.diff{white-space:pre}
   .preview pre.diff .add{color:#41d877}
   .preview pre.diff .del{color:#ff6b6b}
   .preview pre.diff .hunk{color:#5ea0ff}
@@ -322,6 +323,7 @@ const KIND_COLOR={
   llm_call:'#6366f1', llm_prompt:'#818cf8', llm_completion:'#a78bfa', unknown:'#9a9aa0', other:'#64748b'};
 const EDGE_LABEL={llm_call:'request→response',llm_intent_caused:'intent→action',
   llm_request:'request',llm_response:'response',llm_caused:'caused syscall',llm_body:'captured body',
+  lc_prompt:'① prompt check',lc_before_tool:'② before tool call',lc_after_tool:'③ after tool call',lc_send_msg:'④ send msg',
   agent_spawn:'spawns (delegation)',agent_message:'sends (peer)',agent_tool_call:'runs',agent_syscall:'→ syscall',
   runtime_event_policy_decision:'→ policy',policy_decision_risk_signal:'→ risk',
   risk_signal_response_action:'→ response',runtime_tool_call_event:'tool→event',
@@ -559,6 +561,8 @@ function renderQuestionEntries(m){
   (m.nodes||[]).forEach(n=>byId[n.id]=n);
   const items=[
     {id:'overview/risks', cls:'risk', q:'Why is this run risky?', lens:'security', sub:'risk paths'},
+    {id:'overview/agent_network', cls:'proc', q:'Which agents coordinated?', lens:'orchestration', sub:'agent delegation / peer messages'},
+    {id:'overview/llm_intent', cls:'proc', q:'Which model intent was captured?', lens:'agent-intent', sub:'TLS intent evidence'},
     {id:'overview/egress', cls:'egress', q:'What happened around egress?', lens:'network-egress', sub:'network groups'},
     {id:'overview/files', cls:'file', q:'What changed files?', lens:'file-artifact', sub:'diff / file groups'},
     {id:'overview/processes', cls:'proc', q:'Which processes mattered?', lens:'process', sub:'process groups'},
@@ -750,9 +754,14 @@ async function loadPreview(run, id){
 
 function renderVerify(v){
   const el=$('#verify');
-  const ok = v && v.status==='ok' && !v.error;
-  el.className='badge '+(ok?'ok':'bad');
   if(!v||v.error){el.innerHTML='✗ verify error <span class="sig">'+esc((v&&v.error)||'')+'</span>';return;}
+  if(v.status==='deferred'){
+    el.className='badge ok';
+    el.innerHTML='✓ INDEXED <span class="sig">'+`${v.error_count||0} err · ${v.warning_count||0} warn · full verify on demand`+'</span>';
+    return;
+  }
+  const ok = v.status==='ok';
+  el.className='badge '+(ok?'ok':'bad');
   el.innerHTML=(ok?'✓ VERIFIED':'✗ FAILED')+` <span class="sig">${v.error_count||0} err · ${v.warning_count||0} warn · signed graph</span>`;
 }
 
@@ -874,7 +883,7 @@ function renderTimeline(events){
     return `<tr><td>${esc(t)}</td><td class="etype">${esc(e.event_type||'')}</td>
       <td class="cls ${cls}">${esc(e.correlation_class||e.correlation_method||'')}${provBadge(e)}</td>
       <td>${confCell(e.correlation_confidence)}</td>
-      <td class="payload">${plCell(e.payload)}</td></tr>`;
+      <td class="payload">${plCell(e.payload, e.id)}</td></tr>`;
   }).join('');
 }
 // Provenance summary as ONE run-level chip instead of a badge on every row:
@@ -890,7 +899,11 @@ function renderProvChip(events){
 // clamps it to a few lines by default and expands to the whole thing on click,
 // so nothing is truncated away -- the record is always fully inspectable.
 function payloadFull(p){ if(!p)return''; try{return JSON.stringify(JSON.parse(p),null,2);}catch(_){return String(p);} }
-function plCell(p){ const full=payloadFull(p); if(!full)return''; return `<div class="pl" onclick="this.classList.toggle('open')" title="click to expand / collapse">${esc(full)}</div>`; }
+// Payload expand state lives OUT of the DOM (keyed by event id) so the 5s live
+// refresh, which rebuilds the table, doesn't collapse what the user opened.
+let EV_OPEN=new Set();
+function plCell(p,key){ const full=payloadFull(p); if(!full)return''; const op=key&&EV_OPEN.has(key)?' open':''; return `<div class="pl${op}" data-plk="${esc(key||'')}" onclick="togglePl(this)" title="click to expand / collapse">${esc(full)}</div>`; }
+function togglePl(el){ const k=el.getAttribute('data-plk'); if(!k){el.classList.toggle('open');return;} if(EV_OPEN.has(k)){EV_OPEN.delete(k);el.classList.remove('open');}else{EV_OPEN.add(k);el.classList.add('open');} }
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 // Correlation confidence tier -> colour band. Keeps a 0.5 ai_asserted join from
 // reading like a 0.98 kernel match.
@@ -937,7 +950,7 @@ async function loadEvidenceDrilldown(offset){
       const t=(e.created_at||'').replace('T',' ').replace(/\.\d+Z?$/,'');
       return `<tr><td>${esc(t)}</td><td class="etype">${esc(e.event_type||'')}</td><td>${esc(e.pid||'')}</td>
         <td>${esc(e.tool_call_id||'')}</td><td class="cls ${esc((e.correlation_class||'').replace(/\s/g,'_'))}">${esc(e.correlation_class||e.correlation_method||'')}${provBadge(e)}</td>
-        <td class="payload">${plCell(e.payload)}</td></tr>`;
+        <td class="payload">${plCell(e.payload, e.id)}</td></tr>`;
     }).join('');
   }
   const from=d.total?EV_OFFSET+1:0, to=Math.min(EV_OFFSET+(d.limit||EV_LIMIT),d.total||0);

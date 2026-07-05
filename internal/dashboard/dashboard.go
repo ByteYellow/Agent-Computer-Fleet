@@ -267,6 +267,19 @@ func (s Server) cachedVerify(run string) any {
 		return e.result
 	}
 	verifyCacheMu.Unlock()
+
+	// The local dashboard is an investigation UI. Full graph verification can
+	// re-hash tens of thousands of objects and should stay an explicit CLI/API
+	// action for large imported bundles. When a ready forensics bundle exists,
+	// import already verified its embedded object content before committing rows;
+	// surface that fast provenance posture here and keep the page responsive.
+	if bundle := s.cachedBundleVerify(run, objs); bundle != nil {
+		verifyCacheMu.Lock()
+		verifyCache[run] = verifyCacheEntry{fingerprint: fp, result: bundle}
+		verifyCacheMu.Unlock()
+		return bundle
+	}
+
 	var result any
 	if v, err := provenance.Verify(s.DB, run); err == nil {
 		result = v
@@ -277,6 +290,34 @@ func (s Server) cachedVerify(run string) any {
 	verifyCache[run] = verifyCacheEntry{fingerprint: fp, result: result}
 	verifyCacheMu.Unlock()
 	return result
+}
+
+func (s Server) cachedBundleVerify(run string, objectCount int) any {
+	var bundleID, sha, status string
+	var size int64
+	err := s.DB.QueryRow(`SELECT id, sha256, size_bytes, status FROM forensics_bundles
+		WHERE run_id = ? ORDER BY created_at DESC LIMIT 1`, run).Scan(&bundleID, &sha, &size, &status)
+	if err == nil && status == "ready" && sha != "" {
+		return map[string]any{
+			"status":        "ok",
+			"error_count":   0,
+			"warning_count": 0,
+			"mode":          "forensics_bundle",
+			"bundle_id":     bundleID,
+			"bundle_sha256": sha,
+			"bundle_bytes":  size,
+		}
+	}
+	if objectCount > 5000 {
+		return map[string]any{
+			"status":        "deferred",
+			"error_count":   0,
+			"warning_count": 1,
+			"mode":          "deferred_full_verify",
+			"message":       "full graph verification is available through `agentprov graph verify`",
+		}
+	}
+	return nil
 }
 
 func (s Server) overview(w http.ResponseWriter, r *http.Request) {
@@ -700,7 +741,12 @@ func (s Server) artifact(w http.ResponseWriter, r *http.Request) {
 	// node produced, not the metadata wrapper. (Evidence objects — events, policy,
 	// etc. — are left as-is so the panel shows the full signed record.)
 	mimePath := path
-	if content, srcPath, ok := unwrapArtifactContent(data); ok {
+	if rendered, ok := renderLLMMessage(data); ok {
+		// A captured LLM request/response: show a readable summary + the pretty
+		// body, not the raw provenance envelope with a double-escaped content field.
+		data = rendered
+		mimePath = "llm-message.txt"
+	} else if content, srcPath, ok := unwrapArtifactContent(data); ok {
 		data = content
 		if srcPath != "" {
 			mimePath = srcPath
@@ -773,6 +819,58 @@ func unwrapArtifactContent(data []byte) (content []byte, path string, ok bool) {
 		return nil, "", false
 	}
 	return []byte(obj.Payload.Content), obj.Payload.Path, true
+}
+
+// renderLLMMessage turns a captured llm_message provenance object into a readable
+// preview: a short intent summary followed by the pretty-printed request/response
+// body (instead of the raw envelope whose `content` is a double-escaped JSON blob).
+func renderLLMMessage(data []byte) ([]byte, bool) {
+	var obj struct {
+		Type    string `json:"type"`
+		Payload struct {
+			Direction string `json:"direction"`
+			Model     string `json:"model"`
+			Content   string `json:"content"`
+			Semantics struct {
+				MessageCount int      `json:"message_count"`
+				ToolsOffered []string `json:"tools_offered"`
+				ToolCalls    []string `json:"tool_calls"`
+				ToolCommands []string `json:"tool_commands"`
+				StopReason   string   `json:"stop_reason"`
+			} `json:"semantics"`
+		} `json:"payload"`
+	}
+	if json.Unmarshal(data, &obj) != nil || obj.Type != "llm_message" {
+		return nil, false
+	}
+	p := obj.Payload
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s   model: %s\n", strings.ToUpper(p.Direction), p.Model)
+	s := p.Semantics
+	if p.Direction == "request" {
+		fmt.Fprintf(&b, "messages: %d\n", s.MessageCount)
+		if len(s.ToolsOffered) > 0 {
+			fmt.Fprintf(&b, "tools offered: %s\n", strings.Join(s.ToolsOffered, ", "))
+		}
+	} else {
+		if len(s.ToolCalls) > 0 {
+			fmt.Fprintf(&b, "decided tool: %s\n", strings.Join(s.ToolCalls, ", "))
+		}
+		if len(s.ToolCommands) > 0 {
+			fmt.Fprintf(&b, "decided command: %s\n", strings.Join(s.ToolCommands, " ; "))
+		}
+		if s.StopReason != "" {
+			fmt.Fprintf(&b, "stop reason: %s\n", s.StopReason)
+		}
+	}
+	b.WriteString("\n─────────── body ───────────\n")
+	var pretty bytes.Buffer
+	if json.Indent(&pretty, []byte(p.Content), "", "  ") == nil {
+		b.Write(pretty.Bytes())
+	} else {
+		b.WriteString(p.Content)
+	}
+	return []byte(b.String()), true
 }
 
 func isBinaryContent(data []byte) bool {

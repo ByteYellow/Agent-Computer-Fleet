@@ -22,7 +22,6 @@ var availableGraphLenses = []string{
 	"network-egress",
 	"data-flow-taint",
 	"agent-intent",
-	"intent-dag",
 	"orchestration",
 	"trust-origin",
 	"sandbox-boundary",
@@ -840,8 +839,6 @@ func summaryLensEdges(runID, lens, focus, detail string, nodes map[string]GraphL
 	case "data-flow-taint":
 		return buildDataFlowSummaryEdges(events), true
 	case "agent-intent":
-		return buildAgentIntentGroupEdges(runID, nodes, events, edges), true
-	case "intent-dag":
 		return buildIntentDAGEdges(runID, nodes, events, edges), true
 	case "trust-origin":
 		return buildTrustOriginGroupEdges(runID, nodes), true
@@ -1258,6 +1255,11 @@ func buildIntentDAGEdges(runID string, nodes map[string]GraphLensNode, events ma
 				msgs = append(msgs, e.ToID)
 			}
 		}
+	}
+	if promptObj == "" && respObj == "" {
+		// No captured LLM traffic to build a DAG from -> fall back to the
+		// per-tool-call execution-scope aggregation so the view isn't empty.
+		return buildAgentIntentGroupEdges(runID, nodes, events, edges)
 	}
 	caused = dedupStrings(caused)
 	msgs = dedupStrings(msgs)
@@ -1818,7 +1820,7 @@ func edgeMatchesLens(lens, detail string, edge GraphLensEdge, nodes map[string]G
 		return isNetworkEvent(fromEvent.Type) || isNetworkEvent(toEvent.Type) || strings.Contains(edge.EdgeType, "network") || strings.Contains(edge.EdgeType, "egress") || strings.Contains(edge.EdgeType, "llm_call")
 	case "data-flow-taint":
 		return edge.Derived || isSourceEvent(fromEvent.Type, fromEvent.Path) || isSourceEvent(toEvent.Type, toEvent.Path) || isTaintSinkEvent(fromEvent) || isTaintSinkEvent(toEvent)
-	case "agent-intent", "intent-dag":
+	case "agent-intent":
 		// The LLM-story lens: the llm_call chain (request/response/decided/caused)
 		// and each agent's tool calls. Excludes (a) the broad ingest-time
 		// llm_intent_caused, which links the response to every action in the window,
@@ -2199,8 +2201,6 @@ func graphLensRules(lens string) []string {
 	case "data-flow-taint":
 		return []string{"secret/file source events", "network sink events", "derived possible_sensitive_data_flow"}
 	case "agent-intent":
-		return []string{"llm_call", "llm_intent_caused", "tool_call edges"}
-	case "intent-dag":
 		return []string{"causal DAG over real evidence: prompt → response → caused exec → send msg"}
 	case "orchestration":
 		return []string{"agent_spawn (delegation)", "agent_message (peer, body objectified)", "each agent's tool calls incl. refused proposals"}
@@ -2225,7 +2225,7 @@ func graphLensLayout(lens string) string {
 		return "egress_map"
 	case "data-flow-taint":
 		return "source_to_sink"
-	case "agent-intent", "intent-dag":
+	case "agent-intent":
 		return "intent_to_action"
 	case "orchestration":
 		return "agent_topology"

@@ -356,7 +356,7 @@ const EDGE_LABEL={llm_call:'request→response',llm_intent_caused:'intent→acti
 const LENS_LABEL={'default':'Default · causality','security':'Security · risk/policy/response',
   'process':'Process · tree + runtime','file-artifact':'File / Artifact · lineage',
   'network-egress':'Network · egress','data-flow-taint':'Data-flow · taint (secret→sink)',
-  'agent-intent':'Agent intent · prompt→action','intent-dag':'Intent DAG · real evidence chain','orchestration':'Orchestration · agents (delegation/peer)','trust-origin':'Trust · origin','sandbox-boundary':'Sandbox · boundary'};
+  'agent-intent':'Agent intent · evidence DAG','orchestration':'Orchestration · agents (delegation/peer)','trust-origin':'Trust · origin','sandbox-boundary':'Sandbox · boundary'};
 const $=s=>document.querySelector(s);
 
 async function j(u){const r=await fetch(u);return r.json();}
@@ -484,10 +484,6 @@ function localScope(g,sel,mode){
 function renderDAG(g,sel){
   const el=$('#dag');
   if(!g.nodes.length){el.innerHTML='<div class="empty">no nodes for this lens</div>';return;}
-  if(LENS==='agent-intent' && DETAIL==='summary'){
-    renderIntentFlow(g);
-    return;
-  }
   // Layout (Sugiyama) is a pure function of topology and is the expensive step.
   // renderDAG is called on every select/hover/zoom -- recomputing it each time
   // was the source of the lag on large graphs. Cache it by the topology

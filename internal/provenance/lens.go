@@ -1295,8 +1295,15 @@ func buildIntentDAGEdges(runID string, nodes map[string]GraphLensNode, events ma
 		add(fmt.Sprintf("dag-send-%d", i), src, m, "send_msg")
 	}
 	// Blocked intents: the gate-denied Attempt-A exfil and the model refusals.
-	// Show them as a "⊘ blocked" branch off the run so the graph tells the whole
-	// story -- what was STOPPED at the intent layer, not only what ran.
+	// Group each under the agent that proposed it (run → agent → ⊘ blocked …) so
+	// the graph tells the whole story -- what was STOPPED at the intent layer, and
+	// by which agent -- not only what ran.
+	toolAgent := map[string]string{} // tool_call node -> its agent node
+	for _, e := range edges {
+		if e.EdgeType == "agent_tool_call" {
+			toolAgent[e.ToID] = e.FromID
+		}
+	}
 	var refused []string
 	for id, n := range nodes {
 		if n.Risk == "refused" {
@@ -1304,12 +1311,21 @@ func buildIntentDAGEdges(runID string, nodes map[string]GraphLensNode, events ma
 		}
 	}
 	sort.Strings(refused)
+	agentLinked := map[string]bool{}
 	for _, id := range refused {
 		if n := nodes[id]; !strings.HasPrefix(n.Label, "⊘") {
 			n.Label = "⊘ blocked: " + n.Label
 			nodes[id] = n
 		}
-		add("dag-refused-"+safeGraphID(id), rootID, id, "refused_intent")
+		parent := rootID
+		if a := toolAgent[id]; a != "" {
+			parent = a
+			if !agentLinked[a] {
+				agentLinked[a] = true
+				add("dag-run-agent-"+safeGraphID(a), rootID, a, "attempted")
+			}
+		}
+		add("dag-refused-"+safeGraphID(id), parent, id, "refused_intent")
 	}
 	return out
 }

@@ -2472,10 +2472,26 @@ func lensEventLabel(ev lensEvent) string {
 		}
 	case "execve":
 		if c := payloadString(ev.Payload, "command", "cmdline", "comm"); c != "" {
-			return shortLabel(c, ev.Type)
+			return shortLabel(cleanExecCommand(c), ev.Type)
 		}
 	}
 	return ev.Type
+}
+
+// cleanExecCommand strips the AgentProvenance record-wrapper prefix the sensor
+// captures ahead of the real argv (".../agentprovenance <scenario> <real cmd…>"),
+// so an execve reads as "python3 ../pysnake-helper/setup" instead of the jumbled
+// wrapper+argv concatenation.
+func cleanExecCommand(c string) string {
+	toks := strings.Fields(c)
+	for i, t := range toks {
+		if strings.HasSuffix(t, "/agentprovenance") || t == "agentprovenance" {
+			if i+2 < len(toks) { // skip the binary + the scenario arg
+				return strings.Join(toks[i+2:], " ")
+			}
+		}
+	}
+	return c
 }
 
 // shortPathTail returns the last two path segments (".aws/credentials"), enough to

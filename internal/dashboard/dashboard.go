@@ -711,6 +711,13 @@ func (s Server) artifact(w http.ResponseWriter, r *http.Request) {
 	}
 	path, hash, source := s.resolveArtifactPath(run, node)
 	if path == "" {
+		// No stored object file, but many graph nodes still carry inspectable
+		// content in the DB: a tool_call's command/verdict, a runtime event's
+		// payload. Serve that so the node isn't a dead click.
+		if content, ok := s.nodeDBContent(run, node); ok {
+			writeJSON(w, artifactResp{Kind: "text", Source: "db", Mime: "text/plain", Content: content})
+			return
+		}
 		writeJSON(w, artifactResp{Kind: "unavailable", Reason: "no stored content for this node"})
 		return
 	}
@@ -774,6 +781,44 @@ func (s Server) artifact(w http.ResponseWriter, r *http.Request) {
 		resp.Kind = "text"
 	}
 	writeJSON(w, resp)
+}
+
+// nodeDBContent builds an inspectable text preview for graph nodes that have no
+// stored object file: tool_calls (command + verdict) and runtime events (payload).
+func (s Server) nodeDBContent(run, node string) (string, bool) {
+	seg := node
+	if i := strings.LastIndex(node, "/"); i >= 0 {
+		seg = node[i+1:]
+	}
+	if strings.HasPrefix(node, "runtime_event/") {
+		var etype, payload string
+		if err := s.DB.QueryRow(`SELECT event_type, COALESCE(payload,'') FROM events WHERE run_id = ? AND id = ?`, run, seg).Scan(&etype, &payload); err == nil {
+			var b strings.Builder
+			fmt.Fprintf(&b, "event: %s\n\n", etype)
+			var pretty bytes.Buffer
+			if json.Indent(&pretty, []byte(payload), "", "  ") == nil {
+				b.Write(pretty.Bytes())
+			} else {
+				b.WriteString(payload)
+			}
+			return b.String(), true
+		}
+	}
+	var cmd, status, policy string
+	if err := s.DB.QueryRow(`SELECT COALESCE(command,''), COALESCE(status,''), COALESCE(policy_decision,'')
+		FROM tool_calls WHERE run_id = ? AND id = ?`, run, seg).Scan(&cmd, &status, &policy); err == nil && (cmd != "" || status != "") {
+		var b strings.Builder
+		if status != "" {
+			fmt.Fprintf(&b, "status: %s", status)
+			if policy != "" && policy != "allow" {
+				fmt.Fprintf(&b, "   (%s)", policy)
+			}
+			b.WriteString("\n\n")
+		}
+		b.WriteString(cmd)
+		return b.String(), true
+	}
+	return "", false
 }
 
 // resolveArtifactPath maps a graph node to a content source recorded for this run:

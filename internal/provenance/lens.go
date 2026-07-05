@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 )
 
 const graphLensSchemaVersion = "agentprovenance.graph_lens/v1"
@@ -584,12 +585,23 @@ func addAgentNodes(db *sql.DB, runID string, add func(GraphLensNode)) error {
 	return rows.Err()
 }
 
+// llmMetaCache memoizes parsed llm_message metadata by object-file path. Object
+// files are content-addressed and immutable, so a path always maps to the same
+// content -- caching avoids re-reading every object on every lens refresh.
+var llmMetaCache sync.Map // path -> [2]any{model string, tools []string}
+
 // llmMessageMeta reads a stored llm_message object file and pulls out the model
 // and the model's decided tool names. Best-effort: any read/parse failure (e.g. a
 // bundle imported without its object files) degrades to a bare label.
 func llmMessageMeta(path string) (model string, tools []string) {
 	if path == "" {
 		return "", nil
+	}
+	if v, ok := llmMetaCache.Load(path); ok {
+		c := v.([2]any)
+		m, _ := c[0].(string)
+		t, _ := c[1].([]string)
+		return m, t
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -606,6 +618,7 @@ func llmMessageMeta(path string) (model string, tools []string) {
 	if json.Unmarshal(raw, &obj) != nil {
 		return "", nil
 	}
+	llmMetaCache.Store(path, [2]any{obj.Payload.Model, obj.Payload.Semantics.ToolCalls})
 	return obj.Payload.Model, obj.Payload.Semantics.ToolCalls
 }
 
@@ -789,6 +802,8 @@ func buildRunOverviewEdges(runID string, nodes map[string]GraphLensNode, events 
 		{"overview/files", fmt.Sprintf("File changes: %d", counts.Files), "files", "", map[string]any{"count": counts.Files, "drilldown_lens": "file-artifact", "drilldown_detail": "summary"}},
 		{"overview/egress", fmt.Sprintf("Egress: %d risky / %d total", counts.RiskyEgress, counts.Egress), "egress", riskIf(counts.RiskyEgress > 0), map[string]any{"total": counts.Egress, "risky": counts.RiskyEgress, "drilldown_lens": "network-egress", "drilldown_detail": "summary"}},
 		{"overview/risks", fmt.Sprintf("Risks: %d high / %d total", counts.HighRisks, counts.Risks), "risks", riskIf(counts.HighRisks > 0), map[string]any{"total": counts.Risks, "high": counts.HighRisks, "drilldown_lens": "security", "drilldown_detail": "summary"}},
+		{"overview/agent_network", fmt.Sprintf("Agent network: %d agents / %d peer msgs", counts.Agents, counts.AgentMessages), "agent_network", "", map[string]any{"agents": counts.Agents, "messages": counts.AgentMessages, "drilldown_lens": "orchestration", "drilldown_detail": "summary"}},
+		{"overview/llm_intent", fmt.Sprintf("LLM intent: %d evidence nodes", counts.LLMIntents), "llm_intent", "", map[string]any{"count": counts.LLMIntents, "drilldown_lens": "agent-intent", "drilldown_detail": "summary"}},
 		{"overview/artifacts", fmt.Sprintf("Artifacts: %d", counts.Artifacts), "artifacts", "", map[string]any{"count": counts.Artifacts, "drilldown_lens": "file-artifact", "drilldown_detail": "summary"}},
 	}
 	out := make([]GraphLensEdge, 0, len(groups))
@@ -816,6 +831,9 @@ type overviewMetricCounts struct {
 	Risks            int
 	HighRisks        int
 	Artifacts        int
+	Agents           int
+	AgentMessages    int
+	LLMIntents       int
 }
 
 func overviewCounts(nodes map[string]GraphLensNode, events map[string]lensEvent, edges []GraphLensEdge) overviewMetricCounts {
@@ -826,14 +844,24 @@ func overviewCounts(nodes map[string]GraphLensNode, events map[string]lensEvent,
 		switch node.Kind {
 		case "tool_call":
 			counts.ToolCalls++
+		case "agent":
+			counts.Agents++
+		case "llm_call":
+			counts.LLMIntents++
 		case "process":
 			counts.Processes++
 		case "runtime_process":
 			counts.RuntimeProcesses++
 		case "file":
 			fileIDs[node.ID] = true
-		case "artifact":
+		case "artifact", "llm_prompt", "llm_completion", "message":
 			counts.Artifacts++
+			if node.Kind == "message" {
+				counts.AgentMessages++
+			}
+			if node.Kind == "llm_prompt" || node.Kind == "llm_completion" {
+				counts.LLMIntents++
+			}
 		case "risk_signal":
 			if isLoopbackPrivateRiskNode(node, events) {
 				continue
@@ -1377,7 +1405,7 @@ func isStructuralEdge(edgeType string) bool {
 	case "runtime_tool_call_process", "runtime_tool_call_file",
 		"runtime_process_file", "runtime_attempt_file",
 		"runtime_event_policy_decision", "policy_decision_risk_signal", "risk_signal_response_action",
-		"llm_call", "llm_intent_caused", "llm_body", "llm_request", "llm_response", "llm_caused",
+		"llm_call", "llm_intent_caused", "llm_request", "llm_response", "llm_caused",
 		"attempt_snapshot", "snapshot_parent", "promotion_winner",
 		"agent_spawn", "agent_message", "agent_tool_call", "agent_syscall":
 		return true

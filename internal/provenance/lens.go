@@ -1405,7 +1405,11 @@ func isStructuralEdge(edgeType string) bool {
 	case "runtime_tool_call_process", "runtime_tool_call_file",
 		"runtime_process_file", "runtime_attempt_file",
 		"runtime_event_policy_decision", "policy_decision_risk_signal", "risk_signal_response_action",
-		"llm_call", "llm_intent_caused", "llm_request", "llm_response", "llm_caused",
+		// llm_intent_caused (tls_read event -> syscall) is deliberately NOT rendered:
+		// once materialized, MaterializeLLMCalls lifts the same link onto the
+		// llm_call node as llm_caused, so rendering both would double every
+		// intent->action edge.
+		"llm_call", "llm_request", "llm_response", "llm_caused",
 		"attempt_snapshot", "snapshot_parent", "promotion_winner",
 		"agent_spawn", "agent_message", "agent_tool_call", "agent_syscall":
 		return true

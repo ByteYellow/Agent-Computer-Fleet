@@ -1189,8 +1189,9 @@ func buildAgentIntentGroupEdges(runID string, nodes map[string]GraphLensNode, ev
 		case "llm_caused":
 			causedIDs = append(causedIDs, e.ToID)
 		case "agent_message":
-			// only the objectified message body, not the agent-to-agent edge
-			if n, ok := nodes[e.ToID]; ok && (n.Kind == "message" || n.Kind == "relay") {
+			// ④ send msg = the orchestrator's delegation (主从/relay), i.e. the
+			// dispatch to a sub-agent -- not the peer (sub->sub) messages.
+			if n, ok := nodes[e.ToID]; ok && n.Kind == "relay" {
 				msgIDs = append(msgIDs, e.ToID)
 			}
 		}

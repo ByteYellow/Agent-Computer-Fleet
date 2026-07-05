@@ -1367,7 +1367,17 @@ func edgeMatchesLens(lens, detail string, edge GraphLensEdge, nodes map[string]G
 	case "data-flow-taint":
 		return edge.Derived || isSourceEvent(fromEvent.Type, fromEvent.Path) || isSourceEvent(toEvent.Type, toEvent.Path) || isTaintSinkEvent(fromEvent) || isTaintSinkEvent(toEvent)
 	case "agent-intent":
-		return strings.Contains(edge.EdgeType, "llm_") || from.Kind == "tool_call" || to.Kind == "tool_call" || strings.Contains(edge.EdgeType, "tool_call")
+		// The LLM-story lens: the llm_call chain (request/response/decided/caused)
+		// and each agent's tool calls. Excludes (a) the broad ingest-time
+		// llm_intent_caused, which links the response to every action in the window,
+		// and (b) the runtime_* event/process plumbing -- both drown the story and
+		// both stay in the DB + default/raw lens for full observability.
+		if strings.HasPrefix(edge.EdgeType, "runtime_") {
+			return false
+		}
+		return (strings.Contains(edge.EdgeType, "llm_") && edge.EdgeType != "llm_intent_caused") ||
+			strings.HasPrefix(edge.EdgeType, "agent_") ||
+			from.Kind == "tool_call" || to.Kind == "tool_call"
 	case "orchestration":
 		// Multi-agent structure: delegation (agent_spawn), peer influence
 		// (agent_message + the objectified body), and each agent's tool calls

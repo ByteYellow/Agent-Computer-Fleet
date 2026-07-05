@@ -11,6 +11,7 @@ type Semantics struct {
 	HasSystem    bool     `json:"has_system,omitempty"`    // request: a system prompt is present
 	ToolsOffered []string `json:"tools_offered,omitempty"` // request: tool names offered to the model
 	ToolCalls    []string `json:"tool_calls,omitempty"`    // response: tool names the model decided to call
+	ToolCommands []string `json:"tool_commands,omitempty"` // response: the shell command(s) the model decided to run
 	StopReason   string   `json:"stop_reason,omitempty"`   // response: why generation stopped
 }
 
@@ -41,6 +42,11 @@ func ParseSemantics(direction string, body []byte) Semantics {
 				if n := str(m["name"]); n != "" {
 					s.ToolCalls = append(s.ToolCalls, n)
 				}
+				if inp, ok := m["input"].(map[string]any); ok {
+					if cmd := str(inp["command"]); cmd != "" {
+						s.ToolCommands = append(s.ToolCommands, cmd)
+					}
+				}
 			}
 		}
 	}
@@ -57,6 +63,15 @@ func ParseSemantics(direction string, body []byte) Semantics {
 				fn, _ := tcm["function"].(map[string]any)
 				if n := str(fn["name"]); n != "" {
 					s.ToolCalls = append(s.ToolCalls, n)
+				}
+				// OpenAI packs the arguments as a JSON string.
+				if args := str(fn["arguments"]); args != "" {
+					var a map[string]any
+					if json.Unmarshal([]byte(args), &a) == nil {
+						if cmd := str(a["command"]); cmd != "" {
+							s.ToolCommands = append(s.ToolCommands, cmd)
+						}
+					}
 				}
 			}
 		}

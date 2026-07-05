@@ -27,6 +27,9 @@ func TestParseSemanticsAnthropic(t *testing.T) {
 	if !reflect.DeepEqual(r.ToolCalls, []string{"bash"}) {
 		t.Errorf("tool_calls = %v, want [bash]", r.ToolCalls)
 	}
+	if !reflect.DeepEqual(r.ToolCommands, []string{"cat creds"}) {
+		t.Errorf("tool_commands = %v, want [cat creds]", r.ToolCommands)
+	}
 }
 
 func TestParseSemanticsOpenAI(t *testing.T) {

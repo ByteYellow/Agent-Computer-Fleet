@@ -46,6 +46,7 @@ func MaterializeLLMCalls(store ObjectStore, db *sql.DB, runID string) (int, erro
 		return 0, err
 	}
 	objByEvent := map[string]string{}
+	respCommands := map[string][]string{} // tls_read event id -> commands the model decided to run
 	type row struct{ id, etype, payload string }
 	var evs []row
 	for rows.Next() {
@@ -69,6 +70,9 @@ func MaterializeLLMCalls(store ObjectStore, db *sql.DB, runID string) (int, erro
 		sem := tlsintent.ParseSemantics(dir, []byte(content))
 		if model == "" {
 			model = sem.Model
+		}
+		if dir == tlsintent.Response {
+			respCommands[r.id] = sem.ToolCommands
 		}
 		res, err := store.PutExternalObject(ExternalObjectInput{
 			Type:     "llm_message",
@@ -116,11 +120,13 @@ func MaterializeLLMCalls(store ObjectStore, db *sql.DB, runID string) (int, erro
 		if err := insertLLMEdge(db, runID, llmNode, respObj, edgeLLMResponse, respID, now); err != nil {
 			return 0, err
 		}
-		// Direct link: connect the llm_call NODE to the syscalls/actions the
-		// response caused (the ingest-time llm_intent_caused edges hang off the
-		// tls_read event; lift them to the llm_call so the graph reads
-		// "this model call decided -> caused this syscall").
-		actions, err := causedActions(db, runID, respID)
+		// Direct link: connect the llm_call NODE only to the execve(s) whose
+		// command matches what the model actually decided to run. The ingest-time
+		// llm_intent_caused edges link the response to EVERY action in the time
+		// window (hundreds, in a busy run); command-matching keeps the rendered
+		// "decided -> caused this syscall" edge precise. Those broad
+		// llm_intent_caused edges stay in the DB for the full-observability raw view.
+		actions, err := commandMatchedActions(db, runID, respCommands[respID])
 		if err != nil {
 			return 0, err
 		}
@@ -134,26 +140,92 @@ func MaterializeLLMCalls(store ObjectStore, db *sql.DB, runID string) (int, erro
 	return n, nil
 }
 
-// causedActions returns the action-event nodes that a response event's
-// llm_intent_caused edges point to (collected before any write, to avoid the
-// single-connection nested-cursor footgun).
-func causedActions(db *sql.DB, runID, respEventID string) ([]string, error) {
-	rows, err := db.Query(`SELECT to_id FROM graph_edges
-		WHERE run_id = ? AND from_id = ? AND edge_type = 'llm_intent_caused'`,
-		runID, "runtime_event/"+respEventID)
+// commandMatchedActions returns the execve event nodes whose command line matches
+// one of the commands the model decided to run, collected before any write (to
+// avoid the single-connection nested-cursor footgun). Empty when the model
+// decided no command or nothing ran it -- we link only what we can attribute.
+func commandMatchedActions(db *sql.DB, runID string, commands []string) ([]string, error) {
+	if len(commands) == 0 {
+		return nil, nil
+	}
+	rows, err := db.Query(`SELECT id, COALESCE(payload,'') FROM events
+		WHERE run_id = ? AND event_type = 'execve'`, runID)
 	if err != nil {
-		return nil, fmt.Errorf("materialize llm calls: caused actions: %w", err)
+		return nil, fmt.Errorf("materialize llm calls: command match: %w", err)
 	}
 	defer rows.Close()
 	var out []string
 	for rows.Next() {
-		var to string
-		if err := rows.Scan(&to); err != nil {
+		var id, payload string
+		if err := rows.Scan(&id, &payload); err != nil {
 			return nil, err
 		}
-		out = append(out, to)
+		cmd := execveCommand(payload)
+		if cmd == "" {
+			continue
+		}
+		for _, decided := range commands {
+			if commandsMatch(cmd, decided) {
+				out = append(out, "runtime_event/"+id)
+				break
+			}
+		}
 	}
 	return out, rows.Err()
+}
+
+// execveCommand pulls the command line from an execve event payload, handling the
+// recorder envelope ({payload:{raw:{command}}}) and the flat shape.
+func execveCommand(payload string) string {
+	var m map[string]any
+	if json.Unmarshal([]byte(payload), &m) != nil {
+		return ""
+	}
+	inner := m
+	if p, ok := m["payload"].(map[string]any); ok {
+		inner = p
+	}
+	if raw, ok := inner["raw"].(map[string]any); ok {
+		if c, _ := raw["command"].(string); c != "" {
+			return c
+		}
+	}
+	c, _ := inner["command"].(string)
+	return c
+}
+
+// commandsMatch reports whether an execve command line ran the command the model
+// decided to run. The sensor captures argv reordered and truncated (~31 chars per
+// slot), so a full-line compare fails; instead we match the model command's most
+// distinctive token -- its longest path-like token -- (or a prefix of it, to
+// tolerate truncation) appearing in the execve line. A token under 8 chars is too
+// generic to attribute safely, so such commands link nothing.
+func commandsMatch(execCmd, decided string) bool {
+	tok := longestToken(decided)
+	if len(tok) < 8 {
+		return false
+	}
+	if len(tok) > 20 {
+		tok = tok[:20] // match a prefix: the sensor truncates long argv slots
+	}
+	return strings.Contains(normCmd(execCmd), tok)
+}
+
+func normCmd(s string) string { return strings.ToLower(strings.Join(strings.Fields(s), " ")) }
+
+// longestToken returns the longest non-flag token of a command (lowercased) --
+// usually the script/target path, the most distinctive part to match on.
+func longestToken(cmd string) string {
+	best := ""
+	for _, f := range strings.Fields(strings.ToLower(cmd)) {
+		if strings.HasPrefix(f, "-") {
+			continue
+		}
+		if len(f) > len(best) {
+			best = f
+		}
+	}
+	return best
 }
 
 // insertLLMEdge writes one graph edge. An empty endpoint is a legitimate skip

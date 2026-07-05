@@ -31,24 +31,28 @@ func TestMaterializeLLMCallsDirectLink(t *testing.T) {
 		}
 	}
 	ins("ev-req", "tls_write", `{"content":"{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"go\"}]}"}`)
-	ins("ev-resp", "tls_read", `{"content":"{\"model\":\"m\",\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"tool_use\",\"name\":\"bash\"}]}"}`)
-	ins("ev-exec", "execve", `{"payload":{"raw":{"command":"cat creds"}}}`)
-	edge := func(from, to, et string) {
-		if _, err := db.Exec(`INSERT INTO graph_edges (id, run_id, from_id, to_id, edge_type, created_at)
-			VALUES (?, ?, ?, ?, ?, '2026-01-01T00:00:02Z')`, ids.New("edge"), run, from, to, et); err != nil {
-			t.Fatal(err)
-		}
+	// The model decides to run a specific command via tool_use.
+	ins("ev-resp", "tls_read", `{"content":"{\"model\":\"m\",\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"tool_use\",\"name\":\"bash\",\"input\":{\"command\":\"cat /home/u/.aws/credentials\"}}]}"}`)
+	// The syscall that ran exactly that command -- and an unrelated one that must NOT link.
+	ins("ev-exec", "execve", `{"payload":{"raw":{"command":"cat /home/u/.aws/credentials"}}}`)
+	ins("ev-other", "execve", `{"payload":{"raw":{"command":"ls -la /tmp"}}}`)
+	if _, err := db.Exec(`INSERT INTO graph_edges (id, run_id, from_id, to_id, edge_type, created_at)
+		VALUES (?, ?, 'runtime_event/ev-req', 'runtime_event/ev-resp', 'llm_call', '2026-01-01T00:00:02Z')`, ids.New("edge"), run); err != nil {
+		t.Fatal(err)
 	}
-	edge("runtime_event/ev-req", "runtime_event/ev-resp", "llm_call")
-	edge("runtime_event/ev-resp", "runtime_event/ev-exec", "llm_intent_caused")
 
 	if _, err := MaterializeLLMCalls(st, db, run); err != nil {
 		t.Fatal(err)
 	}
-	var caused int
+	// Only the command-matched execve links; the unrelated one does not.
+	var caused, other int
 	db.QueryRow(`SELECT COUNT(*) FROM graph_edges WHERE run_id=? AND from_id='llm_call/ev-req' AND to_id='runtime_event/ev-exec' AND edge_type='llm_caused'`, run).Scan(&caused)
+	db.QueryRow(`SELECT COUNT(*) FROM graph_edges WHERE run_id=? AND to_id='runtime_event/ev-other' AND edge_type='llm_caused'`, run).Scan(&other)
 	if caused != 1 {
-		t.Errorf("llm_caused edge llm_call -> execve = %d, want 1 (direct link)", caused)
+		t.Errorf("llm_caused edge llm_call -> matching execve = %d, want 1", caused)
+	}
+	if other != 0 {
+		t.Errorf("unrelated execve got %d llm_caused edges, want 0 (command-match must be precise)", other)
 	}
 }
 

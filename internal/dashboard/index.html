@@ -369,7 +369,9 @@ function wideNodeKind(k){
   return k==='intent_stage'||k==='llm_prompt'||k==='llm_completion'||k==='event_burst';
 }
 function clipNodeLabel(n){
-  return clip(n.label||n.id, wideNodeKind(nodeKind(n))?34:19);
+  // Keep the visible label inside the node box (wide 230px / normal 158px). The
+  // full label is always on hover via the node's <title>.
+  return clip(n.label||n.id, wideNodeKind(nodeKind(n))?27:15);
 }
 
 // Observer-origin nodes come from our own instrumentation (the record ps-sampler /

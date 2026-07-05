@@ -1223,6 +1223,9 @@ func buildAgentIntentGroupEdges(runID string, nodes map[string]GraphLensNode, ev
 		for _, m := range capStringSlice(msgIDs, 3) {
 			addLC(prev, m, "lc_send_msg")
 		}
+		// With an explicit lifecycle spine, skip the per-tool-call "execution scope"
+		// aggregation so the summary reads as the clean route -- not the old blob.
+		return out
 	}
 
 	type intentGroup struct {

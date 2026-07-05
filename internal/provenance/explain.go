@@ -881,13 +881,15 @@ func upstreamDownstreamEdges(db *sql.DB, runID, id string) ([]ExplainGraphEdge, 
 
 func runtimeEdgesWhere(db *sql.DB, where string, args ...any) ([]ExplainGraphEdge, error) {
 	query := `SELECT run_id, rollout_id, from_id, to_id, edge_type, source_event_id, created_at
-		FROM graph_edges WHERE edge_type LIKE 'runtime_%' AND ` + where + ` ORDER BY created_at ASC`
+		FROM graph_edges WHERE edge_type LIKE 'runtime_%' AND ` + where + ` ORDER BY created_at ASC, id ASC`
 	return queryExplainEdges(db, query, args...)
 }
 
 func graphEdgesWhere(db *sql.DB, where string, args ...any) ([]ExplainGraphEdge, error) {
+	// The id tiebreaker makes this a total order: edges derived from one event
+	// share created_at, and the BFS order below feeds the page_hash digest.
 	query := `SELECT run_id, rollout_id, from_id, to_id, edge_type, source_event_id, created_at
-		FROM graph_edges WHERE ` + where + ` ORDER BY created_at ASC`
+		FROM graph_edges WHERE ` + where + ` ORDER BY created_at ASC, id ASC`
 	return queryExplainEdges(db, query, args...)
 }
 
@@ -1016,7 +1018,7 @@ func finalizeExplainIntegrity(manifest *ExplainManifest) error {
 		"target":         manifest.Target,
 		"depth":          manifest.Query.Depth,
 		"limit":          manifest.Query.Limit,
-		"order":          "bfs:graph_edges.created_at",
+		"order":          "bfs:graph_edges.created_at,id",
 	})
 	if err != nil {
 		return err
@@ -1072,7 +1074,7 @@ func runtimeEventsForExplain(db *sql.DB, runID string, ids map[string]string) ([
 			COALESCE(correlation_method, ''), COALESCE(correlation_confidence, 0),
 			COALESCE(container_id, ''), COALESCE(cgroup_id, ''), COALESCE(pid, 0), COALESCE(tgid, 0), COALESCE(ppid, 0),
 			source, event_type, payload, created_at
-		FROM events WHERE `+strings.Join(clauses, " AND ")+` ORDER BY created_at ASC`, args...)
+		FROM events WHERE `+strings.Join(clauses, " AND ")+` ORDER BY created_at ASC, id ASC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1113,7 +1115,7 @@ func evidenceForExplain(db *sql.DB, runID string, ids map[string]string) ([]Expl
 	}
 	rows, err := db.Query(`SELECT id, run_id, rollout_id, attempt_id, session_id, tool_call_id, snapshot_id,
 			event_type, priority, status, payload, created_at, processed_at
-		FROM evidence_events WHERE `+strings.Join(clauses, " AND ")+` ORDER BY created_at ASC`, args...)
+		FROM evidence_events WHERE `+strings.Join(clauses, " AND ")+` ORDER BY created_at ASC, id ASC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1158,7 +1160,7 @@ func processObservationsForExplain(db *sql.DB, runID string, ids map[string]stri
 		clauses = append(clauses, "("+strings.Join(scopeClauses, " OR ")+")")
 	}
 	rows, err := db.Query(`SELECT id, COALESCE(process_id, ''), COALESCE(tool_call_id, ''), payload
-		FROM events WHERE `+strings.Join(clauses, " AND ")+` ORDER BY created_at ASC`, args...)
+		FROM events WHERE `+strings.Join(clauses, " AND ")+` ORDER BY created_at ASC, id ASC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1201,7 +1203,7 @@ func processObservationsForExplain(db *sql.DB, runID string, ids map[string]stri
 
 func orphanLifecycleRefs(db *sql.DB, runID string, pid int64) ([]string, []string, error) {
 	rows, err := db.Query(`SELECT id, payload FROM evidence_events
-		WHERE run_id = ? AND event_type = 'orphan_lifecycle_decision' ORDER BY created_at ASC`, runID)
+		WHERE run_id = ? AND event_type = 'orphan_lifecycle_decision' ORDER BY created_at ASC, id ASC`, runID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1254,21 +1256,19 @@ func telemetryBatchesForExplain(db *sql.DB, runID string, ids map[string]string)
 	if len(eventIDs) == 0 {
 		return nil, nil
 	}
-	clauses := []string{}
+	// Batch/event matching happens in Go below (against batch.EventIDs); a SQL
+	// prefilter with one LIKE clause per event overflows SQLite's expression
+	// depth limit once a scope holds more than ~1000 events.
+	query := `SELECT id, COALESCE(run_id, ''), format, path, file_sha256, read_count, ingested_count,
+			skipped_count, failed_count, event_ids_json, event_ids_sha256, created_at
+		FROM telemetry_batches`
 	args := []any{}
 	if runID != "" {
-		clauses = append(clauses, "run_id = ?")
+		query += ` WHERE run_id = ?`
 		args = append(args, runID)
 	}
-	eventClauses := []string{}
-	for eventID := range eventIDs {
-		eventClauses = append(eventClauses, "event_ids_json LIKE ?")
-		args = append(args, "%"+eventID+"%")
-	}
-	clauses = append(clauses, "("+strings.Join(eventClauses, " OR ")+")")
-	rows, err := db.Query(`SELECT id, COALESCE(run_id, ''), format, path, file_sha256, read_count, ingested_count,
-			skipped_count, failed_count, event_ids_json, event_ids_sha256, created_at
-		FROM telemetry_batches WHERE `+strings.Join(clauses, " AND ")+` ORDER BY created_at ASC`, args...)
+	query += ` ORDER BY created_at ASC, id ASC`
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1333,7 +1333,7 @@ func objectsForExplain(db *sql.DB, runID string, ids map[string]string) ([]Expla
 		return nil, nil
 	}
 	rows, err := db.Query(`SELECT hash, object_type, source_id, run_id, rollout_id, parent_hashes, path, size_bytes, created_at
-		FROM provenance_objects WHERE `+strings.Join(clauses, " AND ")+` ORDER BY created_at ASC`, args...)
+		FROM provenance_objects WHERE `+strings.Join(clauses, " AND ")+` ORDER BY created_at ASC, hash ASC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1373,7 +1373,7 @@ func risksForExplain(db *sql.DB, runID string, ids map[string]string) ([]Explain
 	}
 	rows, err := db.Query(`SELECT id, COALESCE(run_id, ''), COALESCE(event_id, ''), COALESCE(session_id, ''),
 			rule_id, decision, reason, created_at
-		FROM policy_decisions WHERE `+strings.Join(clauses, " AND ")+` ORDER BY created_at ASC`, args...)
+		FROM policy_decisions WHERE `+strings.Join(clauses, " AND ")+` ORDER BY created_at ASC, id ASC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1428,7 +1428,7 @@ func responsesForExplain(db *sql.DB, runID string, ids map[string]string) ([]Exp
 	rows, err := db.Query(`SELECT id, COALESCE(run_id, ''), COALESCE(session_id, ''), COALESCE(process_id, ''),
 			COALESCE(snapshot_id, ''), COALESCE(risk_signal_id, ''), COALESCE(policy_decision_id, ''),
 			action_type, target_type, target_id, status, COALESCE(result_ref, ''), payload, created_at
-		FROM response_actions WHERE `+strings.Join(clauses, " AND ")+` ORDER BY created_at ASC`, args...)
+		FROM response_actions WHERE `+strings.Join(clauses, " AND ")+` ORDER BY created_at ASC, id ASC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1561,7 +1561,7 @@ func printRuntimeEdgesForID(db *sql.DB, out io.Writer, id string) error {
 	rows, err := db.Query(`SELECT run_id, rollout_id, from_id, to_id, edge_type, source_event_id, created_at
 		FROM graph_edges
 		WHERE edge_type LIKE 'runtime_%' AND (from_id = ? OR to_id = ?)
-		ORDER BY created_at ASC`, id, id)
+		ORDER BY created_at ASC, id ASC`, id, id)
 	if err != nil {
 		return err
 	}

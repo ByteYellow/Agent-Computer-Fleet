@@ -578,7 +578,7 @@ func recentScopedEvent(db *sql.DB, eventType, runID, processID, now string) stri
 		query += ` AND process_id = ?`
 		args = append(args, processID)
 	}
-	query += ` ORDER BY created_at DESC LIMIT 1`
+	query += ` ORDER BY created_at DESC, id DESC LIMIT 1`
 	var id string
 	_ = db.QueryRow(query, args...).Scan(&id)
 	return id

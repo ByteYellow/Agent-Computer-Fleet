@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1026,7 +1027,7 @@ func (s Server) graph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.DB.Query(`SELECT from_id, to_id, edge_type FROM graph_edges
-		WHERE run_id = ? ORDER BY created_at`, run)
+		WHERE run_id = ? ORDER BY created_at, id`, run)
 	if err != nil {
 		httpError(w, err.Error(), 500)
 		return
@@ -1054,7 +1055,7 @@ func (s Server) graph(w http.ResponseWriter, r *http.Request) {
 		used[e.To] = true
 	}
 	outNodes := []graphNode{}
-	for id := range used {
+	for _, id := range sortedKeys(used) {
 		if n, ok := nodes[id]; ok {
 			outNodes = append(outNodes, n)
 		} else {
@@ -1062,6 +1063,15 @@ func (s Server) graph(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, map[string]any{"nodes": outNodes, "edges": edges})
+}
+
+func sortedKeys(values map[string]bool) []string {
+	out := make([]string, 0, len(values))
+	for value := range values {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // nodeLabels builds rich labels for every node a curated edge might reference:

@@ -1075,7 +1075,7 @@ func buildSecurityRuleEdges(runID string, nodes map[string]GraphLensNode, events
 	nodes[rootID] = GraphLensNode{ID: rootID, Kind: "run", Label: runID, Data: map[string]any{"run_id": runID}}
 	groups := map[string]*ruleGroup{}
 	policyEventIDs := map[string]bool{}
-	for _, node := range nodes {
+	for _, node := range lensNodesInOrder(nodes) {
 		if node.Kind != "policy_decision" {
 			continue
 		}
@@ -1101,7 +1101,7 @@ func buildSecurityRuleEdges(runID string, nodes map[string]GraphLensNode, events
 			policyEventIDs[eventID] = true
 		}
 	}
-	for _, ev := range events {
+	for _, ev := range lensEventsInOrder(events) {
 		if policyEventIDs[ev.ID] {
 			continue
 		}
@@ -1157,7 +1157,7 @@ func buildNetworkGroupEdges(runID string, nodes map[string]GraphLensNode, events
 		evidence     []string
 	}
 	groups := map[string]*netGroup{}
-	for _, ev := range events {
+	for _, ev := range lensEventsInOrder(events) {
 		if !isNetworkEvent(ev.Type) {
 			continue
 		}
@@ -1214,8 +1214,8 @@ func buildDataFlowSummaryEdges(events map[string]lensEvent) []GraphLensEdge {
 			sinks = append(sinks, ev)
 		}
 	}
-	sort.Slice(sources, func(i, j int) bool { return sources[i].CreatedAt < sources[j].CreatedAt })
-	sort.Slice(sinks, func(i, j int) bool { return sinks[i].CreatedAt < sinks[j].CreatedAt })
+	sortLensEventsByTime(sources)
+	sortLensEventsByTime(sinks)
 	return deriveAggregatedDataFlowEdges(sources, sinks)
 }
 
@@ -1399,7 +1399,7 @@ func buildAgentIntentGroupEdges(runID string, nodes map[string]GraphLensNode, ev
 		evidence   []string
 	}
 	groups := map[string]*intentGroup{}
-	for _, ev := range events {
+	for _, ev := range lensEventsInOrder(events) {
 		key := fallback(ev.ToolCallID, "unscoped")
 		group := groups[key]
 		if group == nil {
@@ -1544,7 +1544,7 @@ func buildStandardHookIntentEdges(rootID string, nodes map[string]GraphLensNode,
 func addAfterToolAggregateNode(nodes map[string]GraphLensNode, events map[string]lensEvent) string {
 	counts := map[string]int{}
 	evidence := []string{}
-	for _, ev := range events {
+	for _, ev := range lensEventsInOrder(events) {
 		switch ev.Type {
 		case "execve":
 			if !isObserverNoiseCommand(strings.ToLower(payloadString(ev.Payload, "command", "cmdline", "comm"))) {
@@ -1587,7 +1587,7 @@ func pickAfterToolActions(caused []string, events map[string]lensEvent, limit in
 	preferred := []string{}
 	fallbacks := []string{}
 	seen := map[string]bool{}
-	for _, ev := range events {
+	for _, ev := range lensEventsInOrder(events) {
 		cmd := strings.ToLower(payloadString(ev.Payload, "command", "cmdline", "comm"))
 		if (ev.Type == "execve" || ev.Type == "process_observed") && strings.Contains(cmd, "setup.py") {
 			setup = append(setup, ev.NodeID)
@@ -1694,8 +1694,8 @@ func buildTrustOriginGroupEdges(runID string, nodes map[string]GraphLensNode) []
 		evidence []string
 	}
 	groups := map[string]*originGroup{}
-	for id, node := range nodes {
-		if id == rootID || node.TrustOrigin == "" || node.TrustOrigin == "summary" {
+	for _, node := range lensNodesInOrder(nodes) {
+		if node.ID == rootID || node.TrustOrigin == "" || node.TrustOrigin == "summary" {
 			continue
 		}
 		key := node.TrustOrigin
@@ -1706,7 +1706,7 @@ func buildTrustOriginGroupEdges(runID string, nodes map[string]GraphLensNode) []
 		}
 		group.count++
 		group.kinds[node.Kind]++
-		group.evidence = append(group.evidence, id)
+		group.evidence = append(group.evidence, node.ID)
 	}
 	keys := sortedStringKeys(groups)
 	out := []GraphLensEdge{}
@@ -1732,7 +1732,7 @@ func buildSandboxBoundaryGroupEdges(runID string, nodes map[string]GraphLensNode
 		evidence []string
 	}
 	groups := map[string]*boundaryGroup{}
-	for _, ev := range events {
+	for _, ev := range lensEventsInOrder(events) {
 		if !isBoundaryEvent(ev.Type) || (ev.Type == "private_cidr" && isLoopbackDestination(ev.Destination)) {
 			continue
 		}
@@ -1747,7 +1747,7 @@ func buildSandboxBoundaryGroupEdges(runID string, nodes map[string]GraphLensNode
 		}
 		group.evidence = append(group.evidence, ev.NodeID)
 	}
-	for id, node := range nodes {
+	for _, node := range lensNodesInOrder(nodes) {
 		if node.Kind != "snapshot" && node.Kind != "attempt" {
 			continue
 		}
@@ -1758,7 +1758,7 @@ func buildSandboxBoundaryGroupEdges(runID string, nodes map[string]GraphLensNode
 			groups[key] = group
 		}
 		group.count++
-		group.evidence = append(group.evidence, id)
+		group.evidence = append(group.evidence, node.ID)
 	}
 	keys := sortedStringKeys(groups)
 	out := []GraphLensEdge{}
@@ -1954,8 +1954,8 @@ func deriveGraphLensEdges(lens string, events map[string]lensEvent, detail strin
 			sinks = append(sinks, ev)
 		}
 	}
-	sort.Slice(sources, func(i, j int) bool { return sources[i].CreatedAt < sources[j].CreatedAt })
-	sort.Slice(sinks, func(i, j int) bool { return sinks[i].CreatedAt < sinks[j].CreatedAt })
+	sortLensEventsByTime(sources)
+	sortLensEventsByTime(sinks)
 	if detail == "summary" {
 		return deriveAggregatedDataFlowEdges(sources, sinks)
 	}
@@ -2548,6 +2548,40 @@ func sortedStringKeys[T any](values map[string]T) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// lensEventsInOrder returns the events sorted by (created_at, node id). Summary
+// builders must iterate events through this instead of ranging the map: they
+// accumulate evidence_refs, truncate to a cap, and pick drilldown focuses, so
+// Go's random map order would leak into the rendered manifest.
+func lensEventsInOrder(events map[string]lensEvent) []lensEvent {
+	out := make([]lensEvent, 0, len(events))
+	for _, ev := range events {
+		out = append(out, ev)
+	}
+	sortLensEventsByTime(out)
+	return out
+}
+
+// lensNodesInOrder is lensEventsInOrder's counterpart for the node map.
+func lensNodesInOrder(nodes map[string]GraphLensNode) []GraphLensNode {
+	out := make([]GraphLensNode, 0, len(nodes))
+	for _, node := range nodes {
+		out = append(out, node)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// sortLensEventsByTime sorts in place by (created_at, node id); the node-id
+// tiebreaker keeps derived data-flow pairing stable when timestamps collide.
+func sortLensEventsByTime(events []lensEvent) {
+	sort.Slice(events, func(i, j int) bool {
+		if events[i].CreatedAt != events[j].CreatedAt {
+			return events[i].CreatedAt < events[j].CreatedAt
+		}
+		return events[i].NodeID < events[j].NodeID
+	})
 }
 
 func capStringSlice(values []string, limit int) []string {

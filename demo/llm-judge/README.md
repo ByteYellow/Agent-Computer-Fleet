@@ -20,10 +20,15 @@ target run (e.g. snake-supply-chain)          judge run (recorded)
 
 ## Run it
 
+One file, stdlib only — `judge.py run` orchestrates everything (builds the
+binary if `AGENTPROV_BIN` is unset, imports the bundle, re-executes itself
+as `judge.py judge` under `agentprov record`, attaches the LLM evidence,
+imports the verdict):
+
 ```sh
-./run-judge-demo.sh                          # judge the snake bundle end to end
-AGENTPROV_JUDGE_OFFLINE=1 ./run-judge-demo.sh  # keyless: offline fixture verdict
-./run-judge-demo.sh --run <id> --data-dir <dir>  # judge any existing run
+python3 judge.py run                            # judge the snake bundle end to end
+python3 judge.py run --offline                  # keyless: offline fixture verdict
+python3 judge.py run --run <id> --data-dir <dir>  # judge any existing run
 ```
 
 LLM endpoint reuses the shared demo env contract
@@ -56,7 +61,7 @@ clearly labeled).
 |---|---|
 | read evidence | `signal context --run` (EvalContext), `ai call verify_run/list_risks/get_signals`, `graph lens --json` |
 | write verdict | `signal import --run --file` → `signals` table, quality dimension (note: the plural `signal import-batch` only validates, it does not persist) |
-| judge self-audit | `record --json -- python3 judge.py`, `telemetry ingest-jsonl --format native`, `graph materialize-llm` |
+| judge self-audit | `record --json -- python3 judge.py judge ...`, `telemetry ingest-jsonl --format native`, `graph materialize-llm` |
 
 Known gap (honest): imported quality signals show up in `signals list`,
 `ai call get_signals`, and the dashboard signals panel, but `graph lens

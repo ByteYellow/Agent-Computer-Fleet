@@ -28,6 +28,7 @@ import hashlib
 import json
 import math
 import os
+import shutil
 import subprocess
 import sys
 import urllib.error
@@ -53,19 +54,24 @@ class Cli:
         self.binary = binary
         self.data_dir = data_dir
 
-    def run(self, args, ok_codes=(0,)):
+    def run(self, args, ok_codes=(0,), timeout=None):
         cmd = [self.binary]
         if self.data_dir:
             cmd += ["--data-dir", self.data_dir]
         cmd += args
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=timeout)
+        except subprocess.TimeoutExpired as err:
+            raise RuntimeError("agentprov %s timed out after %ss" % (
+                " ".join(args[:3]), timeout)) from err
         if proc.returncode not in ok_codes:
             raise RuntimeError("agentprov %s failed rc=%d: %s" % (
                 " ".join(args[:3]), proc.returncode, proc.stderr.strip()[:400]))
         return proc.stdout
 
-    def json(self, args):
-        out = self.run(args)
+    def json(self, args, timeout=None):
+        out = self.run(args, timeout=timeout)
         return json.loads(out)
 
 
@@ -113,8 +119,15 @@ def all_events(cli, run_id):
 def gather(cli, run_id):
     """Pull everything the store exposes for the run. No event-type filters."""
     bundle = {"run_id": run_id}
-    bundle["verify"] = cli.json(["ai", "call", "verify_run",
-                                 "--input", json.dumps({"run": run_id})])
+    verify_timeout = int(os.environ.get("AGENTPROV_JUDGE_VERIFY_TIMEOUT",
+                                        "15"))
+    try:
+        bundle["verify"] = cli.json(["ai", "call", "verify_run",
+                                     "--input", json.dumps({"run": run_id})],
+                                    timeout=verify_timeout)
+    except (RuntimeError, ValueError) as err:
+        bundle["verify"] = {"unavailable": str(err)[:240],
+                            "best_effort": True}
     bundle["risks"] = cli.json(["ai", "call", "list_risks",
                                 "--input", json.dumps({"run": run_id})])
     bundle["signals"] = cli.json(["ai", "call", "get_signals",
@@ -405,25 +418,7 @@ def tls_jsonl(exchanges, host):
     return "\n".join(out) + ("\n" if out else "")
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--run", required=True, help="target run id to judge")
-    ap.add_argument("--data-dir", default=os.environ.get("AGENTPROV_DATA_DIR"))
-    ap.add_argument("--agentprov", default=os.environ.get("AGENTPROV_BIN",
-                                                          "agentprov"))
-    ap.add_argument("--verdict-out", required=True)
-    ap.add_argument("--signals-out", required=True)
-    ap.add_argument("--tls-out", required=True)
-    ap.add_argument("--offline", action="store_true",
-                    help="no LLM call; verdict derived from stored risks")
-    ap.add_argument("--budget-chars", type=int, default=int(os.environ.get(
-        "AGENTPROV_JUDGE_BUDGET_CHARS", "150000")))
-    ap.add_argument("--max-calls", type=int, default=int(os.environ.get(
-        "AGENTPROV_JUDGE_MAX_CALLS", "16")))
-    ap.add_argument("--payload-chars", type=int, default=int(os.environ.get(
-        "AGENTPROV_JUDGE_PAYLOAD_CHARS", "400")))
-    args = ap.parse_args()
-
+def cmd_judge(args):
     base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
     token = os.environ.get("ANTHROPIC_AUTH_TOKEN") or os.environ.get(
         "ANTHROPIC_API_KEY") or ""
@@ -473,6 +468,170 @@ def main():
               args.run, verdict["verdict"], verdict.get("confidence"),
               len(verdict.get("findings") or []), coverage["events_total"],
               coverage["chunks"], coverage["mode"], len(llm.exchanges)))
+
+
+def load_env_file():
+    """Shared demo env contract: shell-style KEY=VALUE lines (same file the
+    other demos `source`); existing environment wins."""
+    path = os.environ.get(
+        "AGENTPROV_DEMO_ENV_FILE",
+        os.path.expanduser("~/.agentprov-demo/deepseek-claude.env"))
+    if not os.path.isfile(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):]
+            key, _, value = line.partition("=")
+            os.environ.setdefault(key.strip(),
+                                  value.strip().strip('"').strip("'"))
+
+
+def sh(cmd, **kw):
+    proc = subprocess.run(cmd, capture_output=True, text=True, **kw)
+    if proc.returncode != 0:
+        sys.exit("command failed rc=%d: %s\n%s" % (
+            proc.returncode, " ".join(str(c) for c in cmd[:6]),
+            proc.stderr.strip()[:500]))
+    return proc.stdout
+
+
+def cmd_run(args):
+    """Orchestrate the whole demo: import bundle -> judge under `agentprov
+    record` (re-executing this file) -> attach the judge's LLM calls to its
+    own run -> import the verdict as signals -> print the result."""
+    demo_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_dir = os.path.dirname(os.path.dirname(demo_dir))
+    load_env_file()
+
+    binary = os.environ.get("AGENTPROV_BIN")
+    if not binary:
+        binary = os.path.join(demo_dir, ".build", "agentprov")
+        os.makedirs(os.path.dirname(binary), exist_ok=True)
+        print("==> building agentprov")
+        sh(["go", "build", "-o", binary, "./cmd/agentprov"], cwd=repo_dir)
+
+    work = os.path.join(demo_dir, ".judge-work")
+    shutil.rmtree(work, ignore_errors=True)
+    judge_cwd = os.path.join(work, "judge-cwd")
+    os.makedirs(judge_cwd)
+
+    data_dir, target = args.data_dir, args.run
+    if not data_dir:
+        data_dir = os.path.join(work, "state")
+        print("==> importing snake-supply-chain bundle into fresh store")
+        sh([binary, "--data-dir", data_dir, "forensics", "import", "--json",
+            os.path.join(demo_dir, "..", "snake-supply-chain",
+                         "run-snake-supervised.forensics.json")])
+        target = target or "run-snake-supervised"
+    if not target:
+        sys.exit("--run is required when --data-dir is given")
+    data_dir = os.path.abspath(data_dir)
+
+    paths = {n: os.path.join(work, n) for n in
+             ("verdict.json", "signals.json", "judge-tls.jsonl")}
+    inner = [binary, "--data-dir", data_dir, "record", "--json", "--",
+             sys.executable, os.path.abspath(__file__), "judge",
+             "--run", target, "--data-dir", data_dir, "--agentprov", binary,
+             "--verdict-out", paths["verdict.json"],
+             "--signals-out", paths["signals.json"],
+             "--tls-out", paths["judge-tls.jsonl"]]
+    if args.offline or os.environ.get("AGENTPROV_JUDGE_OFFLINE"):
+        inner.append("--offline")
+    print("==> judging %s (the judge itself runs under 'agentprov record')"
+          % target)
+    out = sh(inner, cwd=judge_cwd)
+    # record's --json manifest follows the wrapped command's own stdout.
+    manifest = json.loads(out[out.index("{"):])
+    judge_run = manifest.get("run_id") or manifest.get("RunID")
+    judge_proc = manifest.get("process_id") or manifest.get("ProcessID") or ""
+    print("    judge run: %s" % judge_run)
+
+    if os.path.getsize(paths["judge-tls.jsonl"]) > 0:
+        print("==> attaching the judge's own LLM calls to its provenance run")
+        env = dict(os.environ, AGENTPROV_TLS_CAPTURE_BODY="1")
+        sh([binary, "--data-dir", data_dir, "telemetry", "ingest-jsonl",
+            "--format", "native", "--run", judge_run,
+            "--process", judge_proc, "--file", paths["judge-tls.jsonl"],
+            "--json"], env=env)
+        sh([binary, "--data-dir", data_dir, "graph", "materialize-llm",
+            "--run", judge_run])
+    else:
+        print("    (offline mode: no LLM exchange to attach)")
+
+    print("==> importing verdict as signals on %s" % target)
+    sh([binary, "--data-dir", data_dir, "signal", "import", "--run", target,
+        "--file", paths["signals.json"], "--json"])
+
+    with open(paths["verdict.json"], encoding="utf-8") as f:
+        full = json.load(f)
+    verdict = full["verdict"]
+    print("\n================ verdict ================")
+    print("run     : %s" % full["run_id"])
+    print("verdict : %s  confidence: %s" % (verdict.get("verdict"),
+                                            verdict.get("confidence")))
+    print("coverage: %s" % json.dumps(full["coverage"]))
+    print("judge   : %s %s" % (full["judge"]["mode"],
+                               full["judge"].get("model") or ""))
+    print("summary : %s" % verdict.get("summary"))
+    for f_ in verdict.get("findings") or []:
+        print("  - [%s] %s  evidence=%s" % (
+            f_.get("severity"), f_.get("claim"),
+            ",".join(f_.get("evidence_ids") or [])))
+    print("=========================================\n")
+    print("==> verdict signals now attached to the target run:")
+    print(sh([binary, "--data-dir", data_dir, "signals", "list",
+              "--run", target, "--dimension", "quality"]))
+    print("==> the judge's own audited run:")
+    print("\n".join(sh([binary, "--data-dir", data_dir, "graph", "lens",
+                        "--run", judge_run, "--lens", "agent-intent"]
+                       ).splitlines()[:20]))
+    print("\ninspect further:")
+    for hint in (
+            "ai call get_signals --input '{\"run\":\"%s\"}'" % target,
+            "graph lens --json --run %s --lens agent-intent" % judge_run,
+            "dashboard serve   # signals panel + judge run DAG"):
+        print("  %s --data-dir %s %s" % (binary, data_dir, hint))
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    sub = ap.add_subparsers(dest="cmd")
+
+    run_p = sub.add_parser("run", help="run the whole demo end to end")
+    run_p.add_argument("--run", help="existing run id (default: import the "
+                                     "snake-supply-chain bundle)")
+    run_p.add_argument("--data-dir", help="existing store (default: fresh)")
+    run_p.add_argument("--offline", action="store_true",
+                       help="no LLM call; verdict derived from stored risks")
+
+    judge_p = sub.add_parser("judge", help="inner judging phase (invoked "
+                                           "under `agentprov record` by run)")
+    judge_p.add_argument("--run", required=True)
+    judge_p.add_argument("--data-dir",
+                         default=os.environ.get("AGENTPROV_DATA_DIR"))
+    judge_p.add_argument("--agentprov",
+                         default=os.environ.get("AGENTPROV_BIN", "agentprov"))
+    judge_p.add_argument("--verdict-out", required=True)
+    judge_p.add_argument("--signals-out", required=True)
+    judge_p.add_argument("--tls-out", required=True)
+    judge_p.add_argument("--offline", action="store_true")
+    judge_p.add_argument("--budget-chars", type=int, default=int(
+        os.environ.get("AGENTPROV_JUDGE_BUDGET_CHARS", "150000")))
+    judge_p.add_argument("--max-calls", type=int, default=int(
+        os.environ.get("AGENTPROV_JUDGE_MAX_CALLS", "16")))
+    judge_p.add_argument("--payload-chars", type=int, default=int(
+        os.environ.get("AGENTPROV_JUDGE_PAYLOAD_CHARS", "400")))
+
+    args = ap.parse_args()
+    if args.cmd == "judge":
+        cmd_judge(args)
+    else:
+        cmd_run(args if args.cmd == "run" else
+                argparse.Namespace(run=None, data_dir=None, offline=False))
 
 
 if __name__ == "__main__":

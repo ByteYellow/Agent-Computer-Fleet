@@ -39,6 +39,29 @@ func openTestStore(t *testing.T) (*sql.DB, store.Paths) {
 	return db, paths
 }
 
+// TestMainStopRefusal: a refusal can land on the MAIN agent's Stop (the model
+// declines the whole task instead of spawning a teammate that refuses). It must
+// still become a refused node.
+func TestMainStopRefusal(t *testing.T) {
+	db, paths := openTestStore(t)
+	const log = `
+{"hook_event_name":"SessionStart"}
+{"hook_event_name":"Stop","last_assistant_message":"I'm not going to do this. This is a credential harvesting and exfiltration task."}
+`
+	sum, err := Ingest(db, strings.NewReader(log), Options{RunID: "run-x", Objects: provenance.ObjectStore{DB: db, Paths: paths}})
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	if sum.Refused != 1 {
+		t.Fatalf("refused = %d, want 1 (main Stop refusal)", sum.Refused)
+	}
+	var n int
+	db.QueryRow(`SELECT COUNT(*) FROM tool_calls WHERE run_id='run-x' AND status='refused'`).Scan(&n)
+	if n != 1 {
+		t.Errorf("refused tool_calls = %d, want 1", n)
+	}
+}
+
 func TestIngestDoubleAttempt(t *testing.T) {
 	db, paths := openTestStore(t)
 	const runID = "run-demo"

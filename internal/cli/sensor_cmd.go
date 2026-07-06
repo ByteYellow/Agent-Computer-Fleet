@@ -68,13 +68,21 @@ func sensorStreamCmd(dataDir *string) *cobra.Command {
 			// we then close the pipe so the reader unblocks and returns.
 			pr, pw := io.Pipe()
 			errCh := make(chan error, 1)
+			// Emit a machine-readable readiness line only AFTER every probe has
+			// attached (via OnReady), so a supervisor (launch) gating its exec on
+			// this never races a fast workload past a not-yet-attached sensor. The
+			// pre-attach "capturing" banner is human-facing only.
+			stderr := cmd.ErrOrStderr()
 			go func() {
-				sensorErr := sensor.RunWithOptions(pw, sensor.Options{SSLLib: sslLib})
+				sensorErr := sensor.RunWithOptions(pw, sensor.Options{
+					SSLLib:  sslLib,
+					OnReady: func() { fmt.Fprintln(stderr, "agentprov sensor stream: ready probes-attached") },
+				})
 				_ = pw.CloseWithError(sensorErr)
 				errCh <- sensorErr
 			}()
 
-			fmt.Fprintln(cmd.ErrOrStderr(), "agentprov sensor stream: capturing kernel telemetry -> store (ctrl-c to stop)")
+			fmt.Fprintln(stderr, "agentprov sensor stream: capturing kernel telemetry -> store (ctrl-c to stop)")
 			result, ingErr := telemetry.IngestJSONLReader(db, ingOpts, pr)
 			sensorErr := <-errCh
 			if sensorErr != nil {

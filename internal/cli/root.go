@@ -21,6 +21,9 @@ func NewRootCommand() *cobra.Command {
 	root.PersistentFlags().StringVar(&dataDir, "data-dir", store.DefaultDataDir, "local AgentProvenance data directory")
 	root.PersistentFlags().StringVar(&daemonURL, "daemon-url", firstEnv("AGENTPROV_DAEMON_URL"), "local daemon URL; also read from AGENTPROV_DAEMON_URL")
 
+	root.AddCommand(launchCmd(&dataDir))
+	root.AddCommand(internalCmd())
+	root.AddCommand(intentCmd(&dataDir))
 	root.AddCommand(initCmd(&dataDir))
 	root.AddCommand(daemonCmd(&dataDir))
 	root.AddCommand(leaseCmd(&dataDir, &daemonURL))

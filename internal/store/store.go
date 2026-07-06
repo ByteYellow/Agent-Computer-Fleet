@@ -734,6 +734,34 @@ func EnsureSchema(db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_signals_dimension ON signals(dimension);`,
 		`CREATE INDEX IF NOT EXISTS idx_signals_graph_ref ON signals(graph_ref_kind, graph_ref_id);`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_signals_source ON signals(source_table, source_id) WHERE source_table != '';`,
+		// intent_diffs is the Intent-Runtime Diff evidence: for each captured
+		// contract (a tool call / peer message / refusal, each declaring the
+		// effects it should and must-not produce) versus the runtime effects
+		// actually attributed to its scope, one typed diff row. It makes mismatch a
+		// first-class node the graph, verdict, and a lens can read. Expected /
+		// forbidden / observed effect sets are serialized inline (v1) rather than
+		// split into separate contract/effect tables -- minimal schema churn while
+		// keeping the divergence first-class.
+		`CREATE TABLE IF NOT EXISTS intent_diffs (
+			id TEXT PRIMARY KEY,
+			run_id TEXT NOT NULL DEFAULT '',
+			agent_id TEXT NOT NULL DEFAULT '',
+			tool_call_id TEXT NOT NULL DEFAULT '',
+			contract_kind TEXT NOT NULL DEFAULT '',      -- tool_call | peer_message | refusal
+			operation TEXT NOT NULL DEFAULT '',          -- exec | install | file_read | file_write | ...
+			target TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL,                        -- declared_vs_effect_mismatch | refused_but_runtime_happened | decided_and_executed | intent_coverage_gap
+			finding TEXT NOT NULL DEFAULT '',            -- refined label, e.g. peer_message_intent_mismatch
+			confidence REAL NOT NULL DEFAULT 0,
+			declared_effects TEXT NOT NULL DEFAULT '[]',
+			forbidden_effects TEXT NOT NULL DEFAULT '[]',
+			observed_effects TEXT NOT NULL DEFAULT '[]',
+			mismatch_reason TEXT NOT NULL DEFAULT '',
+			source TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_intent_diffs_run ON intent_diffs(run_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_intent_diffs_run_status ON intent_diffs(run_id, status);`,
 		`CREATE INDEX IF NOT EXISTS idx_events_run_time_id ON events(run_id, created_at, id);`,
 		`CREATE INDEX IF NOT EXISTS idx_events_run_type_time ON events(run_id, event_type, created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_events_run_tool_time ON events(run_id, tool_call_id, created_at);`,

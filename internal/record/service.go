@@ -35,6 +35,13 @@ type Request struct {
 	Command          []string `json:"command"`
 	SampleIntervalMS int64    `json:"sample_interval_ms"`
 	PostRootGraceMS  int64    `json:"post_root_grace_ms"`
+	// DisableSnapshot skips the pre-exec base-directory copy and the post-exec
+	// file diff. `record` keeps it off (file diff is core zero-SDK evidence), but
+	// `launch` turns it on: wrapping an interactive agent in a real repo would
+	// otherwise copy the entire working tree (node_modules, build output, ...) on
+	// every run, dominating startup and disk. On Linux the kernel sensor's
+	// file_write events already capture what changed at higher fidelity.
+	DisableSnapshot bool `json:"disable_snapshot"`
 }
 
 type Result struct {
@@ -110,12 +117,27 @@ func (s Service) Run(req Request) (Result, error) {
 	// ignoredPath. This keeps the snapshot clean and (with the dst-subtree guard
 	// in CopyDirFiltered) prevents self-recursion when the .agentprov data dir
 	// lives inside the workdir being recorded.
-	if err := state.CopyDirFiltered(absWorkdir, baseDir, ignoredPath); err != nil {
-		return Result{}, err
-	}
-	baseManifest, err := state.BuildManifest(baseDir)
-	if err != nil {
-		return Result{}, err
+	//
+	// DisableSnapshot skips the copy+manifest entirely (an empty base dir stands
+	// in so the snapshot row and its FKs stay valid); the post-exec diff is
+	// skipped in lockstep below. See Request.DisableSnapshot.
+	var baseManifest state.Manifest
+	if req.DisableSnapshot {
+		if err := os.MkdirAll(baseDir, 0o755); err != nil {
+			return Result{}, err
+		}
+		baseManifest, err = state.BuildManifest(baseDir)
+		if err != nil {
+			return Result{}, err
+		}
+	} else {
+		if err := state.CopyDirFiltered(absWorkdir, baseDir, ignoredPath); err != nil {
+			return Result{}, err
+		}
+		baseManifest, err = state.BuildManifest(baseDir)
+		if err != nil {
+			return Result{}, err
+		}
 	}
 	_, err = s.DB.Exec(`INSERT INTO snapshots
 		(id, name, kind, source, path, manifest_hash, file_count, bytes, snapshot_semantic_type, snapshot_physical_type, logical_bytes, physical_bytes, dirty_bytes_estimate, inode_estimate, storage_amplification_ratio, status, created_at)
@@ -299,9 +321,13 @@ func (s Service) Run(req Request) (Result, error) {
 			_ = s.persistOrphanDecision(req.RunID, rolloutID, attemptID, sessionID, toolCallID, processID, proc, string(payload))
 		}
 	}
-	changed, diffErr := changedFiles(baseDir, absWorkdir)
-	if diffErr != nil {
-		changed = append(changed, "diff_error:"+diffErr.Error())
+	var changed []string
+	if !req.DisableSnapshot {
+		var diffErr error
+		changed, diffErr = changedFiles(baseDir, absWorkdir)
+		if diffErr != nil {
+			changed = append(changed, "diff_error:"+diffErr.Error())
+		}
 	}
 	for _, path := range changed {
 		if strings.HasPrefix(path, "diff_error:") {

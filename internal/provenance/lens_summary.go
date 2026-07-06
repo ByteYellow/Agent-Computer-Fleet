@@ -45,7 +45,7 @@ func buildRunOverviewEdges(runID string, nodes map[string]GraphLensNode, events 
 		Risk    string
 		Data    map[string]any
 	}{
-		{"overview/tool_calls", fmt.Sprintf("Tool calls: %d", counts.ToolCalls), "tool_calls", "", map[string]any{"count": counts.ToolCalls, "drilldown_lens": "agent-intent", "drilldown_detail": "summary"}},
+		{"overview/tool_calls", fmt.Sprintf("Tool calls: %d", counts.ToolCalls), "tool_calls", "", map[string]any{"count": counts.ToolCalls, "drilldown_lens": "intent", "drilldown_detail": "summary"}},
 		{"overview/processes", fmt.Sprintf("Process groups: %d pids", counts.RuntimeProcesses), "processes", "", map[string]any{"runtime_processes": counts.RuntimeProcesses, "logical_processes": counts.Processes, "drilldown_lens": "process", "drilldown_detail": "summary"}},
 		{"overview/files", fmt.Sprintf("File changes: %d", counts.Files), "files", "", map[string]any{"count": counts.Files, "drilldown_lens": "file-artifact", "drilldown_detail": "summary"}},
 		{"overview/egress", fmt.Sprintf("Egress: %d risky / %d total", counts.RiskyEgress, counts.Egress), "egress", riskIf(counts.RiskyEgress > 0), map[string]any{"total": counts.Egress, "risky": counts.RiskyEgress, "drilldown_lens": "network-egress", "drilldown_detail": "summary"}},

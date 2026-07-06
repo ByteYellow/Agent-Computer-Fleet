@@ -116,11 +116,14 @@ func edgeMatchesLens(lens, detail string, edge GraphLensEdge, nodes map[string]G
 			from.Risk == "refused" || to.Risk == "refused"
 	case "intent":
 		// The declared-vs-actual story: each contract's scope (its tool call /
-		// agent) -> the diff verdict -> the observed effects that back it, plus
-		// the agent tool-call/message edges that give the diff its intent origin.
+		// agent) -> the diff verdict -> the observed effects that back it, plus the
+		// agent structure that gives the diff its intent origin -- delegation
+		// (agent_spawn, 主从), peer influence (agent_message, 对等), and each
+		// agent's tool calls. Delegation was missing, so a multi-agent run read as
+		// all-peer.
 		return strings.HasPrefix(edge.EdgeType, "intent_") ||
 			from.Kind == "intent_diff" || to.Kind == "intent_diff" ||
-			edge.EdgeType == "agent_tool_call" || edge.EdgeType == "agent_message"
+			edge.EdgeType == "agent_spawn" || edge.EdgeType == "agent_message" || edge.EdgeType == "agent_tool_call"
 	case "trust-origin":
 		return from.TrustOrigin != "" || to.TrustOrigin != "" || from.Kind == "artifact" || to.Kind == "artifact" || from.Kind == "tool_call" || to.Kind == "tool_call"
 	case "sandbox-boundary":

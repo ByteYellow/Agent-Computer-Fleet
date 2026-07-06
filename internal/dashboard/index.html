@@ -593,12 +593,15 @@ function renderQuestionEntries(m){
   const items=[
     {id:'overview/risks', cls:'risk', q:'Why is this run risky?', lens:'security', sub:'risk paths'},
     {id:'overview/agent_network', cls:'proc', q:'Which agents coordinated?', lens:'orchestration', sub:'agent delegation / peer messages'},
-    {id:'overview/llm_intent', cls:'proc', q:'Which model intent was captured?', lens:'agent-intent', sub:'TLS intent evidence'},
+    {id:'overview/llm_intent', cls:'proc', q:'What did the model decide?', lens:'agent-intent', sub:'causal DAG (prompt→action)'},
+    {id:'overview/tool_calls', cls:'proc', q:'Did actions match intent?', lens:'intent', sub:'declared vs actual effects'},
     {id:'overview/egress', cls:'egress', q:'What happened around egress?', lens:'network-egress', sub:'network groups'},
+    {id:'__taint__', cls:'egress', q:'Did secrets reach a sink?', lens:'data-flow-taint', sub:'secret → network flow'},
     {id:'overview/files', cls:'file', q:'What changed files?', lens:'file-artifact', sub:'diff / file groups'},
-    {id:'overview/processes', cls:'proc', q:'Which processes mattered?', lens:'process', sub:'process groups'},
     {id:'overview/artifacts', cls:'file', q:'Where did artifacts come from?', lens:'file-artifact', sub:'artifact lineage'},
-    {id:'overview/tool_calls', cls:'proc', q:'Which tool calls ran?', lens:'agent-intent', sub:'app context'},
+    {id:'overview/processes', cls:'proc', q:'Which processes mattered?', lens:'process', sub:'process groups'},
+    {id:'__trust__', cls:'proc', q:'What is trusted vs asserted?', lens:'trust-origin', sub:'trust origins'},
+    {id:'__boundary__', cls:'proc', q:'Was the sandbox boundary crossed?', lens:'sandbox-boundary', sub:'boundary / tamper'},
     {id:'__compliance__', cls:'comp', q:'Which controls hold up?', lens:'', sub:'framework coverage'}
   ];
   $('#askgrid').innerHTML=items.map(it=>{

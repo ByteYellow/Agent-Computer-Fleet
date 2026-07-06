@@ -286,6 +286,42 @@ system-side telemetry + application-side agent context
 
 ## Quickstart
 
+### One command
+
+The fastest path: wrap any agent in a full provenance run with a single command.
+
+```sh
+go install github.com/ByteYellow/AgentProvenance/cmd/agentprov@latest
+
+agentprov launch -- claude          # or codex, or any agent command
+```
+
+`launch` does everything in one shot: create a run scope, serve the live
+dashboard, inject a per-run hooks overlay into the agent (Claude Code today; your
+`~/.claude` is never modified), start the kernel sensor when the host can (Linux
++ CAP_BPF), exec the agent in a dedicated cgroup, then on exit fold every source
+into one signed, verifiable evidence graph and print a one-line verdict:
+
+```text
+✓  CLEAN   run=run-… exit=0  events=28 signals=0 high_risk=0 intent_mismatch=0
+   dashboard=http://127.0.0.1:7396/
+```
+
+The evidence level degrades honestly and is printed up front on two independent
+axes -- application side (hooks / transcript vs record-only) and system side
+(kernel telemetry vs none) -- so a macOS run (app-side only) never pretends to
+kernel evidence a Linux run has. See the [conformance layer](#intent-conformance).
+
+Prefer to explore signed evidence without capturing anything? Replay a demo:
+
+```sh
+agentprov forensics import demo/multiagent-provenance/*.forensics.json.gz \
+  --pub-key demo/multiagent-provenance/attestation.pub
+agentprov dashboard serve            # then open the printed URL
+```
+
+### From source
+
 Prerequisites:
 
 - Go 1.23+
@@ -334,6 +370,43 @@ time-ordered view. `--view causality` groups rows into agent context, runtime
 process, runtime telemetry, evidence, risk/policy, and external-effect lanes,
 with correlation status and drill-down commands. The JSON output feeds the web
 dashboard (and external UIs).
+
+## Intent conformance
+
+The model-intent layer answers more than "which command did the model run." It
+reconciles **what each action declared it would do against what the runtime
+actually did** — the divergence a positive "the model caused this" edge cannot
+express.
+
+```sh
+agentprov intent diff --run <run_id>
+```
+
+Each captured **IntentContract** (a tool call, a peer `SendMessage`, or a
+refusal) declares the effects it should and must-not produce; each is diffed
+against the normalized **RuntimeEffects** attributed to its scope. The verdicts:
+
+| verdict | meaning |
+| --- | --- |
+| `declared_vs_effect_mismatch` | the runtime exceeded the declared contract (e.g. an *install* that read a foreign secret and egressed to the metadata IP) |
+| `peer_message_intent_mismatch` | a mismatch whose intent came from another agent's message (the multi-agent lateral-influence finding) |
+| `refused_but_runtime_happened` | a refused action's effects occurred anyway |
+| `decided_and_executed` | declared effects appeared, no violation |
+| `intent_coverage_gap` | sensitive effects with **no** captured intent — an honest gap, never a fabricated finding |
+
+The finding is **conditional on each action's declared contract**, which is what
+separates it from a global policy rule: a network connect is drift for a
+read-only file tool but permitted for `bash`; reading `~/.aws/credentials` is
+drift for *any* operation that did not declare it. A foreign-secret read is told
+apart from the agent's own credentials by the same policy engine the sensor uses.
+
+Verdicts feed an `intent_conformance` dimension in the unified signal model, flip
+the `launch` verdict, and render in the **Conformance · declared vs actual**
+graph lens (contract scope → verdict → observed effects, alongside the
+delegation and peer agent structure). The
+[multi-agent](demo/multiagent-provenance/README.md) demo shows a poisoned
+install that `alice` instructs `bob` to run surfacing as a
+`peer_message_intent_mismatch`.
 
 ## Deployment Modes
 
@@ -716,7 +789,7 @@ VM and shipped as a **signed, portable forensics bundle** that replays offline:
 ./agentprov --data-dir /tmp/snake-replay forensics import \
   demo/snake-supply-chain/run-snake-supervised.forensics.json.gz \
   --pub-key demo/snake-supply-chain/attestation.pub        # verifies the signature, then imports
-./agentprov --data-dir /tmp/snake-replay dashboard serve   # open run "run-snake-supervised"
+./agentprov --data-dir /tmp/snake-replay dashboard serve   # open run "run-4084e7bb3dda"
 ```
 
 <p align="center">
@@ -751,8 +824,8 @@ attached to the branch**.
 ./agentprov --data-dir /tmp/multiagent-replay forensics import \
   demo/multiagent-provenance/run-double-attempt.forensics.json.gz \
   --pub-key demo/multiagent-provenance/attestation.pub
-./agentprov --data-dir /tmp/multiagent-replay graph verify --run run-double-attempt
-./agentprov --data-dir /tmp/multiagent-replay graph lens --run run-double-attempt --lens orchestration
+./agentprov --data-dir /tmp/multiagent-replay graph verify --run run-d1d0f1a6fd68
+./agentprov --data-dir /tmp/multiagent-replay graph lens --run run-d1d0f1a6fd68 --lens orchestration
 ./agentprov --data-dir /tmp/multiagent-replay dashboard serve
 ```
 

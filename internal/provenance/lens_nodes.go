@@ -494,7 +494,7 @@ func addProvenanceObjectNodes(db *sql.DB, runID string, add func(GraphLensNode))
 		if objectType == "llm_message" {
 			meta := llmMessageMeta(path)
 			kind, label := "llm_prompt", "request"
-			if strings.HasPrefix(sourceID, "llm_response/") {
+			if strings.HasPrefix(sourceID, "llm_response/") || strings.HasPrefix(sourceID, "transcript/resp-") {
 				kind, label = "llm_completion", "response"
 				if len(meta.ToolCalls) > 0 {
 					label += ": " + strings.Join(meta.ToolCalls, ", ")

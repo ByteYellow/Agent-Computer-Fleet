@@ -17,7 +17,7 @@ The foundation. A single agent installs a poisoned `setup.py`; the install hook
 reads a secret and connects the cloud-metadata IP. The kernel sensor catches the
 `secret_path` + `metadata_ip` syscalls, and the **signed causal graph** ties them
 to the run — buried supply-chain exfil turned into verifiable, tamper-evident
-evidence. Bundle: `run-snake-supervised`.
+evidence. Bundle: `run-4084e7bb3dda`.
 
 ## Stage 2 — [`multiagent-provenance/`](multiagent-provenance/) · an agent team
 
@@ -36,7 +36,7 @@ full arc:
   slips past the model and is caught only by the kernel. One signed graph shows
   *try-the-obvious-way → get-flagged → pivot-to-stealth*.
 
-Bundle: `run-double-attempt`.
+Bundle: `run-d1d0f1a6fd68`.
 
 ## Stage 3 — [`llm-judge/`](llm-judge/) · an external LLM as security judge
 

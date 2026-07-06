@@ -27,7 +27,7 @@ go build -o /tmp/agentprov ./cmd/agentprov
 /tmp/agentprov --data-dir /tmp/snake-replay forensics import \
   demo/snake-supply-chain/run-snake-supervised.forensics.json.gz \
   --pub-key demo/snake-supply-chain/attestation.pub          # verifies the signature, then imports
-/tmp/agentprov --data-dir /tmp/snake-replay dashboard serve  # open run "run-snake-supervised"
+/tmp/agentprov --data-dir /tmp/snake-replay dashboard serve  # open run "run-4084e7bb3dda"
 ```
 
 ## Reproduce the capture (Linux/eBPF host)
@@ -47,11 +47,11 @@ agentprov --data-dir "$DD" sensor stream &
 # so every syscall correlates @0.98 + self_launched. Changed files (snake.py) are
 # objectified for preview automatically.
 AGENTPROV_CGROUP_PARENT=/sys/fs/cgroup/agentprov \
-  agentprov --data-dir "$DD" record --run run-snake-supervised \
+  agentprov --data-dir "$DD" record --run run-4084e7bb3dda \
     --workdir ~/agentprov-snake-demo/workspace -- bash ~/agentprov-snake-demo/run-agent.sh
 
-agentprov --data-dir "$DD" graph materialize --run run-snake-supervised
-agentprov --data-dir "$DD" forensics export run-snake-supervised --sign-key <key>   # signed bundle
+agentprov --data-dir "$DD" graph materialize --run run-4084e7bb3dda
+agentprov --data-dir "$DD" forensics export run-4084e7bb3dda --sign-key <key>   # signed bundle
 ```
 
 `record` births the agent into a cgroup v2 leaf (delegate `/sys/fs/cgroup/agentprov`

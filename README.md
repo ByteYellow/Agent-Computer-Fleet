@@ -81,8 +81,8 @@ The goal is to answer questions ordinary traces do not answer well:
 - [Why](#why)
 - [Security Loop](#security-loop)
 - [Core Model](#core-model)
-  - [White-box mode](#white-box-mode)
-  - [Zero-SDK mode](#zero-sdk-mode)
+  - [Evidence layers](#evidence-layers)
+  - [Runtime facts and correlation](#runtime-facts-and-correlation)
 - [Relationship To Existing Systems](#relationship-to-existing-systems)
 - [Quickstart](#quickstart)
 - [Deployment Modes](#deployment-modes)
@@ -176,33 +176,37 @@ to the next security-control phases.
 
 ## Core Model
 
-AgentProvenance supports two context modes.
-
-### White-box mode
-
-An agent harness, SDK, tool router, or framework explicitly provides context:
-
-```text
-run_id / session_id / attempt_id / tool_call_id / tool_name / args_hash
-```
-
-This gives high precision and fits custom coding-agent systems, Agentix-style
-harnesses, LangGraph-like workflows, and internal tool routers.
-
-### Zero-SDK mode
-
-The user can run an agent command directly:
+AgentProvenance is not "pick an integration mode." It is layered evidence with
+one entry point: wrap the command you already run.
 
 ```sh
 agentprov record -- <agent command>
 ```
 
-The current MVP records a command in a working directory, snapshots the
-pre-execution file state, runs the command, computes post-execution file
-changes, and emits runtime file evidence into the DAG. The long-term zero-SDK
-path adds deeper process-tree and kernel telemetry capture.
+`record` snapshots the pre-execution file state, runs the command, samples the
+process tree, computes post-execution file changes, and emits runtime evidence
+into the DAG — no integration code required. Everything else stacks on top of
+that base automatically.
 
-Zero-SDK inference uses runtime facts:
+### Evidence layers
+
+| Layer | Source | Trust semantics |
+|---|---|---|
+| Kernel / runtime facts (foundation) | `record` process tree + file diffs, native eBPF sensor, Falco/Tetragon/LoongCollector receivers | hard facts keyed by pid / cgroup / container / time; the agent cannot fabricate them |
+| Application context (enrichment) | harness hooks (`hooks bridge`), MCP context-write (`bind_scope` / `record_tool_call`), explicit `run_id / session_id / attempt_id / tool_call_id / tool_name / args_hash` | semantics the kernel can never infer — agent identity, delegation and peer messages, refused intents; app-asserted claims carry `binding_source=ai_asserted` and a `<=0.5` confidence cap, and never override kernel facts |
+
+The kernel layer answers "what actually happened on this host." The
+application-context layer answers "which agent, which tool call, which intent"
+— including things no syscall stream can express, such as an orchestrator's
+`agent_spawn`/`agent_message` edges or an attempt the LLM refused to execute.
+Application context is not a separate deployment or a required SDK: when a
+harness emits hooks or calls the MCP context-write tools, the enrichment layer
+attaches to the same run; when it doesn't, the kernel layer still stands on its
+own.
+
+### Runtime facts and correlation
+
+Correlation back to execution context uses runtime facts:
 
 ```text
 root process / process tree / cwd / timestamp / container_id / cgroup_id
@@ -347,14 +351,16 @@ ingest, retention, and query services.
 | Mode | Shape | Best for | Tradeoff |
 |---|---|---|---|
 | Library / CLI-only recorder | one `agentprov` binary, optional Python helper, local SQLite/object store | RL rollout, evaluator jobs, benchmarks, CI, local red-team harnesses | easiest to adopt; weaker shared query and long-running ingest |
-| Sidecar / local daemon | `agentprov daemon serve` beside one worker or sandbox host; CLI/SDK acts as client | sandbox worker, CI runner, local security harness, medium-volume telemetry ingest | adds a local service boundary, spool, backpressure, and stable query API |
+| Sidecar / local daemon | `agentprov daemon serve` beside one worker or sandbox host; the CLI and evaluator clients talk to it | sandbox worker, CI runner, local security harness, medium-volume telemetry ingest | adds a local service boundary, spool, backpressure, and stable query API |
 | Central evidence service | shared ingest/query service with object storage, retention, auth, and UI/API | enterprise security, audit, SRE, compliance, incident review | highest operational cost; not the default RL entry point |
 
 For RL and evaluator pipelines, the default contract is lightweight and
 offline-first:
 
 - Install: one Go binary plus an optional thin Python package.
-- Call: wrap an existing command first; SDK/framework integration is optional.
+- Call: wrap an existing command; application-context enrichment (hooks
+  bridge, MCP context-write) stacks on automatically when the harness provides
+  it — no integration code required.
 - Batch: every trajectory gets stable `run_id` / evidence manifest / signal
   context output, and query surfaces are paged.
 - Overhead: default capture focuses on process/file/diff/artifact/exit/resource
@@ -920,7 +926,8 @@ What these mean:
 |---|---|
 | Zero-SDK record | `record -- <cmd>` snapshots the workdir, samples the process tree, captures file diffs + runtime evidence, no SDK |
 | Batch recorder | `record batch` records many jobs in parallel for RL/benchmark pipelines |
-| Native eBPF sensor | `agentprov-sensor` (Linux/arm64): exec+argv, connect, file write + sensitive **read** → `secret_path`, process_exit, privesc (setuid/setgid/ptrace), tamper (rename/unlink), TLS plaintext (hash + metadata), DNS — in-kernel noise filtering, validated live |
+| Native eBPF sensor | `agentprov-sensor` (Linux/arm64): exec+argv, connect, file write + sensitive **read** → `secret_path`, process_exit, privesc (setuid/setgid/ptrace), tamper (rename/unlink), TLS plaintext (full request/response bodies via chunked SSL_write/SSL_read capture), DNS — in-kernel noise filtering, validated live |
+| LLM intent capture | `internal/tlsintent` reassembles the sensor's TLS chunks into complete HTTP/1.1 messages (Content-Length, chunked, and SSE streaming bodies; HTTP/2 is detected and passed through raw, never mis-parsed) and parses LLM semantics across Anthropic/OpenAI shapes — model, tools offered, tool calls + the shell commands the model decided to run, stop reason |
 | Evidence ingest | Falco / Tetragon / LoongCollector JSONL + native sensor → normalized events; schema-validated, app-context rejected in raw payloads, paged with integrity hashes |
 
 **Correlate & verify**
@@ -931,8 +938,9 @@ What these mean:
 | Runtime causality | native `runtime_*` graph edges (tool call, process tree, snapshot, event, file) |
 | Provenance DAG | `graph trace / refs / log / materialize / objects / verify / replay` over content-addressed objects |
 | Multi-agent orchestration | `hooks bridge` folds a Claude Code (or compatible) agent team's harness hooks into the graph — agent nodes, delegation (`agent_spawn`) + peer (`agent_message`, body objectified as evidence) edges, per-agent tool_calls, and command-match syscall attribution (`agent_syscall`) since in-process sub-agents share one cgroup |
-| Graph Explorer lenses | `graph lens` projects the canonical graph into default, security, process, file-artifact, network-egress, data-flow-taint, agent-intent, orchestration, trust-origin, and sandbox-boundary views; `summary` mode uses Run Overview plus `process_group`, `event_burst`, `file_group`, `risk_group`, `egress_group`, `intent_group`, `trust_group`, and `boundary_group` nodes while keeping raw events queryable; `expanded` keeps high-value details without low-value noise, and `raw` exposes full evidence for focused forensics; group nodes carry drill-down metadata for local expansion, node selection supports lineage/upstream/downstream/children/raw-events controls, and derived edges are marked with derivation rule, confidence, counts, and evidence refs |
-| Graph verify | checks object hashes, parent links, and the policy → risk → response → signal chain (white-box and external-telemetry runs) |
+| LLM-intent causality | captured LLM traffic is materialized into the signed graph (`graph materialize-llm`): each body becomes a content-addressed `llm_message` object, each request/response pair a first-class `llm_call` node, and `llm_caused` edges attribute a syscall to the model call **only when the executed command matches what the model's response actually decided** — so "the model told it to" stays narrow and verifiable |
+| Graph Explorer lenses | `graph lens` projects the canonical graph into default, security, process, file-artifact, network-egress, data-flow-taint, agent-intent (a causal intent DAG over real evidence nodes: `llm_call` → decided command → process → runtime events → risk, with blocked/refused intents grouped by the agent that proposed them), orchestration, trust-origin, and sandbox-boundary views; `summary` mode uses Run Overview plus `process_group`, `event_burst`, `file_group`, `risk_group`, `egress_group`, `intent_group`, `trust_group`, and `boundary_group` nodes while keeping raw events queryable; `expanded` keeps high-value details without low-value noise, and `raw` exposes full evidence for focused forensics; group nodes carry drill-down metadata for local expansion, node selection supports lineage/upstream/downstream/children/raw-events controls, and derived edges are marked with derivation rule, confidence, counts, and evidence refs |
+| Graph verify | checks object hashes, parent links, and the policy → risk → response → signal chain (app-context and external-telemetry runs) |
 | Correlation explain | `telemetry correlations` — raw identity, resolved context, matched binding, confidence, and time window per event |
 
 **Query & observe**
@@ -944,7 +952,7 @@ What these mean:
 | Evidence query | `graph explain` over file / artifact / process / event / tool_call / attempt / risk with bounded, paged causality paths |
 | Diff / blame | file-level diff and blame, joined to runtime events and content-addressed objects |
 | Evidence manifest | `evidence manifest` — a run-level, hash-indexed evidence index (`--materialize` to an object) |
-| Web dashboard | `dashboard serve` — local read-only UI: Run Overview question entries, Graph Explorer lenses, Focused Evidence, Run Timeline, verify status, signals, process tree, egress |
+| Web dashboard | `dashboard serve` — local read-only UI: Run Overview question entries, Graph Explorer lenses (summary follows the LLM lifecycle spine when a captured model call exists), Focused Evidence, Run Timeline, verify status, signals, process tree, egress; readable execve labels and tool_call/event content previews |
 
 **Security & signals**
 
@@ -966,6 +974,7 @@ What these mean:
 | Daemon API | `daemon serve` — binding, ingest, query, verify, record, forensics, signals over HTTP; optional bearer-token auth |
 | AI tools + MCP | the read surface, the `evaluate_action` gate, and context-write (`bind_scope` / `record_tool_call`) via `ai call` and stdio MCP (`ai mcp`) |
 | Evaluator / RL | `signal context / import`, trajectory manifests, and a Python SDK (offline batch + in-loop scoring) — emits evidence, not reward policy |
+| LLM-as-judge pattern | `demo/llm-judge/judge.py` — an external LLM renders a structured verdict over the FULL captured trajectory (chunked map-reduce, nothing silently dropped, coverage recorded) and imports it as signals; the judge runs under `record`, so its own LLM calls become `llm_call` nodes — the judge is itself audited. Works with any Anthropic/OpenAI-compatible provider |
 | Substrate | Docker runtime (gVisor/Firecracker stubs); snapshot fork/resume/taint; telemetry spool, windows, retention, 100k-pressure tested |
 
 ## Core Demo Acceptance
@@ -1012,11 +1021,11 @@ Run:
 ```mermaid
 flowchart TD
     Agent["Agent / Harness / Benchmark / Red-team / RL Pipeline"] --> CLI["agentprov CLI"]
-    Agent --> SDK["Optional SDK / Tool Router"]
+    Agent --> Enrich["Context Enrichment\nhooks bridge / MCP context-write"]
     Agent --> Recorder["Zero-SDK Recorder\nagentprov record -- <cmd>"]
 
     CLI --> Boundary
-    SDK --> Boundary
+    Enrich --> Boundary
     Recorder --> Boundary
     RuntimeTelemetry["Runtime Telemetry\nnative eBPF / Falco / Tetragon / auditd"] --> Boundary
     SandboxIdentity["Sandbox Identity\ncontainer / cgroup / pid / cwd / time"] --> Boundary
@@ -1061,7 +1070,8 @@ execution degrades to directory/filesystem provenance instead of pretending to
 provide VM-level resume.
 
 All producers enter through the API/Ingest Boundary. Zero-SDK recorders,
-SDK/tool routers, telemetry receivers, sandbox adapters, and external evaluator
+context-enrichment producers (hooks bridge, MCP context-write), telemetry
+receivers, sandbox adapters, and external evaluator
 signals are producer inputs; they should not bypass validation, normalization,
 identity binding, redaction, spool/backpressure, or retention controls to write
 directly into the core evidence graph.
@@ -1117,7 +1127,8 @@ cmd/agentprov-sensor/ native eBPF sensor (Linux)
 internal/cli/         command parsing and output
 
 internal/record/      zero-SDK command recorder
-internal/sensor/      native eBPF sensor (exec/connect/file/privesc/tamper/TLS/DNS); Linux-only, arm64
+internal/sensor/      native eBPF sensor (exec/connect/file/privesc/tamper/TLS-body/DNS); Linux-only, arm64
+internal/tlsintent/   TLS chunk -> full HTTP message reassembly + LLM request/response semantics
 internal/telemetry/   normalized runtime event schema, JSONL ingest, TLS HTTP metadata, correlation inputs
 internal/correlation/ ToolCallScope and runtime identity binding
 internal/provenance/  timeline, graph trace, refs, objects, diff, blame, verify, replay
@@ -1169,6 +1180,17 @@ central evidence service deferred to v2.
 
 Recently landed:
 
+- **LLM-intent provenance** (`internal/tlsintent`, `graph materialize-llm`) -
+  the sensor captures the agent's actual LLM traffic as full TLS bodies
+  (chunked SSL_write/SSL_read), userspace reassembles them into complete
+  HTTP/1.1 messages (Content-Length / chunked / SSE; h2 detected, passed
+  through raw) and parses model/tools/decided-commands semantics; each body is
+  objectified as a content-addressed `llm_message`, each request/response pair
+  becomes an `llm_call` node, and `llm_caused` edges are drawn only to the
+  command the model's response actually decided. The agent-intent lens renders
+  this as a causal DAG (with blocked/refused intents grouped by proposing
+  agent), and `demo/llm-judge` closes the loop: an external LLM judges the
+  full trajectory while its own calls are captured into the graph.
 - **Multi-agent orchestration provenance** (`internal/hooksbridge`,
   `agentprov hooks bridge`) - a harness-hooks bridge turns a Claude Code (or
   compatible) agent team's hooks into graph structure: agent nodes (`agents`
@@ -1197,8 +1219,9 @@ Recently landed:
   writers; correlation bindings bound stale-open over-matching.
 - **Native eBPF sensor expansion** (`internal/sensor`, validated live on an arm64
   VM) - sensitive file reads (-> `secret_path`), privilege changes
-  (setuid/setgid/ptrace), file tamper (rename/unlink), TLS plaintext -> privacy-
-  safe HTTP metadata + `llm_call` pairing, `process_exit` closing correlation
+  (setuid/setgid/ptrace), file tamper (rename/unlink), TLS plaintext capture
+  (since upgraded to full request/response bodies -> `llm_call` pairing, see
+  LLM-intent provenance above), `process_exit` closing correlation
   windows, and DNS (getaddrinfo). In-kernel noise filtering before ring-buffer
   reserve removed a containerd-teardown firehose. Privilege-escalation policy
   rules (ptrace, setuid-to-root -> quarantine).
@@ -1215,8 +1238,9 @@ Next / open:
   kprobe; `getaddrinfo` covers glibc today), IPv6/UDP connect, and multi-arch
   (x86 `PT_REGS`; arm64-only today). `ptrace` is captured but not yet exercised
   end to end in a test.
-- **TLS depth** — HTTP/2 HPACK header decode and SSE reassembly (HTTP/1.1 plus
-  h2 detection today).
+- **TLS depth** — HTTP/2 HPACK header decode and h2 body reassembly (HTTP/1.1
+  Content-Length / chunked / SSE reassembly is done; h2 is detected and passed
+  through raw today).
 - **Tamper-evidence (v2)** — off-host / capture-time signing (KMS / TPM /
   transparency log). v1 is integrity plus optional local signing, not proof
   against a host-root attacker.

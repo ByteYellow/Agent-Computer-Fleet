@@ -2,6 +2,79 @@
 
 ## Unreleased
 
+LLM-intent provenance: the sensor now captures the agent's actual LLM traffic
+as full TLS plaintext, reassembles and parses it, and materializes it into the
+signed graph — so the DAG can answer "which model call caused this syscall,
+and did the command that ran match what the model decided?" The agent-intent
+lens is rebuilt as a causal DAG over real evidence nodes, and a new llm-judge
+demo has an external LLM render an audited verdict over the full trajectory.
+
+### Added
+
+- **Full TLS body capture (`internal/sensor`).** The SSL_write/SSL_read uprobes
+  now emit the complete plaintext as ordered chunks keyed by TLS connection and
+  direction (previously hash + bounded metadata only).
+- **TLS reassembly + LLM semantics (`internal/tlsintent`).** Userspace
+  accumulates the sensor's chunks into COMPLETE HTTP/1.1 messages
+  (Content-Length, chunked, and SSE streaming bodies; HTTP/2 is detected via
+  the client preface and passed through raw, never mis-parsed) and parses
+  minimal LLM semantics tolerant across Anthropic Messages / OpenAI Chat
+  Completions shapes: model, message count, system-prompt presence, tools
+  offered, tool calls + the shell commands the model decided to run, stop
+  reason. Platform-neutral (no eBPF deps), unit-tested off-Linux.
+- **LLM calls in the signed graph (`graph materialize-llm`,
+  `internal/provenance.MaterializeLLMCalls`).** Each captured body is
+  objectified as a content-addressed `llm_message`; each request/response pair
+  becomes a first-class `llm_call` node with `llm_request` / `llm_response` /
+  `llm_body` edges. Idempotent; covered by `graph verify` and
+  `scripts/accept_llm_intent_causality.sh`.
+- **`llm_caused` scoped to the decided command.** The causality edge from an
+  `llm_call` to a syscall is drawn only when the executed command matches a
+  `tool_command` from the model's response — not to everything that happened
+  after the call — so "the model told it to" stays narrow and defensible. The
+  legacy ingest-time `llm_intent_caused` edge is no longer rendered
+  (superseded by the materialized `llm_caused`).
+- **Agent-intent lens is now a causal DAG.** The stage-card renderer is
+  dropped; the view is a DAG over real evidence nodes — `llm_call` → decided
+  command → process → runtime events → risk — with blocked/refused intents
+  shown as first-class nodes, grouped by the agent that proposed them.
+  Run Overview tool-call / LLM-intent entries drill down into it.
+- **Dashboard: LLM lifecycle spine + readability.** `summary` shows only the
+  LLM lifecycle route when a captured model call exists (the send-msg step
+  tracks orchestrator delegation); readable execve labels; content previews on
+  tool_call/event nodes; sticky expand; node labels clipped inside their boxes.
+- **llm-judge demo (`demo/llm-judge/judge.py`, Stage 3).** A single-file,
+  stdlib-only Python judge reads a captured run's FULL trajectory through the
+  generic contract surfaces (EvalContext, ai tools, graph lenses — no event-type
+  filter, chunked map-reduce past the context budget, coverage recorded),
+  has any Anthropic/OpenAI-protocol LLM produce a structured verdict
+  (`agentprovenance.llm_judge/v1`), and imports it back as graph-referenced
+  signals. The judge itself runs under `record` and its own LLM
+  requests/responses become `llm_call` nodes in the judge's provenance run —
+  the judge is itself audited. Degrades to a keyless offline fixture.
+- **Real LLM intent in the demo bundles (`demo/shared/llm-intent-curl.sh`).**
+  Both capture harnesses fire one real model/tool-intent request via
+  curl/OpenSSL (secrets stay in headers, never in the script or body), so the
+  recaptured, re-signed Stage 1/2 bundles now carry the model call that
+  decided the poisoned install — `llm_call` → `llm_caused` → the exact syscall.
+
+### Fixed
+
+- **`graph explain` no longer crashes on large scopes.** Telemetry batches are
+  matched against event ids in Go instead of one SQL `LIKE` clause per event,
+  which overflowed SQLite's expression-depth limit (~1000 events) and crashed
+  `--attempt/--tool-call/--process/--file`.
+- **Deterministic DAG rendering.** Every `created_at` ordering feeding the
+  causality DAG gained an id tiebreaker, lens summary builders iterate in
+  `(created_at, node id)` order, and `/api/graph` node output is sorted — BFS
+  order, `page_hash`, evidence_refs, and the 32-item lens truncations are now
+  byte-stable across renders and survive re-materialize (verified 3× on both
+  demo bundles).
+- **Hooks bridge: sub-agent identity.** Sub-agents spawned via the Agent tool
+  now resolve their name from the tool's `name` field instead of falling back
+  to a generic id.
+- perf: graph edges indexed by `(run_id, created_at, id)`; lens metadata cached.
+
 ## v0.5.0 - 2026-07-03
 
 Multi-agent orchestration provenance: attribute an attack across a Claude Code

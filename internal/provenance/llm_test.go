@@ -129,12 +129,12 @@ func TestLLMMessageMeta(t *testing.T) {
 	if err := os.WriteFile(f, []byte(`{"type":"llm_message","payload":{"model":"claude-opus-4-8","semantics":{"tool_calls":["bash","read_file"]}}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	model, tools := llmMessageMeta(f)
-	if model != "claude-opus-4-8" || len(tools) != 2 || tools[0] != "bash" {
-		t.Errorf("llmMessageMeta = %q, %v", model, tools)
+	meta := llmMessageMeta(f)
+	if meta.Model != "claude-opus-4-8" || len(meta.ToolCalls) != 2 || meta.ToolCalls[0] != "bash" {
+		t.Errorf("llmMessageMeta = %+v", meta)
 	}
 	// Missing file degrades quietly.
-	if m, tt := llmMessageMeta(filepath.Join(dir, "nope.json")); m != "" || tt != nil {
-		t.Errorf("missing file should yield empty, got %q %v", m, tt)
+	if missing := llmMessageMeta(filepath.Join(dir, "nope.json")); missing.Model != "" || missing.ToolCalls != nil {
+		t.Errorf("missing file should yield empty, got %+v", missing)
 	}
 }

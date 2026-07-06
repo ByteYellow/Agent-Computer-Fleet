@@ -1,8 +1,15 @@
 # AgentProvenance demos — a progressive story
 
-Two demos, read simplest → hardest. Each is a **real capture on genuine kernel
-events**, exported as a signed, verifiable bundle you can replay locally (no VM
-needed). Start with Stage 1.
+Three stages, read simplest → hardest. Each is a **real capture on genuine
+kernel events**, exported as a signed, verifiable bundle you can replay locally
+(no VM needed). Start with Stage 1.
+
+Both capture harnesses fire one real model/tool-intent request through
+[`shared/llm-intent-curl.sh`](shared/llm-intent-curl.sh) (curl/OpenSSL, secrets
+never in the body), so the sensor's full-TLS-body capture puts the **model call
+that decided the poisoned install** into the bundle: an `llm_call` node whose
+`llm_caused` edge points at the very command that ran, rendered by the
+agent-intent DAG lens.
 
 ## Stage 1 — [`snake-supply-chain/`](snake-supply-chain/) · one agent
 

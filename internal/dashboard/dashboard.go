@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -267,6 +268,19 @@ func (s Server) cachedVerify(run string) any {
 		return e.result
 	}
 	verifyCacheMu.Unlock()
+
+	// The local dashboard is an investigation UI. Full graph verification can
+	// re-hash tens of thousands of objects and should stay an explicit CLI/API
+	// action for large imported bundles. When a ready forensics bundle exists,
+	// import already verified its embedded object content before committing rows;
+	// surface that fast provenance posture here and keep the page responsive.
+	if bundle := s.cachedBundleVerify(run, objs); bundle != nil {
+		verifyCacheMu.Lock()
+		verifyCache[run] = verifyCacheEntry{fingerprint: fp, result: bundle}
+		verifyCacheMu.Unlock()
+		return bundle
+	}
+
 	var result any
 	if v, err := provenance.Verify(s.DB, run); err == nil {
 		result = v
@@ -277,6 +291,34 @@ func (s Server) cachedVerify(run string) any {
 	verifyCache[run] = verifyCacheEntry{fingerprint: fp, result: result}
 	verifyCacheMu.Unlock()
 	return result
+}
+
+func (s Server) cachedBundleVerify(run string, objectCount int) any {
+	var bundleID, sha, status string
+	var size int64
+	err := s.DB.QueryRow(`SELECT id, sha256, size_bytes, status FROM forensics_bundles
+		WHERE run_id = ? ORDER BY created_at DESC LIMIT 1`, run).Scan(&bundleID, &sha, &size, &status)
+	if err == nil && status == "ready" && sha != "" {
+		return map[string]any{
+			"status":        "ok",
+			"error_count":   0,
+			"warning_count": 0,
+			"mode":          "forensics_bundle",
+			"bundle_id":     bundleID,
+			"bundle_sha256": sha,
+			"bundle_bytes":  size,
+		}
+	}
+	if objectCount > 5000 {
+		return map[string]any{
+			"status":        "deferred",
+			"error_count":   0,
+			"warning_count": 1,
+			"mode":          "deferred_full_verify",
+			"message":       "full graph verification is available through `agentprov graph verify`",
+		}
+	}
+	return nil
 }
 
 func (s Server) overview(w http.ResponseWriter, r *http.Request) {
@@ -670,6 +712,13 @@ func (s Server) artifact(w http.ResponseWriter, r *http.Request) {
 	}
 	path, hash, source := s.resolveArtifactPath(run, node)
 	if path == "" {
+		// No stored object file, but many graph nodes still carry inspectable
+		// content in the DB: a tool_call's command/verdict, a runtime event's
+		// payload. Serve that so the node isn't a dead click.
+		if content, ok := s.nodeDBContent(run, node); ok {
+			writeJSON(w, artifactResp{Kind: "text", Source: "db", Mime: "text/plain", Content: content})
+			return
+		}
 		writeJSON(w, artifactResp{Kind: "unavailable", Reason: "no stored content for this node"})
 		return
 	}
@@ -700,7 +749,12 @@ func (s Server) artifact(w http.ResponseWriter, r *http.Request) {
 	// node produced, not the metadata wrapper. (Evidence objects — events, policy,
 	// etc. — are left as-is so the panel shows the full signed record.)
 	mimePath := path
-	if content, srcPath, ok := unwrapArtifactContent(data); ok {
+	if rendered, ok := renderLLMMessage(data); ok {
+		// A captured LLM request/response: show a readable summary + the pretty
+		// body, not the raw provenance envelope with a double-escaped content field.
+		data = rendered
+		mimePath = "llm-message.txt"
+	} else if content, srcPath, ok := unwrapArtifactContent(data); ok {
 		data = content
 		if srcPath != "" {
 			mimePath = srcPath
@@ -728,6 +782,44 @@ func (s Server) artifact(w http.ResponseWriter, r *http.Request) {
 		resp.Kind = "text"
 	}
 	writeJSON(w, resp)
+}
+
+// nodeDBContent builds an inspectable text preview for graph nodes that have no
+// stored object file: tool_calls (command + verdict) and runtime events (payload).
+func (s Server) nodeDBContent(run, node string) (string, bool) {
+	seg := node
+	if i := strings.LastIndex(node, "/"); i >= 0 {
+		seg = node[i+1:]
+	}
+	if strings.HasPrefix(node, "runtime_event/") {
+		var etype, payload string
+		if err := s.DB.QueryRow(`SELECT event_type, COALESCE(payload,'') FROM events WHERE run_id = ? AND id = ?`, run, seg).Scan(&etype, &payload); err == nil {
+			var b strings.Builder
+			fmt.Fprintf(&b, "event: %s\n\n", etype)
+			var pretty bytes.Buffer
+			if json.Indent(&pretty, []byte(payload), "", "  ") == nil {
+				b.Write(pretty.Bytes())
+			} else {
+				b.WriteString(payload)
+			}
+			return b.String(), true
+		}
+	}
+	var cmd, status, policy string
+	if err := s.DB.QueryRow(`SELECT COALESCE(command,''), COALESCE(status,''), COALESCE(policy_decision,'')
+		FROM tool_calls WHERE run_id = ? AND id = ?`, run, seg).Scan(&cmd, &status, &policy); err == nil && (cmd != "" || status != "") {
+		var b strings.Builder
+		if status != "" {
+			fmt.Fprintf(&b, "status: %s", status)
+			if policy != "" && policy != "allow" {
+				fmt.Fprintf(&b, "   (%s)", policy)
+			}
+			b.WriteString("\n\n")
+		}
+		b.WriteString(cmd)
+		return b.String(), true
+	}
+	return "", false
 }
 
 // resolveArtifactPath maps a graph node to a content source recorded for this run:
@@ -773,6 +865,58 @@ func unwrapArtifactContent(data []byte) (content []byte, path string, ok bool) {
 		return nil, "", false
 	}
 	return []byte(obj.Payload.Content), obj.Payload.Path, true
+}
+
+// renderLLMMessage turns a captured llm_message provenance object into a readable
+// preview: a short intent summary followed by the pretty-printed request/response
+// body (instead of the raw envelope whose `content` is a double-escaped JSON blob).
+func renderLLMMessage(data []byte) ([]byte, bool) {
+	var obj struct {
+		Type    string `json:"type"`
+		Payload struct {
+			Direction string `json:"direction"`
+			Model     string `json:"model"`
+			Content   string `json:"content"`
+			Semantics struct {
+				MessageCount int      `json:"message_count"`
+				ToolsOffered []string `json:"tools_offered"`
+				ToolCalls    []string `json:"tool_calls"`
+				ToolCommands []string `json:"tool_commands"`
+				StopReason   string   `json:"stop_reason"`
+			} `json:"semantics"`
+		} `json:"payload"`
+	}
+	if json.Unmarshal(data, &obj) != nil || obj.Type != "llm_message" {
+		return nil, false
+	}
+	p := obj.Payload
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s   model: %s\n", strings.ToUpper(p.Direction), p.Model)
+	s := p.Semantics
+	if p.Direction == "request" {
+		fmt.Fprintf(&b, "messages: %d\n", s.MessageCount)
+		if len(s.ToolsOffered) > 0 {
+			fmt.Fprintf(&b, "tools offered: %s\n", strings.Join(s.ToolsOffered, ", "))
+		}
+	} else {
+		if len(s.ToolCalls) > 0 {
+			fmt.Fprintf(&b, "decided tool: %s\n", strings.Join(s.ToolCalls, ", "))
+		}
+		if len(s.ToolCommands) > 0 {
+			fmt.Fprintf(&b, "decided command: %s\n", strings.Join(s.ToolCommands, " ; "))
+		}
+		if s.StopReason != "" {
+			fmt.Fprintf(&b, "stop reason: %s\n", s.StopReason)
+		}
+	}
+	b.WriteString("\n─────────── body ───────────\n")
+	var pretty bytes.Buffer
+	if json.Indent(&pretty, []byte(p.Content), "", "  ") == nil {
+		b.Write(pretty.Bytes())
+	} else {
+		b.WriteString(p.Content)
+	}
+	return []byte(b.String()), true
 }
 
 func isBinaryContent(data []byte) bool {
@@ -883,7 +1027,7 @@ func (s Server) graph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.DB.Query(`SELECT from_id, to_id, edge_type FROM graph_edges
-		WHERE run_id = ? ORDER BY created_at`, run)
+		WHERE run_id = ? ORDER BY created_at, id`, run)
 	if err != nil {
 		httpError(w, err.Error(), 500)
 		return
@@ -911,7 +1055,7 @@ func (s Server) graph(w http.ResponseWriter, r *http.Request) {
 		used[e.To] = true
 	}
 	outNodes := []graphNode{}
-	for id := range used {
+	for _, id := range sortedKeys(used) {
 		if n, ok := nodes[id]; ok {
 			outNodes = append(outNodes, n)
 		} else {
@@ -919,6 +1063,15 @@ func (s Server) graph(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, map[string]any{"nodes": outNodes, "edges": edges})
+}
+
+func sortedKeys(values map[string]bool) []string {
+	out := make([]string, 0, len(values))
+	for value := range values {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // nodeLabels builds rich labels for every node a curated edge might reference:

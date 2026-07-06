@@ -742,6 +742,9 @@ func EnsureSchema(db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_graph_edges_run_from ON graph_edges(run_id, from_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_graph_edges_run_to ON graph_edges(run_id, to_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_graph_edges_run_type ON graph_edges(run_id, edge_type);`,
+		// The lens loads a run's edges ordered by (created_at, id); this covering
+		// index lets a large run skip sorting tens of thousands of rows.
+		`CREATE INDEX IF NOT EXISTS idx_graph_edges_run_time ON graph_edges(run_id, created_at, id);`,
 		`CREATE INDEX IF NOT EXISTS idx_risk_signals_run_event ON risk_signals(run_id, event_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_risk_signals_run_tool ON risk_signals(run_id, tool_call_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_risk_signals_run_process ON risk_signals(run_id, process_id);`,

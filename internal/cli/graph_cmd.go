@@ -2,6 +2,7 @@ package cli
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 
 	"github.com/byteyellow/agentprovenance/internal/provenance"
@@ -130,6 +131,36 @@ func graphCmd(dataDir, daemonURL *string) *cobra.Command {
 		},
 	}
 	materialize.Flags().StringVar(&materializeRunID, "run", "", "run id")
+
+	var llmRunID string
+	materializeLLM := &cobra.Command{
+		Use:   "materialize-llm",
+		Short: "objectify captured LLM request/response bodies + build llm_call nodes for a run",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if llmRunID == "" {
+				return fmt.Errorf("--run is required")
+			}
+			paths, err := store.Init(*dataDir)
+			if err != nil {
+				return err
+			}
+			db, err := store.Open(paths)
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+			n, err := provenance.MaterializeLLMCalls(provenance.ObjectStore{DB: db, Paths: paths}, db, llmRunID)
+			if err != nil {
+				return err
+			}
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
+				"schema_version": "agentprovenance.materialize_llm/v1",
+				"run":            llmRunID,
+				"llm_calls":      n,
+			})
+		},
+	}
+	materializeLLM.Flags().StringVar(&llmRunID, "run", "", "run id")
 
 	var objectsRunID string
 	var objectsLimit int
@@ -414,6 +445,7 @@ func graphCmd(dataDir, daemonURL *string) *cobra.Command {
 	cmd.AddCommand(refs)
 	cmd.AddCommand(logCmd)
 	cmd.AddCommand(materialize)
+	cmd.AddCommand(materializeLLM)
 	cmd.AddCommand(objectsCmd)
 	cmd.AddCommand(diffCmd)
 	cmd.AddCommand(blameCmd)

@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+	"os"
 	"sort"
 	"strings"
+	"sync"
 )
 
 const graphLensSchemaVersion = "agentprovenance.graph_lens/v1"
@@ -583,10 +585,101 @@ func addAgentNodes(db *sql.DB, runID string, add func(GraphLensNode)) error {
 	return rows.Err()
 }
 
+// llmMetaCache memoizes parsed llm_message metadata by object-file path. Object
+// files are content-addressed and immutable, so a path always maps to the same
+// content -- caching avoids re-reading every object on every lens refresh.
+var llmMetaCache sync.Map // path -> llmMessageSummary
+
+type llmMessageSummary struct {
+	Model        string
+	ToolCalls    []string
+	ToolsOffered []string
+	MessageCount int
+	StopReason   string
+	Command      string
+	Prompt       string
+}
+
+// llmMessageMeta reads a stored llm_message object file and pulls out the model,
+// prompt/tool summary, and the model's decided command. Best-effort: any
+// read/parse failure degrades to a bare label.
+func llmMessageMeta(path string) llmMessageSummary {
+	if path == "" {
+		return llmMessageSummary{}
+	}
+	if v, ok := llmMetaCache.Load(path); ok {
+		return v.(llmMessageSummary)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return llmMessageSummary{}
+	}
+	var obj struct {
+		Payload struct {
+			Content   string `json:"content"`
+			Model     string `json:"model"`
+			Semantics struct {
+				Model        string   `json:"model"`
+				ToolCalls    []string `json:"tool_calls"`
+				ToolsOffered []string `json:"tools_offered"`
+				MessageCount int      `json:"message_count"`
+				StopReason   string   `json:"stop_reason"`
+			} `json:"semantics"`
+		} `json:"payload"`
+	}
+	if json.Unmarshal(raw, &obj) != nil {
+		return llmMessageSummary{}
+	}
+	prompt, command := llmContentSummary(obj.Payload.Content)
+	out := llmMessageSummary{
+		Model:        firstString([]string{obj.Payload.Model, obj.Payload.Semantics.Model}),
+		ToolCalls:    obj.Payload.Semantics.ToolCalls,
+		ToolsOffered: obj.Payload.Semantics.ToolsOffered,
+		MessageCount: obj.Payload.Semantics.MessageCount,
+		StopReason:   obj.Payload.Semantics.StopReason,
+		Command:      command,
+		Prompt:       prompt,
+	}
+	llmMetaCache.Store(path, out)
+	return out
+}
+
+func llmContentSummary(content string) (prompt string, command string) {
+	if content == "" {
+		return "", ""
+	}
+	var body map[string]any
+	if json.Unmarshal([]byte(content), &body) != nil {
+		return "", ""
+	}
+	if msgs, ok := body["messages"].([]any); ok && len(msgs) > 0 {
+		if msg, ok := msgs[0].(map[string]any); ok {
+			if s, ok := msg["content"].(string); ok {
+				prompt = conciseCommandLabel(s)
+			}
+		}
+	}
+	if items, ok := body["content"].([]any); ok {
+		for _, item := range items {
+			m, ok := item.(map[string]any)
+			if !ok || m["type"] != "tool_use" {
+				continue
+			}
+			if input, ok := m["input"].(map[string]any); ok {
+				if s, ok := input["command"].(string); ok {
+					command = s
+					break
+				}
+			}
+		}
+	}
+	return prompt, command
+}
+
 func addProvenanceObjectNodes(db *sql.DB, runID string, add func(GraphLensNode)) error {
 	agentNames := agentNameMap(db, runID)
 	rows, err := db.Query(`SELECT hash, object_type, COALESCE(source_id,''), COALESCE(path,''), COALESCE(size_bytes,0)
-		FROM provenance_objects WHERE run_id = ? AND object_type IN ('artifact')`, runID)
+		FROM provenance_objects WHERE run_id = ? AND object_type IN ('artifact','llm_message')`, runID)
 	if err != nil {
 		return err
 	}
@@ -596,6 +689,38 @@ func addProvenanceObjectNodes(db *sql.DB, runID string, add func(GraphLensNode))
 		var sizeBytes int64
 		if err := rows.Scan(&hash, &objectType, &sourceID, &path, &sizeBytes); err != nil {
 			return err
+		}
+		// The model's actual prompt/completion, captured at the TLS boundary and
+		// stored as content-addressed evidence. Label so the graph reads as a plain
+		// narrative: "LLM request" -> "LLM response" (carrying the tool the model
+		// decided) -> the syscall it caused.
+		if objectType == "llm_message" {
+			meta := llmMessageMeta(path)
+			kind, label := "llm_prompt", "request"
+			if strings.HasPrefix(sourceID, "llm_response/") {
+				kind, label = "llm_completion", "response"
+				if len(meta.ToolCalls) > 0 {
+					label += ": " + strings.Join(meta.ToolCalls, ", ")
+				}
+			}
+			if meta.Model != "" {
+				if kind == "llm_prompt" {
+					label += ": " + meta.Model
+				} else {
+					label += " [" + meta.Model + "]"
+				}
+			}
+			add(GraphLensNode{
+				ID: hash, Kind: kind, Subtype: "llm_message", Label: label,
+				TrustOrigin: "content_addressed",
+				Data: map[string]any{
+					"hash": hash, "source_id": sourceID, "path": path, "model": meta.Model,
+					"tool_decision": meta.ToolCalls, "tools_offered": meta.ToolsOffered,
+					"message_count": meta.MessageCount, "stop_reason": meta.StopReason,
+					"prompt": meta.Prompt, "command": meta.Command,
+				},
+			})
+			continue
 		}
 		// A SendMessage body is objectified for verifiability, but it should read
 		// as an agent-to-agent message, not a generic file artifact. Both messages
@@ -714,7 +839,7 @@ func summaryLensEdges(runID, lens, focus, detail string, nodes map[string]GraphL
 	case "data-flow-taint":
 		return buildDataFlowSummaryEdges(events), true
 	case "agent-intent":
-		return buildAgentIntentGroupEdges(runID, nodes, events), true
+		return buildIntentDAGEdges(runID, nodes, events, edges), true
 	case "trust-origin":
 		return buildTrustOriginGroupEdges(runID, nodes), true
 	case "sandbox-boundary":
@@ -740,6 +865,8 @@ func buildRunOverviewEdges(runID string, nodes map[string]GraphLensNode, events 
 		{"overview/files", fmt.Sprintf("File changes: %d", counts.Files), "files", "", map[string]any{"count": counts.Files, "drilldown_lens": "file-artifact", "drilldown_detail": "summary"}},
 		{"overview/egress", fmt.Sprintf("Egress: %d risky / %d total", counts.RiskyEgress, counts.Egress), "egress", riskIf(counts.RiskyEgress > 0), map[string]any{"total": counts.Egress, "risky": counts.RiskyEgress, "drilldown_lens": "network-egress", "drilldown_detail": "summary"}},
 		{"overview/risks", fmt.Sprintf("Risks: %d high / %d total", counts.HighRisks, counts.Risks), "risks", riskIf(counts.HighRisks > 0), map[string]any{"total": counts.Risks, "high": counts.HighRisks, "drilldown_lens": "security", "drilldown_detail": "summary"}},
+		{"overview/agent_network", fmt.Sprintf("Agent network: %d agents / %d peer msgs", counts.Agents, counts.AgentMessages), "agent_network", "", map[string]any{"agents": counts.Agents, "messages": counts.AgentMessages, "drilldown_lens": "orchestration", "drilldown_detail": "summary"}},
+		{"overview/llm_intent", fmt.Sprintf("LLM intent: %d evidence nodes", counts.LLMIntents), "llm_intent", "", map[string]any{"count": counts.LLMIntents, "drilldown_lens": "agent-intent", "drilldown_detail": "summary"}},
 		{"overview/artifacts", fmt.Sprintf("Artifacts: %d", counts.Artifacts), "artifacts", "", map[string]any{"count": counts.Artifacts, "drilldown_lens": "file-artifact", "drilldown_detail": "summary"}},
 	}
 	out := make([]GraphLensEdge, 0, len(groups))
@@ -767,6 +894,9 @@ type overviewMetricCounts struct {
 	Risks            int
 	HighRisks        int
 	Artifacts        int
+	Agents           int
+	AgentMessages    int
+	LLMIntents       int
 }
 
 func overviewCounts(nodes map[string]GraphLensNode, events map[string]lensEvent, edges []GraphLensEdge) overviewMetricCounts {
@@ -777,14 +907,24 @@ func overviewCounts(nodes map[string]GraphLensNode, events map[string]lensEvent,
 		switch node.Kind {
 		case "tool_call":
 			counts.ToolCalls++
+		case "agent":
+			counts.Agents++
+		case "llm_call":
+			counts.LLMIntents++
 		case "process":
 			counts.Processes++
 		case "runtime_process":
 			counts.RuntimeProcesses++
 		case "file":
 			fileIDs[node.ID] = true
-		case "artifact":
+		case "artifact", "llm_prompt", "llm_completion", "message":
 			counts.Artifacts++
+			if node.Kind == "message" {
+				counts.AgentMessages++
+			}
+			if node.Kind == "llm_prompt" || node.Kind == "llm_completion" {
+				counts.LLMIntents++
+			}
 		case "risk_signal":
 			if isLoopbackPrivateRiskNode(node, events) {
 				continue
@@ -935,7 +1075,7 @@ func buildSecurityRuleEdges(runID string, nodes map[string]GraphLensNode, events
 	nodes[rootID] = GraphLensNode{ID: rootID, Kind: "run", Label: runID, Data: map[string]any{"run_id": runID}}
 	groups := map[string]*ruleGroup{}
 	policyEventIDs := map[string]bool{}
-	for _, node := range nodes {
+	for _, node := range lensNodesInOrder(nodes) {
 		if node.Kind != "policy_decision" {
 			continue
 		}
@@ -961,7 +1101,7 @@ func buildSecurityRuleEdges(runID string, nodes map[string]GraphLensNode, events
 			policyEventIDs[eventID] = true
 		}
 	}
-	for _, ev := range events {
+	for _, ev := range lensEventsInOrder(events) {
 		if policyEventIDs[ev.ID] {
 			continue
 		}
@@ -1017,7 +1157,7 @@ func buildNetworkGroupEdges(runID string, nodes map[string]GraphLensNode, events
 		evidence     []string
 	}
 	groups := map[string]*netGroup{}
-	for _, ev := range events {
+	for _, ev := range lensEventsInOrder(events) {
 		if !isNetworkEvent(ev.Type) {
 			continue
 		}
@@ -1074,21 +1214,192 @@ func buildDataFlowSummaryEdges(events map[string]lensEvent) []GraphLensEdge {
 			sinks = append(sinks, ev)
 		}
 	}
-	sort.Slice(sources, func(i, j int) bool { return sources[i].CreatedAt < sources[j].CreatedAt })
-	sort.Slice(sinks, func(i, j int) bool { return sinks[i].CreatedAt < sinks[j].CreatedAt })
+	sortLensEventsByTime(sources)
+	sortLensEventsByTime(sinks)
 	return deriveAggregatedDataFlowEdges(sources, sinks)
 }
 
-func buildAgentIntentGroupEdges(runID string, nodes map[string]GraphLensNode, events map[string]lensEvent) []GraphLensEdge {
+func dedupStrings(in []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range in {
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
+}
+
+// buildIntentDAGEdges renders the intent lifecycle as a causal DAG over the REAL
+// evidence nodes (no synthetic stage boxes): each node is the actual captured
+// object/event -- so clicking it shows its content -- and the ①②③④ stage is just a
+// label prefixed onto that real node. Flow: run → ① prompt → LLM call → ② response
+// → ③ caused exec(s) → ④ send msg.
+func buildIntentDAGEdges(runID string, nodes map[string]GraphLensNode, events map[string]lensEvent, edges []GraphLensEdge) []GraphLensEdge {
 	rootID := "run/" + runID
 	nodes[rootID] = GraphLensNode{ID: rootID, Kind: "run", Label: runID, Data: map[string]any{"run_id": runID}}
+	var promptObj, respObj, llmCall string
+	var caused, msgs []string
+	for _, e := range edges {
+		switch e.EdgeType {
+		case "llm_request":
+			promptObj, llmCall = e.ToID, e.FromID
+		case "llm_response":
+			respObj, llmCall = e.ToID, e.FromID
+		case "llm_caused":
+			caused = append(caused, e.ToID)
+		case "agent_message":
+			if n, ok := nodes[e.ToID]; ok && (n.Kind == "message" || n.Kind == "relay") {
+				msgs = append(msgs, e.ToID)
+			}
+		}
+	}
+	if promptObj == "" && respObj == "" {
+		// No captured LLM traffic to build a DAG from -> fall back to the
+		// per-tool-call execution-scope aggregation so the view isn't empty.
+		return buildAgentIntentGroupEdges(runID, nodes, events, edges)
+	}
+	caused = dedupStrings(caused)
+	msgs = dedupStrings(msgs)
+	relabel := func(id, prefix string) {
+		if n, ok := nodes[id]; ok && !strings.HasPrefix(n.Label, prefix) {
+			n.Label = prefix + n.Label
+			nodes[id] = n
+		}
+	}
+	relabel(promptObj, "① ")
+	relabel(respObj, "② ")
+	for _, c := range caused {
+		relabel(c, "③ ")
+	}
+	out := []GraphLensEdge{}
+	add := func(id, from, to, et string) {
+		if from == "" || to == "" {
+			return
+		}
+		out = append(out, GraphLensEdge{ID: id, FromID: from, ToID: to, EdgeType: et})
+	}
+	add("dag-run-prompt", rootID, promptObj, "prompt_check")
+	add("dag-prompt-call", promptObj, llmCall, "sends")
+	add("dag-call-resp", llmCall, respObj, "responds")
+	for i, c := range caused {
+		add(fmt.Sprintf("dag-caused-%d", i), respObj, c, "caused")
+	}
+	src := respObj
+	if len(caused) > 0 {
+		src = caused[0]
+	}
+	for i, m := range capStringSlice(msgs, 4) {
+		add(fmt.Sprintf("dag-send-%d", i), src, m, "send_msg")
+	}
+	// Blocked intents: the gate-denied Attempt-A exfil and the model refusals.
+	// Group each under the agent that proposed it (run → agent → ⊘ blocked …) so
+	// the graph tells the whole story -- what was STOPPED at the intent layer, and
+	// by which agent -- not only what ran.
+	toolAgent := map[string]string{} // tool_call node -> its agent node
+	for _, e := range edges {
+		if e.EdgeType == "agent_tool_call" {
+			toolAgent[e.ToID] = e.FromID
+		}
+	}
+	var refused []string
+	for id, n := range nodes {
+		if n.Risk == "refused" {
+			refused = append(refused, id)
+		}
+	}
+	sort.Strings(refused)
+	agentLinked := map[string]bool{}
+	for _, id := range refused {
+		if n := nodes[id]; !strings.HasPrefix(n.Label, "⊘") {
+			n.Label = "⊘ blocked: " + n.Label
+			nodes[id] = n
+		}
+		parent := rootID
+		if a := toolAgent[id]; a != "" {
+			parent = a
+			if !agentLinked[a] {
+				agentLinked[a] = true
+				add("dag-run-agent-"+safeGraphID(a), rootID, a, "attempted")
+			}
+		}
+		add("dag-refused-"+safeGraphID(id), parent, id, "refused_intent")
+	}
+	return out
+}
+
+func buildAgentIntentGroupEdges(runID string, nodes map[string]GraphLensNode, events map[string]lensEvent, edges []GraphLensEdge) []GraphLensEdge {
+	rootID := "run/" + runID
+	nodes[rootID] = GraphLensNode{ID: rootID, Kind: "run", Label: runID, Data: map[string]any{"run_id": runID}}
+	out := []GraphLensEdge{}
+
+	if hookEdges := buildStandardHookIntentEdges(rootID, nodes, events, edges); len(hookEdges) > 0 {
+		return hookEdges
+	}
+
+	// Surface the model's action as a readable lifecycle spine (not aggregated),
+	// so the summary reads as a plain sequence:
+	//   ① prompt check → ② before tool call (decided) → ③ after tool call (caused
+	//   syscall) → ④ send msg.
+	var promptID, completionID string
+	var causedIDs, msgIDs []string
+	for _, e := range edges {
+		switch e.EdgeType {
+		case "llm_request":
+			promptID = e.ToID
+		case "llm_response":
+			completionID = e.ToID
+		case "llm_caused":
+			causedIDs = append(causedIDs, e.ToID)
+		case "agent_message":
+			// ④ send msg = the SendMessage hook: peer (sub->sub, e.g. alice->bob)
+			// and orchestrator delegation (relay).
+			if n, ok := nodes[e.ToID]; ok && (n.Kind == "message" || n.Kind == "relay") {
+				msgIDs = append(msgIDs, e.ToID)
+			}
+		}
+	}
+	causedIDs = dedupStrings(causedIDs)
+	msgIDs = dedupStrings(msgIDs)
+	addLC := func(from, to, stage string) {
+		if from == "" || to == "" {
+			return
+		}
+		out = append(out, GraphLensEdge{ID: "lc-" + stage + "-" + safeGraphID(to), FromID: from, ToID: to, EdgeType: stage})
+	}
+	if promptID != "" || completionID != "" {
+		prev := rootID
+		addLC(prev, promptID, "lc_prompt")
+		if promptID != "" {
+			prev = promptID
+		}
+		addLC(prev, completionID, "lc_before_tool")
+		if completionID != "" {
+			prev = completionID
+		}
+		for _, c := range causedIDs {
+			addLC(prev, c, "lc_after_tool")
+		}
+		if len(causedIDs) > 0 {
+			prev = causedIDs[0]
+		}
+		for _, m := range capStringSlice(msgIDs, 3) {
+			addLC(prev, m, "lc_send_msg")
+		}
+		// With an explicit lifecycle spine, skip the per-tool-call "execution scope"
+		// aggregation so the summary reads as the clean route -- not the old blob.
+		return out
+	}
+
 	type intentGroup struct {
 		toolCallID string
 		events     map[string]int
 		evidence   []string
 	}
 	groups := map[string]*intentGroup{}
-	for _, ev := range events {
+	for _, ev := range lensEventsInOrder(events) {
 		key := fallback(ev.ToolCallID, "unscoped")
 		group := groups[key]
 		if group == nil {
@@ -1099,7 +1410,6 @@ func buildAgentIntentGroupEdges(runID string, nodes map[string]GraphLensNode, ev
 		group.evidence = append(group.evidence, ev.NodeID)
 	}
 	keys := sortedStringKeys(groups)
-	out := []GraphLensEdge{}
 	for _, key := range keys {
 		group := groups[key]
 		if group.toolCallID != "" {
@@ -1121,6 +1431,260 @@ func buildAgentIntentGroupEdges(runID string, nodes map[string]GraphLensNode, ev
 	return out
 }
 
+func buildStandardHookIntentEdges(rootID string, nodes map[string]GraphLensNode, events map[string]lensEvent, edges []GraphLensEdge) []GraphLensEdge {
+	var requestObj, responseObj, llmCall string
+	caused := []string{}
+	msgs := []string{}
+	for _, e := range edges {
+		switch e.EdgeType {
+		case "llm_request":
+			llmCall = e.FromID
+			requestObj = e.ToID
+		case "llm_response":
+			if llmCall == "" {
+				llmCall = e.FromID
+			}
+			responseObj = e.ToID
+		case "llm_caused":
+			caused = append(caused, e.ToID)
+		case "agent_message":
+			if n, ok := nodes[e.ToID]; ok && (n.Kind == "message" || n.Kind == "relay") {
+				msgs = append(msgs, e.ToID)
+			}
+		}
+	}
+	if requestObj == "" && responseObj == "" && llmCall == "" {
+		return nil
+	}
+	if llmCall == "" {
+		llmCall = "llm_call/" + safeGraphID(firstString([]string{requestObj, responseObj}))
+	}
+	nodes[llmCall] = GraphLensNode{ID: llmCall, Kind: "llm_call", Label: "LLM call", TrustOrigin: "content_addressed"}
+	requestNode := nodes[requestObj]
+	responseNode := nodes[responseObj]
+	reqPrompt, _ := requestNode.Data["prompt"].(string)
+	reqModel, _ := requestNode.Data["model"].(string)
+	respCommand, _ := responseNode.Data["command"].(string)
+	respModel, _ := responseNode.Data["model"].(string)
+	respTools := anyStringSlice(responseNode.Data["tool_decision"])
+
+	stagePrompt := "intent_stage/prompt_check"
+	stageBefore := "intent_stage/before_tool_call"
+	stageAfter := "intent_stage/after_tool_call"
+	stageSend := "intent_stage/send_msg"
+	promptLabel := "① prompt check"
+	if respCommand != "" {
+		promptLabel = "① prompt: " + conciseIntentLabel(respCommand)
+	}
+	nodes[stagePrompt] = GraphLensNode{ID: stagePrompt, Kind: "intent_stage", Subtype: "prompt_check", Label: promptLabel, TrustOrigin: "summary", Data: map[string]any{"prompt": reqPrompt, "model": reqModel, "intended_command": respCommand}}
+	beforeLabel := "② decide"
+	if len(respTools) > 0 {
+		beforeLabel += ": " + strings.Join(respTools, ", ")
+	}
+	nodes[stageBefore] = GraphLensNode{ID: stageBefore, Kind: "intent_stage", Subtype: "before_tool_call", Label: beforeLabel, TrustOrigin: "summary", Data: map[string]any{"tool_decision": respTools, "command": respCommand, "model": respModel}}
+	nodes[stageAfter] = GraphLensNode{ID: stageAfter, Kind: "intent_stage", Subtype: "after_tool_call", Label: "③ observe runtime", TrustOrigin: "summary", Data: map[string]any{"command": respCommand}}
+	nodes[stageSend] = GraphLensNode{ID: stageSend, Kind: "intent_stage", Subtype: "send_msg", Label: fmt.Sprintf("④ send msg: %d peer edges", len(dedupStrings(msgs))), TrustOrigin: "summary", Data: map[string]any{"message_edges": len(dedupStrings(msgs))}}
+
+	if n, ok := nodes[requestObj]; ok {
+		n.Label = "LLM request"
+		if reqModel != "" {
+			n.Label += " [" + reqModel + "]"
+		}
+		nodes[requestObj] = n
+	}
+	if n, ok := nodes[responseObj]; ok {
+		n.Label = "LLM response"
+		if len(respTools) > 0 {
+			n.Label += " · " + strings.Join(respTools, ", ")
+		}
+		if respModel != "" {
+			n.Label += " [" + respModel + "]"
+		}
+		nodes[responseObj] = n
+	}
+
+	out := []GraphLensEdge{}
+	add := func(id, from, to, typ string) {
+		if from == "" || to == "" {
+			return
+		}
+		out = append(out, GraphLensEdge{ID: id, FromID: from, ToID: to, EdgeType: typ})
+	}
+	add("intent-root-prompt", rootID, stagePrompt, "intent_stage")
+	add("intent-prompt-request", stagePrompt, requestObj, "prompt_check")
+	add("intent-request-call", requestObj, llmCall, "llm_request")
+	add("intent-call-before", llmCall, stageBefore, "intent_stage")
+	add("intent-before-response", stageBefore, responseObj, "llm_response")
+	add("intent-response-after", responseObj, stageAfter, "intent_stage")
+
+	if groupID := addAfterToolAggregateNode(nodes, events); groupID != "" {
+		add("intent-after-runtime-group", stageAfter, groupID, "after_tool_call_summary")
+	}
+	for i, id := range pickAfterToolActions(caused, events, 3) {
+		if ev, ok := events[id]; ok {
+			if n, ok := nodes[id]; ok {
+				if cmd := payloadString(ev.Payload, "command", "cmdline", "comm"); cmd != "" {
+					n.Label = conciseCommandLabel(cmd)
+					nodes[id] = n
+				}
+			}
+		}
+		add(fmt.Sprintf("intent-after-exec-%d", i), stageAfter, id, "after_tool_call")
+	}
+	selectedMsgs := capStringSlice(dedupStrings(msgs), 3)
+	if len(selectedMsgs) > 0 {
+		add("intent-after-send", stageAfter, stageSend, "intent_stage")
+		for i, id := range selectedMsgs {
+			add(fmt.Sprintf("intent-send-msg-%d", i), stageSend, id, "send_msg")
+		}
+	}
+	return out
+}
+
+func addAfterToolAggregateNode(nodes map[string]GraphLensNode, events map[string]lensEvent) string {
+	counts := map[string]int{}
+	evidence := []string{}
+	for _, ev := range lensEventsInOrder(events) {
+		switch ev.Type {
+		case "execve":
+			if !isObserverNoiseCommand(strings.ToLower(payloadString(ev.Payload, "command", "cmdline", "comm"))) {
+				counts["execve"]++
+				evidence = append(evidence, ev.NodeID)
+			}
+		case "process_observed":
+			counts["process"]++
+			evidence = append(evidence, ev.NodeID)
+		case "secret_path", "metadata_ip", "private_cidr":
+			counts["risk"]++
+			evidence = append(evidence, ev.NodeID)
+		}
+	}
+	total := counts["execve"] + counts["process"] + counts["risk"]
+	if total == 0 {
+		return ""
+	}
+	id := "event_burst/after_tool_runtime"
+	label := fmt.Sprintf("%d exec / %d proc / %d risk", counts["execve"], counts["process"], counts["risk"])
+	nodes[id] = GraphLensNode{
+		ID:          id,
+		Kind:        "event_burst",
+		Subtype:     "after_tool_runtime",
+		Label:       label,
+		Risk:        riskIf(counts["risk"] > 0),
+		TrustOrigin: "summary",
+		Data: map[string]any{
+			"execve": counts["execve"], "process": counts["process"], "risk": counts["risk"],
+			"evidence_refs": capStringSlice(evidence, 32), "omitted_evidence": maxInt(0, len(evidence)-32),
+			"drilldown_lens": "agent-intent", "drilldown_detail": "raw", "drilldown_focus": firstString(evidence),
+		},
+	}
+	return id
+}
+
+func pickAfterToolActions(caused []string, events map[string]lensEvent, limit int) []string {
+	setup := []string{}
+	risks := []string{}
+	preferred := []string{}
+	fallbacks := []string{}
+	seen := map[string]bool{}
+	for _, ev := range lensEventsInOrder(events) {
+		cmd := strings.ToLower(payloadString(ev.Payload, "command", "cmdline", "comm"))
+		if (ev.Type == "execve" || ev.Type == "process_observed") && strings.Contains(cmd, "setup.py") {
+			setup = append(setup, ev.NodeID)
+		}
+		if ev.Type == "secret_path" || ev.Type == "metadata_ip" {
+			risks = append(risks, ev.NodeID)
+		}
+	}
+	for _, id := range caused {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		ev, ok := events[id]
+		if !ok || ev.Type != "execve" {
+			continue
+		}
+		cmd := strings.ToLower(payloadString(ev.Payload, "command", "cmdline", "comm"))
+		if isObserverNoiseCommand(cmd) {
+			continue
+		}
+		if strings.Contains(cmd, "setup.py") || strings.Contains(cmd, "install") || strings.Contains(cmd, "python3") || strings.Contains(cmd, "claude") {
+			preferred = append(preferred, id)
+		} else {
+			fallbacks = append(fallbacks, id)
+		}
+	}
+	out := append(dedupStrings(setup), dedupStrings(risks)...)
+	out = append(out, preferred...)
+	out = append(out, fallbacks...)
+	return capStringSlice(out, limit)
+}
+
+func isObserverNoiseCommand(cmd string) bool {
+	for _, noise := range []string{
+		"ps -ao pid=,ppid=,command=",
+		"ps aux",
+		"grep -v grep",
+		"agentprovenance/demo/shared/llm-intent-curl.sh",
+		"head -c ",
+		"/usr/bin/rm",
+		"mktemp",
+	} {
+		if strings.Contains(cmd, noise) {
+			return true
+		}
+	}
+	return false
+}
+
+func ensurePrefix(label, prefix string) string {
+	if strings.HasPrefix(label, prefix) {
+		return label
+	}
+	if label == "" {
+		return prefix
+	}
+	if strings.Contains(label, "[") {
+		return prefix + " " + label[strings.Index(label, "["):]
+	}
+	return prefix + " · " + label
+}
+
+func conciseCommandLabel(cmd string) string {
+	cmd = strings.TrimSpace(cmd)
+	cmd = strings.Join(strings.Fields(cmd), " ")
+	if len(cmd) <= 56 {
+		return cmd
+	}
+	return cmd[:53] + "..."
+}
+
+func conciseIntentLabel(cmd string) string {
+	cmd = conciseCommandLabel(cmd)
+	for _, prefix := range []string{"python3 ", "python ", "/bin/bash -c "} {
+		cmd = strings.TrimPrefix(cmd, prefix)
+	}
+	return cmd
+}
+
+func anyStringSlice(v any) []string {
+	switch x := v.(type) {
+	case []string:
+		return x
+	case []any:
+		out := make([]string, 0, len(x))
+		for _, item := range x {
+			if s, ok := item.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
 func buildTrustOriginGroupEdges(runID string, nodes map[string]GraphLensNode) []GraphLensEdge {
 	rootID := "run/" + runID
 	nodes[rootID] = GraphLensNode{ID: rootID, Kind: "run", Label: runID, Data: map[string]any{"run_id": runID}}
@@ -1130,8 +1694,8 @@ func buildTrustOriginGroupEdges(runID string, nodes map[string]GraphLensNode) []
 		evidence []string
 	}
 	groups := map[string]*originGroup{}
-	for id, node := range nodes {
-		if id == rootID || node.TrustOrigin == "" || node.TrustOrigin == "summary" {
+	for _, node := range lensNodesInOrder(nodes) {
+		if node.ID == rootID || node.TrustOrigin == "" || node.TrustOrigin == "summary" {
 			continue
 		}
 		key := node.TrustOrigin
@@ -1142,7 +1706,7 @@ func buildTrustOriginGroupEdges(runID string, nodes map[string]GraphLensNode) []
 		}
 		group.count++
 		group.kinds[node.Kind]++
-		group.evidence = append(group.evidence, id)
+		group.evidence = append(group.evidence, node.ID)
 	}
 	keys := sortedStringKeys(groups)
 	out := []GraphLensEdge{}
@@ -1168,7 +1732,7 @@ func buildSandboxBoundaryGroupEdges(runID string, nodes map[string]GraphLensNode
 		evidence []string
 	}
 	groups := map[string]*boundaryGroup{}
-	for _, ev := range events {
+	for _, ev := range lensEventsInOrder(events) {
 		if !isBoundaryEvent(ev.Type) || (ev.Type == "private_cidr" && isLoopbackDestination(ev.Destination)) {
 			continue
 		}
@@ -1183,7 +1747,7 @@ func buildSandboxBoundaryGroupEdges(runID string, nodes map[string]GraphLensNode
 		}
 		group.evidence = append(group.evidence, ev.NodeID)
 	}
-	for id, node := range nodes {
+	for _, node := range lensNodesInOrder(nodes) {
 		if node.Kind != "snapshot" && node.Kind != "attempt" {
 			continue
 		}
@@ -1194,7 +1758,7 @@ func buildSandboxBoundaryGroupEdges(runID string, nodes map[string]GraphLensNode
 			groups[key] = group
 		}
 		group.count++
-		group.evidence = append(group.evidence, id)
+		group.evidence = append(group.evidence, node.ID)
 	}
 	keys := sortedStringKeys(groups)
 	out := []GraphLensEdge{}
@@ -1290,7 +1854,17 @@ func edgeMatchesLens(lens, detail string, edge GraphLensEdge, nodes map[string]G
 	case "data-flow-taint":
 		return edge.Derived || isSourceEvent(fromEvent.Type, fromEvent.Path) || isSourceEvent(toEvent.Type, toEvent.Path) || isTaintSinkEvent(fromEvent) || isTaintSinkEvent(toEvent)
 	case "agent-intent":
-		return strings.Contains(edge.EdgeType, "llm_") || from.Kind == "tool_call" || to.Kind == "tool_call" || strings.Contains(edge.EdgeType, "tool_call")
+		// The LLM-story lens: the llm_call chain (request/response/decided/caused)
+		// and each agent's tool calls. Excludes (a) the broad ingest-time
+		// llm_intent_caused, which links the response to every action in the window,
+		// and (b) the runtime_* event/process plumbing -- both drown the story and
+		// both stay in the DB + default/raw lens for full observability.
+		if strings.HasPrefix(edge.EdgeType, "runtime_") {
+			return false
+		}
+		return (strings.Contains(edge.EdgeType, "llm_") && edge.EdgeType != "llm_intent_caused") ||
+			strings.HasPrefix(edge.EdgeType, "agent_") ||
+			from.Kind == "tool_call" || to.Kind == "tool_call"
 	case "orchestration":
 		// Multi-agent structure: delegation (agent_spawn), peer influence
 		// (agent_message + the objectified body), and each agent's tool calls
@@ -1328,7 +1902,12 @@ func isStructuralEdge(edgeType string) bool {
 	case "runtime_tool_call_process", "runtime_tool_call_file",
 		"runtime_process_file", "runtime_attempt_file",
 		"runtime_event_policy_decision", "policy_decision_risk_signal", "risk_signal_response_action",
-		"llm_call", "llm_intent_caused", "attempt_snapshot", "snapshot_parent", "promotion_winner",
+		// llm_intent_caused (tls_read event -> syscall) is deliberately NOT rendered:
+		// once materialized, MaterializeLLMCalls lifts the same link onto the
+		// llm_call node as llm_caused, so rendering both would double every
+		// intent->action edge.
+		"llm_call", "llm_request", "llm_response", "llm_caused",
+		"attempt_snapshot", "snapshot_parent", "promotion_winner",
 		"agent_spawn", "agent_message", "agent_tool_call", "agent_syscall":
 		return true
 	default:
@@ -1339,7 +1918,7 @@ func isStructuralEdge(edgeType string) bool {
 
 func isGraphValueNode(node GraphLensNode) bool {
 	switch node.Kind {
-	case "tool_call", "process", "artifact", "file", "policy_decision", "risk_signal", "response_action", "attempt", "snapshot", "agent", "message", "relay":
+	case "tool_call", "process", "artifact", "file", "policy_decision", "risk_signal", "response_action", "attempt", "snapshot", "agent", "message", "relay", "llm_call", "llm_prompt", "llm_completion":
 		return true
 	default:
 		return false
@@ -1375,8 +1954,8 @@ func deriveGraphLensEdges(lens string, events map[string]lensEvent, detail strin
 			sinks = append(sinks, ev)
 		}
 	}
-	sort.Slice(sources, func(i, j int) bool { return sources[i].CreatedAt < sources[j].CreatedAt })
-	sort.Slice(sinks, func(i, j int) bool { return sinks[i].CreatedAt < sinks[j].CreatedAt })
+	sortLensEventsByTime(sources)
+	sortLensEventsByTime(sinks)
 	if detail == "summary" {
 		return deriveAggregatedDataFlowEdges(sources, sinks)
 	}
@@ -1655,7 +2234,7 @@ func graphLensRules(lens string) []string {
 	case "data-flow-taint":
 		return []string{"secret/file source events", "network sink events", "derived possible_sensitive_data_flow"}
 	case "agent-intent":
-		return []string{"llm_call", "llm_intent_caused", "tool_call edges"}
+		return []string{"causal DAG over real evidence: prompt → response → caused exec → send msg"}
 	case "orchestration":
 		return []string{"agent_spawn (delegation)", "agent_message (peer, body objectified)", "each agent's tool calls incl. refused proposals"}
 	case "trust-origin":
@@ -1702,6 +2281,8 @@ func inferLensNode(id string) GraphLensNode {
 		return GraphLensNode{ID: id, Kind: "file", Label: strings.TrimPrefix(id, "workspace_file/"), TrustOrigin: "workspace_state"}
 	case strings.HasPrefix(id, "agent/"):
 		return GraphLensNode{ID: id, Kind: "agent", Label: strings.TrimPrefix(id, "agent/"), TrustOrigin: "agent_asserted"}
+	case strings.HasPrefix(id, "llm_call/"):
+		return GraphLensNode{ID: id, Kind: "llm_call", Label: "LLM call", TrustOrigin: "content_addressed"}
 	case strings.HasPrefix(id, "egress_group/"):
 		return GraphLensNode{ID: id, Kind: "egress_group", Subtype: "risky_egress", Label: "risky egress group", Risk: "high", TrustOrigin: "derived_summary"}
 	case strings.HasPrefix(id, "policy_decision/"):
@@ -1891,10 +2472,26 @@ func lensEventLabel(ev lensEvent) string {
 		}
 	case "execve":
 		if c := payloadString(ev.Payload, "command", "cmdline", "comm"); c != "" {
-			return shortLabel(c, ev.Type)
+			return shortLabel(cleanExecCommand(c), ev.Type)
 		}
 	}
 	return ev.Type
+}
+
+// cleanExecCommand strips the AgentProvenance record-wrapper prefix the sensor
+// captures ahead of the real argv (".../agentprovenance <scenario> <real cmd…>"),
+// so an execve reads as "python3 ../pysnake-helper/setup" instead of the jumbled
+// wrapper+argv concatenation.
+func cleanExecCommand(c string) string {
+	toks := strings.Fields(c)
+	for i, t := range toks {
+		if strings.HasSuffix(t, "/agentprovenance") || t == "agentprovenance" {
+			if i+2 < len(toks) { // skip the binary + the scenario arg
+				return strings.Join(toks[i+2:], " ")
+			}
+		}
+	}
+	return c
 }
 
 // shortPathTail returns the last two path segments (".aws/credentials"), enough to
@@ -1951,6 +2548,40 @@ func sortedStringKeys[T any](values map[string]T) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// lensEventsInOrder returns the events sorted by (created_at, node id). Summary
+// builders must iterate events through this instead of ranging the map: they
+// accumulate evidence_refs, truncate to a cap, and pick drilldown focuses, so
+// Go's random map order would leak into the rendered manifest.
+func lensEventsInOrder(events map[string]lensEvent) []lensEvent {
+	out := make([]lensEvent, 0, len(events))
+	for _, ev := range events {
+		out = append(out, ev)
+	}
+	sortLensEventsByTime(out)
+	return out
+}
+
+// lensNodesInOrder is lensEventsInOrder's counterpart for the node map.
+func lensNodesInOrder(nodes map[string]GraphLensNode) []GraphLensNode {
+	out := make([]GraphLensNode, 0, len(nodes))
+	for _, node := range nodes {
+		out = append(out, node)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// sortLensEventsByTime sorts in place by (created_at, node id); the node-id
+// tiebreaker keeps derived data-flow pairing stable when timestamps collide.
+func sortLensEventsByTime(events []lensEvent) {
+	sort.Slice(events, func(i, j int) bool {
+		if events[i].CreatedAt != events[j].CreatedAt {
+			return events[i].CreatedAt < events[j].CreatedAt
+		}
+		return events[i].NodeID < events[j].NodeID
+	})
 }
 
 func capStringSlice(values []string, limit int) []string {

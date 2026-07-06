@@ -63,7 +63,8 @@ timeout 180 bash /tmp/recon-run.sh > /tmp/recon.out 2>&1
 echo "recon rc=$?  hooklog lines after A: $(wc -l < /tmp/hooklog2.jsonl)"
 
 echo "== Attempt B: proven alice/bob team under sensor+record (real exfil) =="
-nohup "$BIN" --data-dir "$DATA" sensor stream > /tmp/double-sensor.log 2>&1 &
+SSL_LIB="${AGENTPROV_SSL_LIB:-/lib/aarch64-linux-gnu/libssl.so.3}"
+nohup env AGENTPROV_TLS_CAPTURE_BODY=1 "$BIN" --data-dir "$DATA" sensor stream --ssl-lib "$SSL_LIB" > /tmp/double-sensor.log 2>&1 &
 sleep 3
 AGENTPROV_CGROUP_PARENT=$PARENT timeout 300 "$BIN" --data-dir "$DATA" record --run "$RUN" --name doubledemo --workdir ~/team-ws/workspace -- bash /tmp/team-run.sh > /tmp/double-agent.out 2>&1
 echo "record rc=$?  hooklog lines after B: $(wc -l < /tmp/hooklog2.jsonl)"
@@ -71,6 +72,8 @@ sleep 2; pkill -INT -f "sensor stream"; sleep 1
 
 echo "== fold BOTH attempts' hooks into ONE graph + attribute syscalls =="
 "$BIN" --data-dir "$DATA" hooks bridge --run "$RUN" --file /tmp/hooklog2.jsonl
+echo "== materialize LLM calls into the signed graph =="
+"$BIN" --data-dir "$DATA" graph materialize-llm --run "$RUN" 2>&1 | head -1
 
 echo "== blame-chain checks =="
 python3 - <<PY

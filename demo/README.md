@@ -1,8 +1,15 @@
 # AgentProvenance demos — a progressive story
 
-Two demos, read simplest → hardest. Each is a **real capture on genuine kernel
-events**, exported as a signed, verifiable bundle you can replay locally (no VM
-needed). Start with Stage 1.
+Three stages, read simplest → hardest. Each is a **real capture on genuine
+kernel events**, exported as a signed, verifiable bundle you can replay locally
+(no VM needed). Start with Stage 1.
+
+Both capture harnesses fire one real model/tool-intent request through
+[`shared/llm-intent-curl.sh`](shared/llm-intent-curl.sh) (curl/OpenSSL, secrets
+never in the body), so the sensor's full-TLS-body capture puts the **model call
+that decided the poisoned install** into the bundle: an `llm_call` node whose
+`llm_caused` edge points at the very command that ran, rendered by the
+agent-intent DAG lens.
 
 ## Stage 1 — [`snake-supply-chain/`](snake-supply-chain/) · one agent
 
@@ -30,6 +37,19 @@ full arc:
   *try-the-obvious-way → get-flagged → pivot-to-stealth*.
 
 Bundle: `run-double-attempt`.
+
+## Stage 3 — [`llm-judge/`](llm-judge/) · an external LLM as security judge
+
+The evidence graph is not only for humans: **any external LLM can be wired in
+as a security judge** over a captured run. `python3 llm-judge/judge.py run`
+exports the run's *full* trajectory (every telemetry event, no type filter,
+chunk/map-reduced past the context budget), has the model deliver a
+structured verdict, and imports the verdict back as graph-referenced
+signals. The judge itself runs under `agentprov record`, and its own LLM
+requests/responses become `llm_call` nodes in the judge's provenance run —
+**the judge is itself audited**. Works with any Anthropic- or
+OpenAI-protocol endpoint (Claude, DeepSeek, Qwen, local Ollama/vLLM, ...),
+and degrades to a keyless offline fixture so the pipeline always completes.
 
 ## Why this order
 

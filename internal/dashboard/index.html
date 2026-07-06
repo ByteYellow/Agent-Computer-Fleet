@@ -61,6 +61,24 @@
   .zoombar{display:flex;gap:5px;margin-left:6px}
   .zoombar button{width:auto;min-width:28px;padding:0 8px}
   #dag{width:100%;overflow:auto;background-color:#fbfbfd;background-image:radial-gradient(rgba(0,0,0,.05) 1px,transparent 1px);background-size:22px 22px}
+  .intentflow{padding:18px;background:#fbfbfd;overflow:hidden}
+  .intentsteps{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;align-items:stretch}
+  .intentcard{border:1px solid var(--line);background:#fff;border-radius:14px;padding:13px 14px;min-height:118px;cursor:pointer;box-shadow:0 1px 1px rgba(0,0,0,.02);transition:border-color .12s,box-shadow .12s,transform .12s}
+  .intentcard:hover{border-color:rgba(0,113,227,.35);box-shadow:0 10px 28px -22px rgba(0,113,227,.6);transform:translateY(-1px)}
+  .intentcard.on{outline:2px solid rgba(0,113,227,.22);border-color:rgba(0,113,227,.5)}
+  .intentcard .num{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:8px;background:rgba(48,176,199,.12);color:#007489;font-weight:750;font-size:12px;margin-bottom:9px}
+  .intentcard .ttl{font-size:13.5px;font-weight:700;letter-spacing:-.02em;margin-bottom:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .intentcard .desc{font-size:12px;color:var(--mut);line-height:1.42;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+  .intentmeta{margin-top:8px;display:flex;gap:6px;flex-wrap:wrap}
+  .intentmeta span{font-size:10.5px;border:1px solid var(--line);background:#f7f7fa;color:#54545a;border-radius:999px;padding:2px 7px;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .intentarrow{display:none}
+  .evidencechips{margin-top:13px;border-top:1px solid var(--line);padding-top:12px;display:flex;flex-wrap:wrap;gap:7px}
+  .evchip{border:1px solid var(--line);background:#fff;border-radius:999px;padding:5px 9px;font-size:11.5px;color:var(--tx);cursor:pointer;max-width:260px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .evchip:hover{border-color:rgba(0,113,227,.35);color:var(--acc)}
+  .evchip.risk{border-color:rgba(255,59,48,.24);color:#d70015;background:rgba(255,59,48,.06)}
+  .evchip.msg{border-color:rgba(192,38,211,.22);color:#86198f;background:rgba(192,38,211,.06)}
+  @media(max-width:1100px){.intentsteps{grid-template-columns:repeat(2,minmax(0,1fr))}}
+  @media(max-width:720px){.intentsteps{grid-template-columns:1fr}}
   .legend{display:flex;gap:14px;flex-wrap:wrap;padding:12px 20px;border-top:1px solid var(--line);font-size:11.5px;color:var(--mut)}
   .legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px;vertical-align:-1px}
   .legend i.dash{width:16px;height:0;border-radius:0;border-top:2px dashed var(--derived);vertical-align:2px}
@@ -81,7 +99,8 @@
   .expandbar button.on{border-color:var(--acc);background:rgba(0,113,227,.1);color:var(--acc);font-weight:650}
   .preview .meta{font-size:11px;color:var(--mut);font-family:ui-monospace,monospace;margin-bottom:7px;display:flex;gap:9px;flex-wrap:wrap;align-items:center}
   .preview .redacted{color:#b25e00;background:rgba(255,159,10,.16);font-size:10px;font-weight:700;padding:2px 7px;border-radius:99px}
-  .preview pre{margin:0;max-height:300px;overflow:auto;background:#1d1d1f;color:#e8e8ed;border-radius:11px;padding:13px 15px;font:11.5px/1.55 ui-monospace,SFMono-Regular,monospace;white-space:pre;tab-size:2}
+  .preview pre{margin:0;max-height:60vh;overflow:auto;background:#1d1d1f;color:#e8e8ed;border-radius:11px;padding:13px 15px;font:11.5px/1.55 ui-monospace,SFMono-Regular,monospace;white-space:pre-wrap;overflow-wrap:anywhere;tab-size:2}
+  .preview pre.diff{white-space:pre}
   .preview pre.diff .add{color:#41d877}
   .preview pre.diff .del{color:#ff6b6b}
   .preview pre.diff .hunk{color:#5ea0ff}
@@ -313,13 +332,18 @@ const KIND_COLOR={
   artifact:'var(--artifact)', file:'var(--file)',
   egress_group:'var(--egress)',
   run:'var(--acc)', overview_group:'var(--group)', process_group:'var(--process)', event_burst:'var(--event)', file_group:'var(--file)', risk_group:'var(--risk)',
-  intent_group:'var(--intent)', trust_group:'var(--group)', boundary_group:'var(--snapshot)',
+  intent_group:'var(--intent)', intent_stage:'var(--intent)', trust_group:'var(--group)', boundary_group:'var(--snapshot)',
   policy_decision:'var(--policy)', policy:'var(--policy)',
   risk_signal:'var(--risk)', risk:'var(--risk)',
   response_action:'var(--response)', response:'var(--response)',
   snapshot:'var(--snapshot)', attempt:'var(--snapshot)', rollout:'var(--intent)', session:'var(--toolcall)',
-  agent:'var(--acc)', message:'#c026d3', relay:'#0891b2', refused:'var(--risk)', unknown:'#9a9aa0', other:'#64748b'};
+  agent:'var(--acc)', message:'#c026d3', relay:'#0891b2', refused:'var(--risk)',
+  llm_call:'#6366f1', llm_prompt:'#818cf8', llm_completion:'#a78bfa', unknown:'#9a9aa0', other:'#64748b'};
 const EDGE_LABEL={llm_call:'request→response',llm_intent_caused:'intent→action',
+  llm_request:'request',llm_response:'response',llm_caused:'caused syscall',llm_body:'captured body',
+  prompt_check:'prompt check',before_tool_call:'before tool call',after_tool_call:'after tool call',after_tool_call_summary:'summary',send_msg:'send msg',intent_stage:'stage',
+  lc_prompt:'① prompt check',lc_before_tool:'② before tool call',lc_after_tool:'③ after tool call',lc_send_msg:'④ send msg',
+  prompt_check:'① prompt',sends:'sends',responds:'responds',caused:'caused',send_msg:'④ send msg',refused_intent:'⊘ blocked',attempted:'attempted',
   agent_spawn:'spawns (delegation)',agent_message:'sends (peer)',agent_tool_call:'runs',agent_syscall:'→ syscall',
   runtime_event_policy_decision:'→ policy',policy_decision_risk_signal:'→ risk',
   risk_signal_response_action:'→ response',runtime_tool_call_event:'tool→event',
@@ -332,7 +356,7 @@ const EDGE_LABEL={llm_call:'request→response',llm_intent_caused:'intent→acti
 const LENS_LABEL={'default':'Default · causality','security':'Security · risk/policy/response',
   'process':'Process · tree + runtime','file-artifact':'File / Artifact · lineage',
   'network-egress':'Network · egress','data-flow-taint':'Data-flow · taint (secret→sink)',
-  'agent-intent':'Agent intent · prompt→action','orchestration':'Orchestration · agents (delegation/peer)','trust-origin':'Trust · origin','sandbox-boundary':'Sandbox · boundary'};
+  'agent-intent':'Agent intent · evidence DAG','orchestration':'Orchestration · agents (delegation/peer)','trust-origin':'Trust · origin','sandbox-boundary':'Sandbox · boundary'};
 const $=s=>document.querySelector(s);
 
 async function j(u){const r=await fetch(u);return r.json();}
@@ -340,6 +364,14 @@ async function j(u){const r=await fetch(u);return r.json();}
 function nodeKind(n){
   if((n.kind==='runtime_event'||n.kind==='event') && /^tls_/.test(n.subtype||'')) return 'intent';
   return n.kind||'other';
+}
+function wideNodeKind(k){
+  return k==='intent_stage'||k==='llm_prompt'||k==='llm_completion'||k==='event_burst';
+}
+function clipNodeLabel(n){
+  // Keep the visible label inside the node box (wide 230px / normal 158px). The
+  // full label is always on hover via the node's <title>.
+  return clip(n.label||n.id, wideNodeKind(nodeKind(n))?27:15);
 }
 
 // Observer-origin nodes come from our own instrumentation (the record ps-sampler /
@@ -420,12 +452,13 @@ function layout(nodes,edges){
       cols[L].forEach((n,i)=>{idx[n.id]=i;});
     });
   }
-  const COLW=210,ROWH=86,NW=158,NH=52,PADX=30,PADY=28;
+  const COLW=270,ROWH=86,NW=158,NH=52,WIDEW=230,PADX=30,PADY=28;
   const pos={};
-  Object.keys(cols).forEach(L=>{cols[L].forEach((n,i)=>{pos[n.id]={x:PADX+L*COLW,y:PADY+i*ROWH,w:NW,h:NH};});});
+  Object.keys(cols).forEach(L=>{cols[L].forEach((n,i)=>{const w=wideNodeKind(nodeKind(n))?WIDEW:NW;pos[n.id]={x:PADX+L*COLW,y:PADY+i*ROWH,w,h:NH};});});
   const maxRows=Math.max(1,...Object.values(cols).map(c=>c.length));
   const maxL=Math.max(0,...Object.keys(cols).map(Number));
-  return {pos,W:PADX*2+maxL*COLW+NW,H:PADY*2+(maxRows-1)*ROWH+NH};
+  const lastW=Math.max(NW,...(cols[maxL]||[]).map(n=>wideNodeKind(nodeKind(n))?WIDEW:NW));
+  return {pos,W:PADX*2+maxL*COLW+lastW,H:PADY*2+(maxRows-1)*ROWH+NH};
 }
 
 let SEL=null;
@@ -518,7 +551,7 @@ function renderDAG(g,sel){
     s+=`<rect x="${p.x}" y="${p.y}" width="${p.w}" height="${p.h}" rx="11" fill="#ffffff" stroke="${c}" stroke-width="${on?2.4:1.4}"/>`;
     s+=`<rect x="${p.x}" y="${p.y}" width="${p.w}" height="${p.h}" rx="11" fill="${c}" opacity="0.06"/>`;
     s+=`<circle cx="${p.x+15}" cy="${p.y+16}" r="3.5" fill="${c}"/>`;
-    s+=`<text x="${p.x+26}" y="${p.y+20}" fill="#1d1d1f" font-size="13" font-weight="600">${esc(n.label).slice(0,18)}</text>`;
+    s+=`<text x="${p.x+26}" y="${p.y+20}" fill="#1d1d1f" font-size="13" font-weight="600">${esc(clipNodeLabel(n))}</text>`;
     // With the trust overlay on, the subtitle shows provenance origin instead of subtype.
     const sub=(showTrust && n.trust_origin)?n.trust_origin:(n.subtype||n.kind||'');
     s+=`<text x="${p.x+15}" y="${p.y+39}" fill="#86868b" font-size="10.5">${esc(sub).slice(0,24)}</text></g>`;
@@ -557,6 +590,8 @@ function renderQuestionEntries(m){
   (m.nodes||[]).forEach(n=>byId[n.id]=n);
   const items=[
     {id:'overview/risks', cls:'risk', q:'Why is this run risky?', lens:'security', sub:'risk paths'},
+    {id:'overview/agent_network', cls:'proc', q:'Which agents coordinated?', lens:'orchestration', sub:'agent delegation / peer messages'},
+    {id:'overview/llm_intent', cls:'proc', q:'Which model intent was captured?', lens:'agent-intent', sub:'TLS intent evidence'},
     {id:'overview/egress', cls:'egress', q:'What happened around egress?', lens:'network-egress', sub:'network groups'},
     {id:'overview/files', cls:'file', q:'What changed files?', lens:'file-artifact', sub:'diff / file groups'},
     {id:'overview/processes', cls:'proc', q:'Which processes mattered?', lens:'process', sub:'process groups'},
@@ -748,9 +783,14 @@ async function loadPreview(run, id){
 
 function renderVerify(v){
   const el=$('#verify');
-  const ok = v && v.status==='ok' && !v.error;
-  el.className='badge '+(ok?'ok':'bad');
   if(!v||v.error){el.innerHTML='✗ verify error <span class="sig">'+esc((v&&v.error)||'')+'</span>';return;}
+  if(v.status==='deferred'){
+    el.className='badge ok';
+    el.innerHTML='✓ INDEXED <span class="sig">'+`${v.error_count||0} err · ${v.warning_count||0} warn · full verify on demand`+'</span>';
+    return;
+  }
+  const ok = v.status==='ok';
+  el.className='badge '+(ok?'ok':'bad');
   el.innerHTML=(ok?'✓ VERIFIED':'✗ FAILED')+` <span class="sig">${v.error_count||0} err · ${v.warning_count||0} warn · signed graph</span>`;
 }
 
@@ -872,7 +912,7 @@ function renderTimeline(events){
     return `<tr><td>${esc(t)}</td><td class="etype">${esc(e.event_type||'')}</td>
       <td class="cls ${cls}">${esc(e.correlation_class||e.correlation_method||'')}${provBadge(e)}</td>
       <td>${confCell(e.correlation_confidence)}</td>
-      <td class="payload">${plCell(e.payload)}</td></tr>`;
+      <td class="payload">${plCell(e.payload, e.id)}</td></tr>`;
   }).join('');
 }
 // Provenance summary as ONE run-level chip instead of a badge on every row:
@@ -888,7 +928,11 @@ function renderProvChip(events){
 // clamps it to a few lines by default and expands to the whole thing on click,
 // so nothing is truncated away -- the record is always fully inspectable.
 function payloadFull(p){ if(!p)return''; try{return JSON.stringify(JSON.parse(p),null,2);}catch(_){return String(p);} }
-function plCell(p){ const full=payloadFull(p); if(!full)return''; return `<div class="pl" onclick="this.classList.toggle('open')" title="click to expand / collapse">${esc(full)}</div>`; }
+// Payload expand state lives OUT of the DOM (keyed by event id) so the 5s live
+// refresh, which rebuilds the table, doesn't collapse what the user opened.
+let EV_OPEN=new Set();
+function plCell(p,key){ const full=payloadFull(p); if(!full)return''; const op=key&&EV_OPEN.has(key)?' open':''; return `<div class="pl${op}" data-plk="${esc(key||'')}" onclick="togglePl(this)" title="click to expand / collapse">${esc(full)}</div>`; }
+function togglePl(el){ const k=el.getAttribute('data-plk'); if(!k){el.classList.toggle('open');return;} if(EV_OPEN.has(k)){EV_OPEN.delete(k);el.classList.remove('open');}else{EV_OPEN.add(k);el.classList.add('open');} }
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 // Correlation confidence tier -> colour band. Keeps a 0.5 ai_asserted join from
 // reading like a 0.98 kernel match.
@@ -935,7 +979,7 @@ async function loadEvidenceDrilldown(offset){
       const t=(e.created_at||'').replace('T',' ').replace(/\.\d+Z?$/,'');
       return `<tr><td>${esc(t)}</td><td class="etype">${esc(e.event_type||'')}</td><td>${esc(e.pid||'')}</td>
         <td>${esc(e.tool_call_id||'')}</td><td class="cls ${esc((e.correlation_class||'').replace(/\s/g,'_'))}">${esc(e.correlation_class||e.correlation_method||'')}${provBadge(e)}</td>
-        <td class="payload">${plCell(e.payload)}</td></tr>`;
+        <td class="payload">${plCell(e.payload, e.id)}</td></tr>`;
     }).join('');
   }
   const from=d.total?EV_OFFSET+1:0, to=Math.min(EV_OFFSET+(d.limit||EV_LIMIT),d.total||0);
@@ -1222,6 +1266,49 @@ function nodeVisible(id){ if(TCUR===null) return true; const t=(window._lg.nodeT
 // already visible (their earlier edges brought them in). Without this the
 // scrubber drew edges whose created_at was still in the future.
 function edgeVisible(e){ if(TCUR!==null && e.t && e.t>TCUR) return false; return nodeVisible(e.from) && nodeVisible(e.to); }
+function dataVal(n,k){ return (n&&n.data&&n.data[k]) || ''; }
+function findNodeBySubtype(g,kind,subtype){ return (g.nodes||[]).find(n=>n.kind===kind && n.subtype===subtype); }
+function nodesByKind(g,...kinds){ const ks=new Set(kinds); return (g.nodes||[]).filter(n=>ks.has(n.kind)); }
+function intentStageCard(n,num,title,desc,meta){
+  const on=n&&n.id===SEL?' on':'';
+  return `<div class="intentcard${on}" data-id="${esc(n?n.id:'')}">`+
+    `<div class="num">${num}</div>`+
+    `<div class="ttl">${esc(title)}</div>`+
+    `<div class="desc">${esc(desc||'No captured detail for this stage yet.')}</div>`+
+    `<div class="intentmeta">${meta.filter(Boolean).map(x=>`<span title="${esc(x)}">${esc(x)}</span>`).join('')}</div>`+
+  `</div>`;
+}
+function renderIntentFlow(g){
+  const el=$('#dag');
+  const prompt=findNodeBySubtype(g,'intent_stage','prompt_check');
+  const before=findNodeBySubtype(g,'intent_stage','before_tool_call');
+  const after=findNodeBySubtype(g,'intent_stage','after_tool_call');
+  const send=findNodeBySubtype(g,'intent_stage','send_msg');
+  const request=nodesByKind(g,'llm_prompt')[0];
+  const response=nodesByKind(g,'llm_completion')[0];
+  const burst=nodesByKind(g,'event_burst').find(n=>n.subtype==='after_tool_runtime');
+  const messages=nodesByKind(g,'message','relay');
+  const runtime=(g.nodes||[]).filter(n=>n.kind==='runtime_event' && !isObserverNode(n)).slice(0,5);
+  const promptText=dataVal(prompt,'prompt')||dataVal(request,'prompt')||request?.label||'';
+  const modelReq=dataVal(prompt,'model')||dataVal(request,'model');
+  const command=dataVal(before,'command')||dataVal(response,'command')||dataVal(after,'command');
+  const tools=dataVal(before,'tool_decision')||dataVal(response,'tool_decision')||[];
+  const toolText=Array.isArray(tools)?tools.join(', '):String(tools||'');
+  const respModel=dataVal(before,'model')||dataVal(response,'model');
+  const cards=[
+    intentStageCard(prompt,'1','Prompt check',promptText,[modelReq&&`model ${modelReq}`, command&&clip(command,44)]),
+    intentStageCard(before,'2','Before tool call',command||response?.label,[respModel&&`model ${respModel}`, toolText&&`tool ${toolText}`]),
+    intentStageCard(after,'3','After tool call',burst?burst.label:(command||'runtime observations'),[burst&&`${dataVal(burst,'execve')||0} exec`, burst&&`${dataVal(burst,'process')||0} proc`, burst&&`${dataVal(burst,'risk')||0} risk`]),
+    intentStageCard(send,'4','Send message',`${dataVal(send,'message_edges')||messages.length||0} peer/delegation messages`,[messages.length&&`${messages.length} evidence nodes`])
+  ].join('');
+  const chips=[];
+  [request,response].filter(Boolean).forEach(n=>chips.push(`<button class="evchip" data-id="${esc(n.id)}">${esc(clip(n.label,42))}</button>`));
+  runtime.forEach(n=>chips.push(`<button class="evchip ${n.risk?'risk':''}" data-id="${esc(n.id)}">${esc(clip(n.label||n.subtype,42))}</button>`));
+  messages.forEach(n=>chips.push(`<button class="evchip msg" data-id="${esc(n.id)}">${esc(clip(n.label,42))}</button>`));
+  if(burst) chips.unshift(`<button class="evchip ${burst.risk?'risk':''}" data-id="${esc(burst.id)}">${esc(clip(burst.label,42))}</button>`);
+  el.innerHTML=`<div class="intentflow"><div class="intentsteps">${cards}</div><div class="evidencechips">${chips.join('')}</div></div>`;
+  el.onclick=ev=>{const hit=ev.target.closest('[data-id]'); if(hit&&hit.getAttribute('data-id')) selectNode(hit.getAttribute('data-id'));};
+}
 async function loadRun(run){
   cur=run;
   const q='run='+encodeURIComponent(run);

@@ -81,12 +81,11 @@ The goal is to answer questions ordinary traces do not answer well:
 - [Why](#why)
 - [Security Loop](#security-loop)
 - [Core Model](#core-model)
-  - [White-box mode](#white-box-mode)
-  - [Zero-SDK mode](#zero-sdk-mode)
+  - [Evidence layers](#evidence-layers)
+  - [Runtime facts and correlation](#runtime-facts-and-correlation)
 - [Relationship To Existing Systems](#relationship-to-existing-systems)
 - [Quickstart](#quickstart)
 - [Deployment Modes](#deployment-modes)
-  - [Falco-compatible Receiver](#falco-compatible-receiver)
 - [Security Evidence Commands](#security-evidence-commands)
 - [External Evaluator Protocol](#external-evaluator-protocol)
 - [Compliance Evidence, Not Certification](#compliance-evidence-not-certification)
@@ -170,39 +169,44 @@ it, and what response should happen?"
 The project currently implements the evidence graph, runtime correlation,
 diff/blame, telemetry batch manifests, policy decisions, normalized risk
 signals, baseline deviation records, response action records, taint,
-quarantine, forensics/export foundations, and a native eBPF sensor. Broader
-third-party receiver integrations and Feishu/DingTalk response adapters belong
-to the next security-control phases.
+quarantine, forensics/export foundations, and a native eBPF sensor.
+Feishu/DingTalk response adapters belong to the next security-control phases;
+third-party receivers (Falco/Tetragon) are maintained for compatibility, not
+extended.
 
 ## Core Model
 
-AgentProvenance supports two context modes.
-
-### White-box mode
-
-An agent harness, SDK, tool router, or framework explicitly provides context:
-
-```text
-run_id / session_id / attempt_id / tool_call_id / tool_name / args_hash
-```
-
-This gives high precision and fits custom coding-agent systems, Agentix-style
-harnesses, LangGraph-like workflows, and internal tool routers.
-
-### Zero-SDK mode
-
-The user can run an agent command directly:
+AgentProvenance is not "pick an integration mode." It is layered evidence with
+one entry point: wrap the command you already run.
 
 ```sh
 agentprov record -- <agent command>
 ```
 
-The current MVP records a command in a working directory, snapshots the
-pre-execution file state, runs the command, computes post-execution file
-changes, and emits runtime file evidence into the DAG. The long-term zero-SDK
-path adds deeper process-tree and kernel telemetry capture.
+`record` snapshots the pre-execution file state, runs the command, samples the
+process tree, computes post-execution file changes, and emits runtime evidence
+into the DAG — no integration code required. Everything else stacks on top of
+that base automatically.
 
-Zero-SDK inference uses runtime facts:
+### Evidence layers
+
+| Layer | Source | Trust semantics |
+|---|---|---|
+| Kernel / runtime facts (foundation) | `record` process tree + file diffs, native eBPF sensor, Falco/Tetragon/LoongCollector receivers | hard facts keyed by pid / cgroup / container / time; the agent cannot fabricate them |
+| Application context (enrichment) | harness hooks (`hooks bridge`), MCP context-write (`bind_scope` / `record_tool_call`), explicit `run_id / session_id / attempt_id / tool_call_id / tool_name / args_hash` | semantics the kernel can never infer — agent identity, delegation and peer messages, refused intents; app-asserted claims carry `binding_source=ai_asserted` and a `<=0.5` confidence cap, and never override kernel facts |
+
+The kernel layer answers "what actually happened on this host." The
+application-context layer answers "which agent, which tool call, which intent"
+— including things no syscall stream can express, such as an orchestrator's
+`agent_spawn`/`agent_message` edges or an attempt the LLM refused to execute.
+Application context is not a separate deployment or a required SDK: when a
+harness emits hooks or calls the MCP context-write tools, the enrichment layer
+attaches to the same run; when it doesn't, the kernel layer still stands on its
+own.
+
+### Runtime facts and correlation
+
+Correlation back to execution context uses runtime facts:
 
 ```text
 root process / process tree / cwd / timestamp / container_id / cgroup_id
@@ -253,12 +257,10 @@ which the policy path rules still catch; only the workspace file-node graph keep
 its relative-path constraint. `scripts/accept_native_sensor_risk.sh` proves the
 loop end to end (own kernel telemetry to a unified `security` signal).
 
-`ingest-falco` is the Falco-compatible receiver path. It reads Falco JSON/stdout
-from a file or stdin stream, maps recognized `execve`, `open/openat`, and
-`connect` events into normalized runtime events, correlates them by
-PID/container/cgroup/time evidence, and then evaluates policy by default.
-Raw Falco rows do not need `tool_call_id`; ToolCallScope is recovered from the
-binding table when possible.
+`ingest-falco` is the compatibility receiver for hosts that already run Falco
+(or where the native sensor cannot run); it folds Falco JSON/stdout streams
+into the same correlation/policy path. Details:
+[docs/falco-receiver.md](docs/falco-receiver.md).
 
 ## Relationship To Existing Systems
 
@@ -347,14 +349,16 @@ ingest, retention, and query services.
 | Mode | Shape | Best for | Tradeoff |
 |---|---|---|---|
 | Library / CLI-only recorder | one `agentprov` binary, optional Python helper, local SQLite/object store | RL rollout, evaluator jobs, benchmarks, CI, local red-team harnesses | easiest to adopt; weaker shared query and long-running ingest |
-| Sidecar / local daemon | `agentprov daemon serve` beside one worker or sandbox host; CLI/SDK acts as client | sandbox worker, CI runner, local security harness, medium-volume telemetry ingest | adds a local service boundary, spool, backpressure, and stable query API |
+| Sidecar / local daemon | `agentprov daemon serve` beside one worker or sandbox host; the CLI and evaluator clients talk to it | sandbox worker, CI runner, local security harness, medium-volume telemetry ingest | adds a local service boundary, spool, backpressure, and stable query API |
 | Central evidence service | shared ingest/query service with object storage, retention, auth, and UI/API | enterprise security, audit, SRE, compliance, incident review | highest operational cost; not the default RL entry point |
 
 For RL and evaluator pipelines, the default contract is lightweight and
 offline-first:
 
 - Install: one Go binary plus an optional thin Python package.
-- Call: wrap an existing command first; SDK/framework integration is optional.
+- Call: wrap an existing command; application-context enrichment (hooks
+  bridge, MCP context-write) stacks on automatically when the harness provides
+  it — no integration code required.
 - Batch: every trajectory gets stable `run_id` / evidence manifest / signal
   context output, and query surfaces are paged.
 - Overhead: default capture focuses on process/file/diff/artifact/exit/resource
@@ -366,8 +370,75 @@ offline-first:
   are opt-in security controls; offline scoring can run later over captured
   EvalContext JSONL.
 
-Python usage stays thin and CLI-backed. For Deploy 1, the intended RL/evaluator
-entry point is one function that runs the local offline loop end to end:
+How an evaluator or RL pipeline actually consumes this contract — the
+`EvalContext`/`EvalSignal` protocol and the thin Python helper with custom
+rules — is one topic, documented once in
+[External Evaluator Protocol](#external-evaluator-protocol).
+
+## Security Evidence Commands
+
+The run-level security surface is a handful of query families, each with a
+stable `--json` contract (result/page integrity hashes included):
+
+```sh
+./agentprov observe summary --run <run_id>       # coverage: app context, telemetry, risks, responses
+./agentprov observe flow --run <run_id>          # runtime event -> risk -> policy -> response
+./agentprov timeline --run <run_id> --view causality
+./agentprov security risks --run <run_id>        # also: deviations / responses
+./agentprov baseline learn --template <t> --run <run_id>   # then: baseline check
+./agentprov policy test examples/events/metadata-egress.jsonl
+./agentprov forensics export <run_id>            # hashed, optionally signed audit bundle
+```
+
+- `observe summary/coverage/scopes/event/process/flow` — run-level
+  observability and per-scope drill-down.
+- `evidence manifest` / `telemetry correlations` — the run's hash-indexed
+  evidence index, and why each telemetry event was attached to its scope.
+- `security risks/deviations/responses` + `baseline learn/check` — the risk
+  layer over correlated evidence.
+- `policy test/decisions` — the trusted policy engine.
+- `forensics export[-batch]` — auditable evidence bundles.
+
+Full command list with per-command purpose:
+[docs/security-commands.md](docs/security-commands.md).
+
+## External Evaluator Protocol
+
+AgentProvenance exposes evidence to external scoring systems without owning
+their reward, ranking, or dataset policy.
+
+```sh
+./agentprov signal context --run <run_id> > eval-context.json
+
+./agentprov signal run --run <run_id> \
+  --external "PYTHONPATH=python python3 examples/evaluators/python_signal_eval.py" \
+  --json
+
+./agentprov signal import --run <run_id> --file external-signals.json --json
+```
+
+The protocol is intentionally small:
+
+- `EvalContext` contains trajectories, file changes, runtime events, risk
+  signals, and response actions.
+- External evaluators read `EvalContext` from stdin and return
+  `{ "signals": [...] }`.
+- `EvalSignal` can represent reward features, penalties, dataset labels, or
+  quality signals.
+- `signal import-batch` accepts JSONL EvalReport records so RL pipelines can
+  import many offline signal reports without one command per run.
+
+This lets a benchmark harness, RL pipeline, red-team harness, or data filtering
+job decide how evidence becomes score, rejection, or review.
+
+### Custom rules in Python
+
+`python/agentprov_eval` (import alias `agentprov`) is the thin, CLI-backed
+helper over this protocol — it does not encode a reward function. Custom
+"rules" are ordinary Python functions over `EvalContext`; Go keeps ownership of
+capture, correlation, manifests, and query integrity. The one-function entry
+point runs the whole local offline loop (record batch → evaluate rules →
+import signals):
 
 ```python
 from agentprov import Registry, Signal, run_batch_pipeline
@@ -404,10 +475,8 @@ result = run_batch_pipeline(
 print(result.batch_id, result.signal_count)
 ```
 
-For RL users, custom "rules" are ordinary Python evaluator functions. They run
-offline over evidence; Go keeps ownership of capture, correlation, manifests,
-and query integrity. The same workflow can be split into lower-level calls when
-the pipeline already owns scheduling or sharding:
+When the pipeline already owns scheduling or sharding, the same workflow splits
+into lower-level calls:
 
 ```python
 from agentprov import Client, evaluate_batch
@@ -434,169 +503,7 @@ Later, the same local store can be queried by batch, shard, job, or run:
 ./agentprov forensics export-batch --latest --json
 ```
 
-### Falco-compatible Receiver
-
-The dedicated Falco receiver is useful when Falco is already filtering kernel
-or runtime events on the host:
-
-```sh
-./agentprov telemetry bind --run run-falco-demo --session session-falco-demo \
-  --attempt attempt-falco-demo --tool-call tool-falco-demo \
-  --process process-falco-demo --container-id container-falco-demo --pid 4242 \
-  --started-at 2026-01-01T00:00:00Z
-
-./agentprov telemetry ingest-falco \
-  --file examples/telemetry/falco-risk-events.jsonl --json
-
-./agentprov telemetry list --run run-falco-demo
-./agentprov telemetry list --run run-falco-demo --limit 100 --json
-./agentprov telemetry list --run run-falco-demo --limit 100 --cursor <next_cursor> --json
-./agentprov timeline --run run-falco-demo
-./agentprov security risks --run run-falco-demo --json
-./agentprov security responses --run run-falco-demo --json
-```
-
-For a live stream, pipe Falco JSON output directly:
-
-```sh
-sudo falco -o json_output=true -o json_include_output_property=true | \
-  ./agentprov telemetry ingest-falco --file -
-```
-
-The receiver maps Falco process, file, and network rows into normalized runtime
-events. Metadata IP, private CIDR, and secret-path rows are promoted into
-security evidence: `RiskSignal`, `ResponseAction`, policy graph edges, and
-timeline entries. `graph explain --risk <policy_decision_id> --json` links the
-risk back to the raw runtime event and forward to the response action. Falco
-remains the substrate collector; AgentProvenance owns correlation, causality,
-provenance, and risk/audit linkage.
-
-The main smoke path is telemetry correlation and graph explanation:
-
-```sh
-./scripts/demo_telemetry_jsonl.sh
-```
-
-It binds a ToolCallScope, ingests raw Falco/Tetragon/LoongCollector-style
-runtime events that do not carry `tool_call_id`, normalizes them into the event
-store, correlates them back to application context, and explains the resulting
-causal graph.
-
-## Security Evidence Commands
-
-```sh
-./agentprov observe summary --run <run_id>
-./agentprov observe summary --run <run_id> --json
-./agentprov observe coverage --run <run_id>
-./agentprov observe coverage --run <run_id> --json
-./agentprov observe scopes --run <run_id>
-./agentprov observe scopes --run <run_id> --json
-./agentprov observe event --run <run_id> --event <event_id>
-./agentprov observe event --run <run_id> --event <event_id> --json
-./agentprov observe process --run <run_id> --process <process_id>
-./agentprov observe process --run <run_id> --process <process_id> --json
-./agentprov observe flow --run <run_id>
-./agentprov observe flow --run <run_id> --json
-./agentprov evidence manifest --run <run_id>
-./agentprov evidence manifest --run <run_id> --json
-./agentprov evidence manifest --run <run_id> --materialize --json
-./agentprov telemetry correlations --run <run_id>
-./agentprov telemetry correlations --run <run_id> --json
-./agentprov telemetry correlations --event <event_id> --json
-./agentprov timeline --run <run_id>
-./agentprov timeline --run <run_id> --view causality
-./agentprov timeline --run <run_id> --limit 100 --cursor <next_cursor> --json
-./agentprov timeline --run <run_id> --tool-call <tool_call_id> --json
-./agentprov timeline --run <run_id> --process <process_id> --json
-./agentprov timeline --run <run_id> --type risk_signal --json
-./agentprov security risks --run <run_id>
-./agentprov security risks --run <run_id> --json
-./agentprov security deviations --run <run_id>
-./agentprov security deviations --run <run_id> --json
-./agentprov security responses --run <run_id>
-./agentprov security responses --run <run_id> --json
-./agentprov baseline learn --template <template_name> --run <run_id>
-./agentprov baseline check --template <template_name> --run <run_id>
-./agentprov signal context --run <run_id>
-./agentprov signal batch-context --batch <batch_id>
-./agentprov signal batch-context --shard <shard_id>
-./agentprov signal batch-context --runs runs.jsonl
-./agentprov signal run --run <run_id>
-./agentprov signal run --run <run_id> --json
-./agentprov signal run --run <run_id> \
-  --external "PYTHONPATH=python python3 examples/evaluators/python_signal_eval.py" --json
-./agentprov signal import --run <run_id> --file external-signals.json --json
-./agentprov signal import-batch --file signal-reports.jsonl --engine python-sdk --json
-./agentprov compliance frameworks
-./agentprov compliance map --framework owasp-asi --run <run_id>
-./agentprov compliance explain --framework owasp-asi --run <run_id> --item ASI05
-./agentprov compliance gaps --framework owasp-asi --run <run_id>
-./agentprov compliance report --framework nist-rfi-2026-00206 --run <run_id>
-./agentprov ai tools --provider openai
-./agentprov ai tools --provider anthropic
-./agentprov ai call evaluate_action --input '{"event_type":"network_connect","dst_ip":"169.254.169.254"}'
-./agentprov policy test examples/events/metadata-egress.jsonl
-./agentprov policy decisions --run <run_id>
-./agentprov forensics export <run_id>
-./agentprov forensics export-batch --batch <batch_id>
-./agentprov forensics export-batch --latest --include-eval-contexts --json
-```
-
-These commands are now part of the mainline security evidence surface:
-
-| Command | Purpose |
-|---|---|
-| `observe summary` | Show run-level observability coverage across application context, runtime telemetry, risks, baselines, responses, and evidence refs |
-| `observe coverage` | Show runtime telemetry correlation quality and list events missing session/tool_call/process identity |
-| `observe scopes` | Show per-tool-call observability: processes, runtime events, risks, policy decisions, responses, and drill-down links |
-| `observe event` | Explain one runtime event with correlated agent context, related risk/policy/response evidence, and drill-down links |
-| `observe process` | Explain one process with its tool_call context, runtime events, risk/policy/response evidence, and drill-down links |
-| `observe flow` | Show the compact causality flow from runtime events to risk signals, policy decisions, and response actions |
-| `evidence manifest` | Emit a run-level evidence index that binds observability summary, timeline hash, content-addressed object refs, risk/response report hashes, and recommended drill-down queries; `--materialize` writes it as an `evidence_manifest` provenance object |
-| `telemetry correlations` | Explain why runtime telemetry events were attached to a ToolCallScope, including raw identity, matched binding, matched keys, confidence, time window, and drill-down refs |
-| `timeline` | Show a time-ordered execution view across application context, runtime telemetry, evidence, risk, baseline, response, and external effects |
-| `security risks` | List normalized `RiskSignal` records derived from policy/runtime evidence; `--json` emits schema/hash metadata and drill-down refs to event/process/timeline/explain views |
-| `security deviations` | List `BaselineDeviation` records from behavior feature checks; `--json` emits schema/hash metadata and drill-down refs to timeline and summary views |
-| `security responses` | List recorded `ResponseAction` records such as audit, deny, kill, quarantine, taint, export, or notification hooks; `--json` emits schema/hash metadata and drill-down refs back to risk/process/explain views |
-| `baseline learn/check` | Learn process/file/network/risk/runtime feature vectors and emit deviation records plus baseline-derived risk signals |
-| `signal context/batch-context/run/import/import-batch` | Export one `EvalContext` or JSONL `EvalContext` streams for a batch/shard/run list, run built-in or external evaluators, and validate imported `EvalSignal` records or JSONL `EvalReport` batches for reward shaping, dataset filtering, quality scoring, or external benchmark consumers. AgentProvenance owns the evidence protocol, not the reward policy |
-| `compliance frameworks/map/explain/gaps/report` | Map run evidence to OWASP Agentic Security and NIST AI agent security assessment profiles as item-level self-assessment evidence and gap lists |
-| `ai tools/call` | Expose the read-only evidence query surface and inline policy pre-flight gate as provider tool schemas plus a local dispatcher. This is not an LLM gateway: models can query evidence and ask for a trusted policy verdict, but they cannot fabricate runtime telemetry, signatures, or provenance objects |
-| `policy test/decisions` | Evaluate events, persist policy decisions, and feed the risk/response graph |
-| `forensics export` | Export auditable evidence for a run; `--json` emits `agentprovenance.forensics_export/v1` with bundle path, sha256, size, and status |
-| `forensics export-batch` | Export a batch-level audit bundle for record batches; `--json` emits `agentprovenance.batch_forensics_export/v1` with batch summary, per-run forensics refs, optional EvalContext records, result/page hashes, and a sha256-verified bundle path |
-
-## External Evaluator Protocol
-
-AgentProvenance exposes evidence to external scoring systems without owning
-their reward, ranking, or dataset policy.
-
-```sh
-./agentprov signal context --run <run_id> > eval-context.json
-
-./agentprov signal run --run <run_id> \
-  --external "PYTHONPATH=python python3 examples/evaluators/python_signal_eval.py" \
-  --json
-
-./agentprov signal import --run <run_id> --file external-signals.json --json
-```
-
-The protocol is intentionally small:
-
-- `EvalContext` contains trajectories, file changes, runtime events, risk
-  signals, and response actions.
-- External evaluators read `EvalContext` from stdin and return
-  `{ "signals": [...] }`.
-- `EvalSignal` can represent reward features, penalties, dataset labels, or
-  quality signals.
-- `python/agentprov_eval` and the `agentprov` import alias provide a thin
-  helper SDK with `Registry`, `@rule`, `evaluate_batch`, `reports_jsonl`, and CLI-backed
-  capture/query helpers. They do not encode a reward function.
-- `signal import-batch` accepts JSONL EvalReport records so RL pipelines can
-  import many offline signal reports without one command per run.
-
-This lets a benchmark harness, RL pipeline, red-team harness, or data filtering
-job decide how evidence becomes score, rejection, or review.
+### Daemon mode
 
 In daemon mode, the same protocol is available through the local API:
 
@@ -613,46 +520,24 @@ validation. The CLI follows that shape when `--daemon-url` is set.
 
 ## Compliance Evidence, Not Certification
 
-AgentProvenance can map run evidence to security framework profiles such as
-OWASP Agentic Security and NIST AI agent security assessment questions:
+Run evidence can be mapped onto security framework profiles (OWASP Agentic
+Security, NIST AI agent security assessment) as an **evidence-backed
+self-assessment** — not certification, legal advice, or a third-party audit
+replacement:
 
 ```sh
-./agentprov compliance frameworks
-./agentprov compliance frameworks --ruleset examples/compliance/custom-ruleset.yaml
-./agentprov compliance validate --ruleset examples/compliance/custom-ruleset.yaml
 ./agentprov compliance map --framework owasp-asi --run <run_id>
-./agentprov compliance map --framework owasp-asi --run <run_id> --only ASI05,ASI10,TRACE
-./agentprov compliance explain --framework owasp-asi --run <run_id> --item ASI05
-./agentprov compliance gaps --framework owasp-asi --run <run_id>
-./agentprov compliance gaps --framework owasp-asi --run <run_id> --missing-only --json
-./agentprov compliance map --framework enterprise-agent-review --ruleset examples/compliance/custom-ruleset.yaml --run <run_id>
-./agentprov compliance report --framework nist-rfi-2026-00206 --run <run_id> --json
+./agentprov compliance gaps --framework owasp-asi --run <run_id>   # missing/partial backlog
 ```
 
-The output is an evidence-backed self-assessment. It does not certify
-compliance, provide legal advice, or replace qualified third-party audit. Each
-check item is derived from evidence already present in the run: timeline events,
-runtime telemetry, ToolCallScope bindings, policy decisions, risk signals,
-baseline deviations, response actions, forensics bundles, content-addressed
-provenance objects, and graph edges.
+Every check item is derived from evidence already in the run and reports
+`covered | partial | missing | not_applicable` with concrete `evidence_refs`
+and a recommended next step — honest coverage gaps instead of fake passes, and
+no ambition to become a GRC platform. Custom YAML rulesets can add
+enterprise-specific frameworks on top of the built-ins.
 
-Each item reports:
-
-```text
-covered | partial | missing | not_applicable
-```
-
-with concrete `evidence_refs`, a gap when evidence is incomplete, and a
-recommended next step. This makes agent execution evidence usable for security
-reviews without turning AgentProvenance into a GRC platform.
-`compliance gaps` turns that same mapping into an actionable backlog of missing
-or partial evidence items for a run.
-
-Custom rulesets can add local frameworks and rules without replacing built-ins.
-The YAML model separates `rules`, `frameworks`, and `mappings`; mappings can
-also select built-in items such as `ASI05`, `ASI10`, or `TRACE` and reuse them
-inside an enterprise-specific review profile. JSON keeps `control_id` for
-compatibility and also emits `item_id` for the current terminology.
+Full command set, item semantics, and the custom-ruleset YAML model:
+[docs/compliance.md](docs/compliance.md).
 
 ## AI-Callable Evidence Tools
 
@@ -699,6 +584,33 @@ the trusted policy engine, and assert its own app-side context (`bind_scope` /
 signatures, or forge provenance graph facts: context-write rows are recorded as
 `ai_asserted` and execute nothing, and verdicts are computed by the trusted
 engine, not the model.
+
+### Worked example: an LLM as security judge
+
+The point of this surface is that an external model can *reason over* the
+evidence without being able to *touch* it. `demo/llm-judge` wires that up end
+to end:
+
+```sh
+python3 demo/llm-judge/judge.py run            # import demo bundle, judge it
+python3 demo/llm-judge/judge.py run --run <id> --data-dir <dir>   # judge your own run
+```
+
+The single-file judge reads a captured run's **full** trajectory through these
+same contract surfaces (EvalContext, `ai call`, graph lenses — no event-type
+filter, so new capture dimensions reach the judge without code changes), has
+the model return a structured verdict (`agentprovenance.llm_judge/v1`:
+benign / suspicious / malicious, with findings that cite evidence ids), and
+imports it back as graph-attached signals via `signal import`. Trajectories
+past the context budget are chunked chronologically and map-reduced; nothing
+is silently dropped, and the verdict records its own coverage numbers.
+
+The judge itself runs under `agentprov record`, and its own LLM
+request/response traffic is materialized into `llm_call` nodes in the judge's
+provenance run — **the judge is itself audited** by the same machinery it
+judges with. Any Anthropic- or OpenAI-protocol endpoint works (Claude,
+DeepSeek, Qwen, local vLLM/Ollama); without a key it degrades to an offline
+fixture so the pipeline still completes.
 
 ## Web Dashboard
 
@@ -865,52 +777,22 @@ orchestration graph.
 
 ## Graph Commands
 
+The Git-like surface over content-addressed evidence objects:
+
 ```sh
-./agentprov graph trace --run run-demo-bugfix
-./agentprov graph refs --run run-demo-bugfix
-./agentprov graph log --run run-demo-bugfix
-./agentprov graph materialize --run run-demo-bugfix
-./agentprov graph objects --run run-demo-bugfix
-./agentprov graph objects --run run-demo-bugfix --limit 50 --json
-./agentprov graph objects --run run-demo-bugfix --limit 50 --cursor <next_cursor> --json
-./agentprov graph verify --run run-demo-bugfix
-./agentprov graph verify --run run-demo-bugfix --json
-./agentprov graph replay --run run-demo-bugfix
-./agentprov graph replay --run run-demo-bugfix --json
-./agentprov graph trajectories --run run-demo-bugfix --json
-./agentprov graph lens --run run-demo-bugfix --lens default --json
-./agentprov graph lens --run run-demo-bugfix --lens data-flow-taint --overlay risk --json
-./agentprov graph lens --run run-demo-bugfix --lens data-flow-taint --detail expanded --json
-./agentprov graph lens --run run-demo-bugfix --lens process --detail raw --focus runtime_event/<event_id> --json
-./agentprov graph lens --run run-demo-bugfix --lens process --focus runtime_event/<event_id> --json
-./agentprov graph diff --run run-demo-bugfix --file calculator.py
-./agentprov graph diff --run run-demo-bugfix --file calculator.py --json
-./agentprov graph blame --run run-demo-bugfix --file calculator.py
-./agentprov graph blame --run run-demo-bugfix --file calculator.py --json
-./agentprov graph explain --run run-demo-bugfix --file calculator.py
-./agentprov graph explain --run run-demo-bugfix --file calculator.py --json
-./agentprov graph explain --run run-demo-bugfix --file calculator.py --depth 4 --limit 200 --json
-./agentprov graph explain --run run-demo-bugfix --file calculator.py --depth 4 --limit 200 --cursor <next_cursor> --json
-./agentprov graph explain --tool-call <tool_call_id>
-./agentprov graph explain --risk <policy_decision_id> --json
+./agentprov graph trace --run <run_id>           # context + causality + risk in one view
+./agentprov graph verify --run <run_id>          # integrity: hashes, parent links, evidence chains
+./agentprov graph diff --run <run_id> --file <path>
+./agentprov graph blame --run <run_id> --file <path>
+./agentprov graph explain --run <run_id> --file <path>   # bounded, paged causal explanation
+./agentprov graph lens --run <run_id> --lens data-flow-taint --overlay risk --json
+./agentprov graph trajectories --run <run_id> --json     # evidence package for evaluators/RL
 ```
 
-What these mean:
-
-| Command | Purpose |
-|---|---|
-| `trace` | Show execution context, runtime causality, provenance edges, risk, and response-gate evidence |
-| `refs` | Emit stable Git-like references for attempts, snapshots, artifacts, and decisions |
-| `log` | Show chronological execution history |
-| `materialize` | Write content-addressed provenance objects |
-| `objects` | List content-addressed object refs, hashes, parent hashes, source IDs, paths, and sizes; supports `--limit` and `--cursor` |
-| `verify` | Check graph integrity, risk/response evidence chains, taint/response barriers, object hashes, replay generation, drain watermarks, telemetry batch hashes, and orphan lifecycle evidence for outlived zero-SDK child processes |
-| `replay` | Emit a plan-only reconstruction of the run |
-| `trajectories --json` | Emit per-attempt behavior evidence, risk/deviation context, cost, artifacts, and runtime events for external evaluators or RL reward/penalty pipelines |
-| `lens` | Project the canonical graph through a Graph Explorer lens. Emits `agentprovenance.graph_lens/v1` with canonical nodes/edges, derived edges, focus state, overlays, layout hints, raw event count, omitted counts, and `--detail summary\|expanded\|raw` |
-| `diff` | Compare file state between base and attempts |
-| `blame` | Attribute file state to attempt, tool call, process, strategy, command, and local candidate status |
-| `explain` | Explain a target by combining trace, runtime causality, diff/blame, telemetry receiver details, telemetry batch manifests, process observations, policy, object refs, risk signals, baseline deviations, and response evidence; `--json` emits `agentprovenance.explain/v1` with `upstream`, `downstream`, bounded `causality_path`, `query`, `evidence`, `objects`, `risks`, `telemetry_batches`, `process_observations`, and `replay_refs`; runtime events include receiver/source format, normalized event type, identity keys, schema status, and correlation status; use `--depth`, `--limit`, and `--cursor` to bound and page DAG traversal |
+Also: `refs` / `log` / `objects` (Git-like refs and content-addressed object
+listing), `materialize` / `materialize-llm` (objectify evidence, incl. captured
+LLM calls), `replay` (plan-only reconstruction). Full command list with
+per-command purpose: [docs/graph-commands.md](docs/graph-commands.md).
 
 ## Current Capability
 
@@ -920,7 +802,8 @@ What these mean:
 |---|---|
 | Zero-SDK record | `record -- <cmd>` snapshots the workdir, samples the process tree, captures file diffs + runtime evidence, no SDK |
 | Batch recorder | `record batch` records many jobs in parallel for RL/benchmark pipelines |
-| Native eBPF sensor | `agentprov-sensor` (Linux/arm64): exec+argv, connect, file write + sensitive **read** → `secret_path`, process_exit, privesc (setuid/setgid/ptrace), tamper (rename/unlink), TLS plaintext (hash + metadata), DNS — in-kernel noise filtering, validated live |
+| Native eBPF sensor | `agentprov-sensor` (Linux/arm64): exec+argv, connect, file write + sensitive **read** → `secret_path`, process_exit, privesc (setuid/setgid/ptrace), tamper (rename/unlink), TLS plaintext (full request/response bodies via chunked SSL_write/SSL_read capture), DNS — in-kernel noise filtering, validated live |
+| LLM intent capture | `internal/tlsintent` reassembles the sensor's TLS chunks into complete HTTP/1.1 messages (Content-Length, chunked, and SSE streaming bodies; HTTP/2 is detected and passed through raw, never mis-parsed) and parses LLM semantics across Anthropic/OpenAI shapes — model, tools offered, tool calls + the shell commands the model decided to run, stop reason |
 | Evidence ingest | Falco / Tetragon / LoongCollector JSONL + native sensor → normalized events; schema-validated, app-context rejected in raw payloads, paged with integrity hashes |
 
 **Correlate & verify**
@@ -931,8 +814,9 @@ What these mean:
 | Runtime causality | native `runtime_*` graph edges (tool call, process tree, snapshot, event, file) |
 | Provenance DAG | `graph trace / refs / log / materialize / objects / verify / replay` over content-addressed objects |
 | Multi-agent orchestration | `hooks bridge` folds a Claude Code (or compatible) agent team's harness hooks into the graph — agent nodes, delegation (`agent_spawn`) + peer (`agent_message`, body objectified as evidence) edges, per-agent tool_calls, and command-match syscall attribution (`agent_syscall`) since in-process sub-agents share one cgroup |
-| Graph Explorer lenses | `graph lens` projects the canonical graph into default, security, process, file-artifact, network-egress, data-flow-taint, agent-intent, orchestration, trust-origin, and sandbox-boundary views; `summary` mode uses Run Overview plus `process_group`, `event_burst`, `file_group`, `risk_group`, `egress_group`, `intent_group`, `trust_group`, and `boundary_group` nodes while keeping raw events queryable; `expanded` keeps high-value details without low-value noise, and `raw` exposes full evidence for focused forensics; group nodes carry drill-down metadata for local expansion, node selection supports lineage/upstream/downstream/children/raw-events controls, and derived edges are marked with derivation rule, confidence, counts, and evidence refs |
-| Graph verify | checks object hashes, parent links, and the policy → risk → response → signal chain (white-box and external-telemetry runs) |
+| LLM-intent causality | captured LLM traffic is materialized into the signed graph (`graph materialize-llm`): each body becomes a content-addressed `llm_message` object, each request/response pair a first-class `llm_call` node, and `llm_caused` edges attribute a syscall to the model call **only when the executed command matches what the model's response actually decided** — so "the model told it to" stays narrow and verifiable |
+| Graph Explorer lenses | `graph lens` projects the canonical graph into default, security, process, file-artifact, network-egress, data-flow-taint, agent-intent (a causal intent DAG over real evidence nodes: `llm_call` → decided command → process → runtime events → risk, with blocked/refused intents grouped by the agent that proposed them), orchestration, trust-origin, and sandbox-boundary views; `summary` mode uses Run Overview plus `process_group`, `event_burst`, `file_group`, `risk_group`, `egress_group`, `intent_group`, `trust_group`, and `boundary_group` nodes while keeping raw events queryable; `expanded` keeps high-value details without low-value noise, and `raw` exposes full evidence for focused forensics; group nodes carry drill-down metadata for local expansion, node selection supports lineage/upstream/downstream/children/raw-events controls, and derived edges are marked with derivation rule, confidence, counts, and evidence refs |
+| Graph verify | checks object hashes, parent links, and the policy → risk → response → signal chain (app-context and external-telemetry runs) |
 | Correlation explain | `telemetry correlations` — raw identity, resolved context, matched binding, confidence, and time window per event |
 
 **Query & observe**
@@ -944,7 +828,7 @@ What these mean:
 | Evidence query | `graph explain` over file / artifact / process / event / tool_call / attempt / risk with bounded, paged causality paths |
 | Diff / blame | file-level diff and blame, joined to runtime events and content-addressed objects |
 | Evidence manifest | `evidence manifest` — a run-level, hash-indexed evidence index (`--materialize` to an object) |
-| Web dashboard | `dashboard serve` — local read-only UI: Run Overview question entries, Graph Explorer lenses, Focused Evidence, Run Timeline, verify status, signals, process tree, egress |
+| Web dashboard | `dashboard serve` — local read-only UI: Run Overview question entries, Graph Explorer lenses (summary follows the LLM lifecycle spine when a captured model call exists), Focused Evidence, Run Timeline, verify status, signals, process tree, egress; readable execve labels and tool_call/event content previews |
 
 **Security & signals**
 
@@ -1012,11 +896,11 @@ Run:
 ```mermaid
 flowchart TD
     Agent["Agent / Harness / Benchmark / Red-team / RL Pipeline"] --> CLI["agentprov CLI"]
-    Agent --> SDK["Optional SDK / Tool Router"]
+    Agent --> Enrich["Context Enrichment\nhooks bridge / MCP context-write"]
     Agent --> Recorder["Zero-SDK Recorder\nagentprov record -- <cmd>"]
 
     CLI --> Boundary
-    SDK --> Boundary
+    Enrich --> Boundary
     Recorder --> Boundary
     RuntimeTelemetry["Runtime Telemetry\nnative eBPF / Falco / Tetragon / auditd"] --> Boundary
     SandboxIdentity["Sandbox Identity\ncontainer / cgroup / pid / cwd / time"] --> Boundary
@@ -1061,7 +945,8 @@ execution degrades to directory/filesystem provenance instead of pretending to
 provide VM-level resume.
 
 All producers enter through the API/Ingest Boundary. Zero-SDK recorders,
-SDK/tool routers, telemetry receivers, sandbox adapters, and external evaluator
+context-enrichment producers (hooks bridge, MCP context-write), telemetry
+receivers, sandbox adapters, and external evaluator
 signals are producer inputs; they should not bypass validation, normalization,
 identity binding, redaction, spool/backpressure, or retention controls to write
 directly into the core evidence graph.
@@ -1074,10 +959,11 @@ Substrate integrations are downstream of the provenance model:
 - OpenSandbox, gVisor, Firecracker, and Kata are future runtime substrates.
 - Kubernetes, Ray, Batch, and cloud systems are orchestration substrates.
 - Falco, Tetragon, LoongCollector, auditd, and eBPF are telemetry substrates.
-  AgentProvenance consumes already-filtered Tetragon/Falco/LoongCollector JSONL
-  through `agentprov telemetry ingest-jsonl`, adds a dedicated
-  `agentprov telemetry ingest-falco` receiver for Falco JSON/stdout streams,
-  records a hashable batch manifest, and ships a native Linux eBPF sensor.
+  The featured kernel-evidence source is the native Linux eBPF sensor; hosts
+  that already run Falco/Tetragon (or can't load the native sensor) can fold
+  their filtered JSONL into the same DAG via `telemetry ingest-jsonl` /
+  `ingest-falco`, with a hashable batch manifest
+  ([docs/falco-receiver.md](docs/falco-receiver.md)).
 - `agentprov sensor stream` is the supervised local path: a per-node native
   sensor streams normalized kernel events into the same ingest/correlation/
   policy/risk path. When paired with `record` on Linux, a real cgroup-per-scope
@@ -1117,7 +1003,8 @@ cmd/agentprov-sensor/ native eBPF sensor (Linux)
 internal/cli/         command parsing and output
 
 internal/record/      zero-SDK command recorder
-internal/sensor/      native eBPF sensor (exec/connect/file/privesc/tamper/TLS/DNS); Linux-only, arm64
+internal/sensor/      native eBPF sensor (exec/connect/file/privesc/tamper/TLS-body/DNS); Linux-only, arm64
+internal/tlsintent/   TLS chunk -> full HTTP message reassembly + LLM request/response semantics
 internal/telemetry/   normalized runtime event schema, JSONL ingest, TLS HTTP metadata, correlation inputs
 internal/correlation/ ToolCallScope and runtime identity binding
 internal/provenance/  timeline, graph trace, refs, objects, diff, blame, verify, replay
@@ -1169,6 +1056,17 @@ central evidence service deferred to v2.
 
 Recently landed:
 
+- **LLM-intent provenance** (`internal/tlsintent`, `graph materialize-llm`) -
+  the sensor captures the agent's actual LLM traffic as full TLS bodies
+  (chunked SSL_write/SSL_read), userspace reassembles them into complete
+  HTTP/1.1 messages (Content-Length / chunked / SSE; h2 detected, passed
+  through raw) and parses model/tools/decided-commands semantics; each body is
+  objectified as a content-addressed `llm_message`, each request/response pair
+  becomes an `llm_call` node, and `llm_caused` edges are drawn only to the
+  command the model's response actually decided. The agent-intent lens renders
+  this as a causal DAG (with blocked/refused intents grouped by proposing
+  agent), and `demo/llm-judge` closes the loop: an external LLM judges the
+  full trajectory while its own calls are captured into the graph.
 - **Multi-agent orchestration provenance** (`internal/hooksbridge`,
   `agentprov hooks bridge`) - a harness-hooks bridge turns a Claude Code (or
   compatible) agent team's hooks into graph structure: agent nodes (`agents`
@@ -1197,8 +1095,9 @@ Recently landed:
   writers; correlation bindings bound stale-open over-matching.
 - **Native eBPF sensor expansion** (`internal/sensor`, validated live on an arm64
   VM) - sensitive file reads (-> `secret_path`), privilege changes
-  (setuid/setgid/ptrace), file tamper (rename/unlink), TLS plaintext -> privacy-
-  safe HTTP metadata + `llm_call` pairing, `process_exit` closing correlation
+  (setuid/setgid/ptrace), file tamper (rename/unlink), TLS plaintext capture
+  (since upgraded to full request/response bodies -> `llm_call` pairing, see
+  LLM-intent provenance above), `process_exit` closing correlation
   windows, and DNS (getaddrinfo). In-kernel noise filtering before ring-buffer
   reserve removed a containerd-teardown firehose. Privilege-escalation policy
   rules (ptrace, setuid-to-root -> quarantine).
@@ -1215,8 +1114,9 @@ Next / open:
   kprobe; `getaddrinfo` covers glibc today), IPv6/UDP connect, and multi-arch
   (x86 `PT_REGS`; arm64-only today). `ptrace` is captured but not yet exercised
   end to end in a test.
-- **TLS depth** — HTTP/2 HPACK header decode and SSE reassembly (HTTP/1.1 plus
-  h2 detection today).
+- **TLS depth** — HTTP/2 HPACK header decode and h2 body reassembly (HTTP/1.1
+  Content-Length / chunked / SSE reassembly is done; h2 is detected and passed
+  through raw today).
 - **Tamper-evidence (v2)** — off-host / capture-time signing (KMS / TPM /
   transparency log). v1 is integrity plus optional local signing, not proof
   against a host-root attacker.

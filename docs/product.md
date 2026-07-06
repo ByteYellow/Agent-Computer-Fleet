@@ -54,21 +54,13 @@ RL pipeline. It emits structured trajectory evidence, behavior deviations,
 runtime/security signals, and provenance context so the external evaluator,
 trainer, or harness can assign reward, penalty, filtering, or review decisions.
 
-## Two Context Modes
+## Evidence Layers
 
-### White-box mode
+AgentProvenance does not ask users to choose an integration mode. There is one
+entry point — wrap the command — and evidence accumulates in layers on top of
+it.
 
-The agent harness, SDK, tool router, or framework provides explicit context:
-
-```text
-run_id / session_id / attempt_id / tool_call_id / tool_name / args_hash
-```
-
-This mode gives the highest precision and is suitable for Agentix-style
-harnesses, internal coding-agent systems, LangGraph-like execution engines, and
-custom tool routers.
-
-### Zero-SDK mode
+### Kernel / runtime facts (foundation)
 
 The user runs:
 
@@ -90,8 +82,7 @@ root process / process tree / cwd / timestamp / container_id / cgroup_id
   / file diff / artifact refs
 ```
 
-Zero-SDK mode is broader than white-box tool-router integration, but it has two
-precision tiers:
+The foundation has two precision tiers:
 
 - **record-only:** synthetic scope id + process sampling + file diff. This is
   correct when no kernel sensor is running.
@@ -102,8 +93,27 @@ precision tiers:
 Both tiers are useful because raw system-side telemetry cannot be expected to
 carry application-level `tool_call_id`.
 
-The long-term direction is SDK-optional, proxy-optional, and vendor-neutral:
-white-box context where available, runtime inference where not.
+### Application context (enrichment)
+
+On top of the kernel foundation, application-side producers add the semantics
+no syscall stream can express:
+
+- **Harness hooks** (`agentprov hooks bridge`): agent identity, delegation
+  (`agent_spawn`) and peer-message (`agent_message`) edges, per-agent tool
+  calls, and refused intents from an orchestrating harness such as Claude Code.
+- **MCP context-write** (`bind_scope` / `record_tool_call` via `ai call` /
+  `ai mcp`): explicit `run_id / session_id / attempt_id / tool_call_id /
+  tool_name / args_hash` context, asserted by the application at tool-call
+  time.
+
+Enrichment is not a separate integration mode and requires no SDK: when the
+context is available it attaches to the same run, and when it is not, the
+kernel layer stands alone. Trust is asymmetric by design — app-asserted
+context carries `binding_source=ai_asserted` with a `<=0.5` confidence cap and
+never overrides kernel facts.
+
+The direction is proxy-optional and vendor-neutral: application context where
+available, runtime inference where not — layered, not either/or.
 
 ## Product Boundary
 

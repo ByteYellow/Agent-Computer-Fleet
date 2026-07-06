@@ -247,7 +247,7 @@ record's own scopes a real kernel join key.
   refresh interval are eased. Scrubber `edgeVisible` now respects the edge's own
   time instead of only its endpoints'.
 - Recaptured the snake / supply-chain demo bundle under the new supervised mode,
-  signed (`demo/snake-supply-chain/run-snake-supervised.forensics.json`),
+  signed (`demo/snake-supply-chain/run-snake-supervised.forensics.json.gz`),
   replacing the older pre-cgroup bundle: the agent's product (`snake.py`) is
   objectified and previewable, the supply-chain TTP correlates @0.98 +
   `self_launched`, and `graph verify` is clean.
@@ -368,7 +368,7 @@ Import the signed bundle:
 go build -o /tmp/agentprov ./cmd/agentprov
 
 /tmp/agentprov --data-dir /tmp/snake-replay forensics import \
-  demo/snake-supply-chain/run-snake-supervised.forensics.json \
+  demo/snake-supply-chain/run-snake-supervised.forensics.json.gz \
   --pub-key demo/snake-supply-chain/attestation.pub
 
 /tmp/agentprov --data-dir /tmp/snake-replay dashboard serve --addr 127.0.0.1:7396

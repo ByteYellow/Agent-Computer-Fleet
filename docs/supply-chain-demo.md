@@ -61,7 +61,7 @@ go build -o /tmp/agentprov ./cmd/agentprov
 # --pub-key verifies the in-toto/DSSE attestation BEFORE loading; tamper => refused
 
 /tmp/agentprov --data-dir /tmp/snake-demo dashboard serve
-# open the printed URL; run "run-4084e7bb3dda" auto-loads
+# open the printed URL; run "run-snake-supervised" auto-loads
 ```
 
 Re-serve later with the same `--data-dir /tmp/snake-demo` — no re-import needed.
@@ -109,7 +109,7 @@ Recommended investigation order:
 
 ```bash
 agentprov --data-dir /tmp/snake-demo compliance map \
-  --framework owasp-asi --run run-4084e7bb3dda
+  --framework owasp-asi --run run-snake-supervised
 ```
 
 Or the dashboard's **Compliance** card. The verdict per control is **four honest

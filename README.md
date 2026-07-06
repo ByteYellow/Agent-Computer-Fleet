@@ -789,7 +789,7 @@ VM and shipped as a **signed, portable forensics bundle** that replays offline:
 ./agentprov --data-dir /tmp/snake-replay forensics import \
   demo/snake-supply-chain/run-snake-supervised.forensics.json.gz \
   --pub-key demo/snake-supply-chain/attestation.pub        # verifies the signature, then imports
-./agentprov --data-dir /tmp/snake-replay dashboard serve   # open run "run-4084e7bb3dda"
+./agentprov --data-dir /tmp/snake-replay dashboard serve   # open run "run-snake-supervised"
 ```
 
 <p align="center">
@@ -824,8 +824,8 @@ attached to the branch**.
 ./agentprov --data-dir /tmp/multiagent-replay forensics import \
   demo/multiagent-provenance/run-double-attempt.forensics.json.gz \
   --pub-key demo/multiagent-provenance/attestation.pub
-./agentprov --data-dir /tmp/multiagent-replay graph verify --run run-d1d0f1a6fd68
-./agentprov --data-dir /tmp/multiagent-replay graph lens --run run-d1d0f1a6fd68 --lens orchestration
+./agentprov --data-dir /tmp/multiagent-replay graph verify --run run-double-attempt
+./agentprov --data-dir /tmp/multiagent-replay graph lens --run run-double-attempt --lens orchestration
 ./agentprov --data-dir /tmp/multiagent-replay dashboard serve
 ```
 

@@ -96,7 +96,7 @@ agentprov --data-dir /tmp/view init
 agentprov --data-dir /tmp/view forensics import \
   demo/multiagent-provenance/run-double-attempt.forensics.json.gz \
   --pub-key demo/multiagent-provenance/attestation.pub
-agentprov --data-dir /tmp/view graph verify --run run-d1d0f1a6fd68   # → status=ok
+agentprov --data-dir /tmp/view graph verify --run run-double-attempt   # → status=ok
 agentprov --data-dir /tmp/view dashboard serve --addr 127.0.0.1:7396   # open, pick the "Orchestration" lens
 ```
 
@@ -134,7 +134,7 @@ hash-addressed evidence node), each agent's `agent_tool_call`s including recon's
   targets (`.aws/credentials`, the api_token) read by bob's install. This is a
   default-policy convenience, not a security verdict — dump and edit the list with
   `agentprov policy rules`, then apply the edited policy to this already-captured
-  run with `agentprov security reevaluate --run run-d1d0f1a6fd68 --rules <file>`
+  run with `agentprov security reevaluate --run run-double-attempt --rules <file>`
   (recomputes the risk layer from the stored events; no re-capture, raw data kept).
 
 Build/consumer side: schema (`agents` table + `tool_calls.agent_id`), the

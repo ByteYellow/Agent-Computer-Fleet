@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/byteyellow/agentprovenance/internal/redact"
 	"github.com/byteyellow/agentprovenance/internal/store"
 )
 
@@ -384,6 +385,13 @@ func (c *materializeContext) put(obj provenanceObject) (string, error) {
 	raw, err := json.Marshal(obj)
 	if err != nil {
 		return "", err
+	}
+	// Backstop redaction before the object is hashed: content-addressed objects
+	// (LLM message bodies, artifacts) are exported and shared, so mask any secret
+	// here too. Redacting before the hash keeps the object self-consistent (the
+	// stored hash matches the stored, masked bytes on import verification).
+	if red, changed := redact.Redact(string(raw)); changed {
+		raw = []byte(red)
 	}
 	sum := sha256.Sum256(raw)
 	hash := "sha256:" + hex.EncodeToString(sum[:])

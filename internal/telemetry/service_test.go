@@ -414,3 +414,47 @@ func getEvent(t *testing.T, db *sql.DB, id string) EventRecord {
 	t.Fatalf("event %s not found", id)
 	return EventRecord{}
 }
+
+// TestIngestFilteredRedactsSecretsButKeepsDetectionTargets pins the capture-time
+// redaction contract: a live API key captured in an execve's argv must be masked
+// in the stored event, while the policy detection target in the same command
+// (the metadata IP) must survive untouched — redaction cannot blind the signal.
+func TestIngestFilteredRedactsSecretsButKeepsDetectionTargets(t *testing.T) {
+	root := t.TempDir()
+	paths, err := store.Init(filepath.Join(root, ".agentprov"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	const key = "sk-003fe97861dc48ebba10d6d391e4cebe"
+	if _, err := IngestFiltered(db, IngestEvent{
+		RunID:      "run-red",
+		RawEventID: "raw-red",
+		PID:        4242,
+		EventType:  "execve",
+		Source:     "agentprov_ebpf",
+		Payload:    `{"argv":["curl","-H","x-api-key:","` + key + `","http://169.254.169.254/latest/meta-data/"]}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	events, err := ListEventsFiltered(db, Filter{RunID: "run-red"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	payload := events[0].Payload
+	if strings.Contains(payload, key) {
+		t.Errorf("API key survived in stored event: %s", payload)
+	}
+	if !strings.Contains(payload, "169.254.169.254") {
+		t.Errorf("detection target (metadata IP) was lost: %s", payload)
+	}
+}

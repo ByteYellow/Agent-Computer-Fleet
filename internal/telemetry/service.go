@@ -11,6 +11,7 @@ import (
 
 	"github.com/byteyellow/agentprovenance/internal/correlation"
 	"github.com/byteyellow/agentprovenance/internal/ids"
+	"github.com/byteyellow/agentprovenance/internal/redact"
 )
 
 type EventRecord struct {
@@ -336,6 +337,12 @@ func IngestFiltered(db *sql.DB, event IngestEvent) (string, error) {
 	if err := ValidateRawPayload(event.EventType, event.Payload); err != nil {
 		return "", err
 	}
+	// Mask secrets at the capture boundary: raw telemetry (an execve's full argv,
+	// a captured TLS body) can carry a live API key, and this payload flows on to
+	// the store, the dashboard, --json output, and signed bundles. Redacting here
+	// keeps the store itself clean; policy targets (IPs, file paths) and LLM
+	// semantics live in different fields and are preserved.
+	event.Payload = redact.RedactString(event.Payload)
 	raw := correlation.RawIdentity{
 		RunID:       event.RunID,
 		ProcessID:   event.ProcessID,

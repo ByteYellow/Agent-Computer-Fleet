@@ -16,6 +16,7 @@ import (
 
 	"github.com/byteyellow/agentprovenance/internal/correlation"
 	"github.com/byteyellow/agentprovenance/internal/ids"
+	"github.com/byteyellow/agentprovenance/internal/redact"
 	"github.com/byteyellow/agentprovenance/internal/security"
 	"github.com/byteyellow/agentprovenance/internal/store"
 	"github.com/byteyellow/agentprovenance/internal/substrate/state"
@@ -599,6 +600,13 @@ func (s Service) objectifyArtifact(runID, rolloutID, workdir, rel string) {
 	})
 	if err != nil {
 		return
+	}
+	// Mask secrets before the file content is hashed and stored: an agent can
+	// write a key into a file, and this content becomes a previewable, exportable,
+	// content-addressed object. Redact before the hash so the object stays
+	// self-consistent (stored hash matches the stored, masked bytes on import).
+	if red, changed := redact.Redact(string(raw)); changed {
+		raw = []byte(red)
 	}
 	sum := sha256.Sum256(raw)
 	h := hex.EncodeToString(sum[:])

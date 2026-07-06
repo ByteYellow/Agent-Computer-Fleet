@@ -26,7 +26,7 @@ To regenerate them: replay the captured run and open the dashboard —
 
 ```sh
 ./agentprov --data-dir /tmp/snake-replay forensics import \
-  demo/snake-supply-chain/run-snake-supervised.forensics.json \
+  demo/snake-supply-chain/run-snake-supervised.forensics.json.gz \
   --pub-key demo/snake-supply-chain/attestation.pub
 ./agentprov --data-dir /tmp/snake-replay dashboard serve   # http://127.0.0.1:7396
 ```

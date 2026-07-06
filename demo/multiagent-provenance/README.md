@@ -82,7 +82,7 @@ kernel-level provenance is the backstop. One graph shows both layers.
 
 ## What's in this folder
 
-- `run-double-attempt.forensics.json` — the **signed, replayable bundle** of the
+- `run-double-attempt.forensics.json.gz` — the **signed, replayable bundle** of the
   real VM capture (genuine eBPF syscalls, not a fixture).
 - `run-double-attempt.forensics.dsse.json` + `attestation.pub` — the DSSE
   attestation + public key; the bundle is tamper-evident.
@@ -94,7 +94,7 @@ kernel-level provenance is the backstop. One graph shows both layers.
 agentprov --data-dir /tmp/view init
 # --pub-key verifies the DSSE attestation BEFORE loading; import refuses on tamper.
 agentprov --data-dir /tmp/view forensics import \
-  demo/multiagent-provenance/run-double-attempt.forensics.json \
+  demo/multiagent-provenance/run-double-attempt.forensics.json.gz \
   --pub-key demo/multiagent-provenance/attestation.pub
 agentprov --data-dir /tmp/view graph verify --run run-double-attempt   # → status=ok
 agentprov --data-dir /tmp/view dashboard serve --addr 127.0.0.1:7396   # open, pick the "Orchestration" lens

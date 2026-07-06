@@ -203,6 +203,14 @@ func (s Service) ExportBundle(runID string) (BundleInfo, error) {
 // the attestation is missing, the signature is invalid for pub, or the bundle on
 // disk no longer matches the signed digest (i.e. it was tampered after signing).
 func VerifyBundleAttestation(bundlePath, attestationPath string, pub ed25519.PublicKey) error {
+	bundleRaw, err := readBundleBytes(bundlePath)
+	if err != nil {
+		return fmt.Errorf("read bundle: %w", err)
+	}
+	return VerifyBundleAttestationBytes(bundleRaw, attestationPath, pub)
+}
+
+func VerifyBundleAttestationBytes(bundleRaw []byte, attestationPath string, pub ed25519.PublicKey) error {
 	envRaw, err := os.ReadFile(attestationPath)
 	if err != nil {
 		return fmt.Errorf("read attestation: %w", err)
@@ -214,10 +222,6 @@ func VerifyBundleAttestation(bundlePath, attestationPath string, pub ed25519.Pub
 	stmt, err := attest.Verify(env, pub)
 	if err != nil {
 		return err
-	}
-	bundleRaw, err := os.ReadFile(bundlePath)
-	if err != nil {
-		return fmt.Errorf("read bundle: %w", err)
 	}
 	want := attest.DigestSHA256(bundleRaw)
 	if len(stmt.Subject) == 0 || stmt.Subject[0].Digest["sha256"] != want {

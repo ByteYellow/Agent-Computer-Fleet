@@ -25,7 +25,7 @@ version-control system**: there is no merge, checkout, or mutable working tree.
 ---
 
 <p align="center">
-  <img src="docs/assets/agentprovenance-architecture.svg" alt="AgentProvenance architecture: application context and system telemetry enter an ingest boundary, then become a verifiable provenance graph." width="100%">
+  <img src="docs/assets/three-axis-observability.svg" alt="AgentProvenance three-axis observability: system telemetry, application context, and model intent flow into one verifiable evidence graph." width="100%">
 </p>
 
 <p align="center">
@@ -714,7 +714,7 @@ VM and shipped as a **signed, portable forensics bundle** that replays offline:
 
 ```sh
 ./agentprov --data-dir /tmp/snake-replay forensics import \
-  demo/snake-supply-chain/run-snake-supervised.forensics.json \
+  demo/snake-supply-chain/run-snake-supervised.forensics.json.gz \
   --pub-key demo/snake-supply-chain/attestation.pub        # verifies the signature, then imports
 ./agentprov --data-dir /tmp/snake-replay dashboard serve   # open run "run-snake-supervised"
 ```
@@ -749,7 +749,7 @@ attached to the branch**.
 
 ```sh
 ./agentprov --data-dir /tmp/multiagent-replay forensics import \
-  demo/multiagent-provenance/run-double-attempt.forensics.json \
+  demo/multiagent-provenance/run-double-attempt.forensics.json.gz \
   --pub-key demo/multiagent-provenance/attestation.pub
 ./agentprov --data-dir /tmp/multiagent-replay graph verify --run run-double-attempt
 ./agentprov --data-dir /tmp/multiagent-replay graph lens --run run-double-attempt --lens orchestration
@@ -888,6 +888,10 @@ Run:
 ```
 
 ## Architecture
+
+<p align="center">
+  <img src="docs/assets/agentprovenance-architecture.svg" alt="AgentProvenance architecture: application context and system telemetry enter an ingest boundary, then become a verifiable provenance graph." width="100%">
+</p>
 
 <p align="center">
   <img src="docs/assets/architecture-overview.svg" alt="AgentProvenance architecture overview" width="920">

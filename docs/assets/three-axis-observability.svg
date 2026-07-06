@@ -1,0 +1,149 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="680" viewBox="0 0 1280 680" role="img" aria-labelledby="title desc">
+  <title id="title">AgentProvenance three-axis observability</title>
+  <desc id="desc">System telemetry, application context, and model intent flow into a verifiable AgentProvenance evidence graph.</desc>
+  <defs>
+    <style>
+      .bg{fill:#f8fafc}
+      .title{font:800 30px ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;fill:#0f172a}
+      .subtitle{font:15px ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;fill:#64748b}
+      .card{fill:#fff;stroke:#d8e0ea;stroke-width:1.7;filter:url(#shadow)}
+      .core{fill:url(#coreGrad);stroke:#4f46e5;stroke-width:2.4;filter:url(#shadow)}
+      .h{font:800 18px ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;fill:#0f172a}
+      .t{font:14px ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;fill:#334155}
+      .small{font:12.5px ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;fill:#64748b}
+      .mono{font:12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;fill:#475569}
+      .pill{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1.2}
+      .pillText{font:12px ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;fill:#334155}
+      .sys{stroke:#0ea5e9}.sysFill{fill:#e0f2fe}.sysDot{fill:#0ea5e9}
+      .app{stroke:#10b981}.appFill{fill:#dcfce7}.appDot{fill:#10b981}
+      .model{stroke:#8b5cf6}.modelFill{fill:#ede9fe}.modelDot{fill:#8b5cf6}
+      .verify{fill:#ecfdf5;stroke:#22c55e;stroke-width:1.5}
+      .risk{fill:#fff7ed;stroke:#fb923c;stroke-width:1.5}
+      .out{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1.2}
+      .edge{fill:none;stroke-width:3.2;stroke-linecap:round;marker-end:url(#arrow)}
+      .edgeOut{fill:none;stroke:#4f46e5;stroke-width:3.2;stroke-linecap:round;marker-end:url(#arrow)}
+      .label{font:700 12px ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;fill:#475569}
+    </style>
+    <filter id="shadow" x="-18%" y="-18%" width="136%" height="136%">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#0f172a" flood-opacity=".10"/>
+      <feDropShadow dx="0" dy="1" stdDeviation="1.5" flood-color="#0f172a" flood-opacity=".08"/>
+    </filter>
+    <linearGradient id="coreGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#eef2ff"/>
+      <stop offset=".58" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#ecfeff"/>
+    </linearGradient>
+    <linearGradient id="blueLine" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#0ea5e9"/>
+      <stop offset="1" stop-color="#4f46e5"/>
+    </linearGradient>
+    <linearGradient id="greenLine" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#10b981"/>
+      <stop offset="1" stop-color="#4f46e5"/>
+    </linearGradient>
+    <linearGradient id="purpleLine" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#8b5cf6"/>
+      <stop offset="1" stop-color="#4f46e5"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8.7" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#4f46e5"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" width="1280" height="680"/>
+  <text x="52" y="56" class="title"><tspan fill="#0071e3">Agent</tspan>Provenance: Three-Axis Observability</text>
+  <text x="52" y="85" class="subtitle">Runtime facts + agent semantics + model intent become one verifiable evidence graph.</text>
+
+  <!-- Inputs -->
+  <g id="system-telemetry">
+    <rect x="58" y="132" width="326" height="132" rx="22" class="card sys"/>
+    <circle cx="92" cy="172" r="10" class="sysDot"/>
+    <text x="116" y="177" class="h">System Telemetry</text>
+    <text x="86" y="207" class="small">host-level ground truth</text>
+    <rect x="86" y="226" width="82" height="28" rx="14" class="pill"/>
+    <text x="108" y="245" class="pillText">eBPF</text>
+    <rect x="178" y="226" width="92" height="28" rx="14" class="pill"/>
+    <text x="197" y="245" class="pillText">cgroup</text>
+    <rect x="280" y="226" width="74" height="28" rx="14" class="pill"/>
+    <text x="300" y="245" class="pillText">TLS</text>
+  </g>
+
+  <g id="application-context">
+    <rect x="58" y="292" width="326" height="132" rx="22" class="card app"/>
+    <circle cx="92" cy="332" r="10" class="appDot"/>
+    <text x="116" y="337" class="h">Application Context</text>
+    <text x="86" y="367" class="small">agent and tool semantics</text>
+    <rect x="86" y="386" width="90" height="28" rx="14" class="pill"/>
+    <text x="105" y="405" class="pillText">run</text>
+    <rect x="186" y="386" width="96" height="28" rx="14" class="pill"/>
+    <text x="202" y="405" class="pillText">tool_call</text>
+    <rect x="292" y="386" width="62" height="28" rx="14" class="pill"/>
+    <text x="307" y="405" class="pillText">msg</text>
+  </g>
+
+  <g id="model-intent">
+    <rect x="58" y="452" width="326" height="132" rx="22" class="card model"/>
+    <circle cx="92" cy="492" r="10" class="modelDot"/>
+    <text x="116" y="497" class="h">Model Intent</text>
+    <text x="86" y="527" class="small">what the model decided or refused</text>
+    <rect x="86" y="546" width="92" height="28" rx="14" class="pill"/>
+    <text x="104" y="565" class="pillText">request</text>
+    <rect x="188" y="546" width="94" height="28" rx="14" class="pill"/>
+    <text x="204" y="565" class="pillText">response</text>
+    <rect x="292" y="546" width="62" height="28" rx="14" class="pill"/>
+    <text x="309" y="565" class="pillText">judge</text>
+  </g>
+
+  <!-- Core -->
+  <rect x="492" y="150" width="334" height="390" rx="30" class="core"/>
+  <text x="548" y="200" class="h">AgentProvenance Graph</text>
+  <text x="548" y="225" class="small">the trust boundary</text>
+  <rect x="544" y="270" width="230" height="48" rx="15" class="verify"/>
+  <text x="575" y="300" class="t">content-addressed</text>
+  <rect x="544" y="336" width="230" height="48" rx="15" class="verify"/>
+  <text x="583" y="366" class="t">causal lineage</text>
+  <rect x="544" y="402" width="230" height="48" rx="15" class="risk"/>
+  <text x="581" y="432" class="t">risk + response</text>
+  <rect x="544" y="468" width="230" height="48" rx="15" class="verify"/>
+  <text x="576" y="498" class="t">verify · replay · audit</text>
+
+  <!-- Input arrows -->
+  <path d="M384 198 C430 198 442 238 492 285" class="edge" stroke="url(#blueLine)"/>
+  <path d="M384 358 C428 358 448 382 492 382" class="edge" stroke="url(#greenLine)"/>
+  <path d="M384 518 C430 518 442 478 492 431" class="edge" stroke="url(#purpleLine)"/>
+  <text x="408" y="185" class="label">facts</text>
+  <text x="408" y="344" class="label">context</text>
+  <text x="408" y="535" class="label">intent</text>
+
+  <!-- Outputs -->
+  <rect x="884" y="132" width="306" height="452" rx="24" class="card"/>
+  <text x="918" y="176" class="h">What You Can Ask</text>
+  <text x="918" y="203" class="small">query-first investigation surfaces</text>
+
+  <rect x="918" y="242" width="236" height="44" rx="14" class="out"/>
+  <circle cx="942" cy="264" r="6" class="sysDot"/>
+  <text x="960" y="269" class="t">Which process did it?</text>
+
+  <rect x="918" y="304" width="236" height="44" rx="14" class="out"/>
+  <circle cx="942" cy="326" r="6" class="appDot"/>
+  <text x="960" y="331" class="t">Which agent caused it?</text>
+
+  <rect x="918" y="366" width="236" height="44" rx="14" class="out"/>
+  <circle cx="942" cy="388" r="6" class="modelDot"/>
+  <text x="960" y="393" class="t">What did the model intend?</text>
+
+  <rect x="918" y="428" width="236" height="44" rx="14" class="out"/>
+  <circle cx="942" cy="450" r="6" fill="#fb923c"/>
+  <text x="960" y="455" class="t">Why was it risky?</text>
+
+  <rect x="918" y="490" width="236" height="44" rx="14" class="out"/>
+  <circle cx="942" cy="512" r="6" fill="#22c55e"/>
+  <text x="960" y="517" class="t">Can we verify it later?</text>
+
+  <path d="M826 345 C854 345 862 345 884 345" class="edgeOut"/>
+
+  <!-- Trust note -->
+  <rect x="492" y="586" width="690" height="52" rx="18" fill="#ffffff" stroke="#e2e8f0" stroke-width="1.4"/>
+  <text x="522" y="615" class="mono">LLM-as-Analyst, Provenance-as-Trust Boundary</text>
+  <text x="808" y="615" class="small">Models analyze. The graph is verified.</text>
+</svg>

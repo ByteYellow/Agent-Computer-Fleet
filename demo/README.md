@@ -65,7 +65,7 @@ Each folder's `README.md` has the exact commands + the diagrams. The shape is:
 
 ```sh
 agentprov --data-dir /tmp/view init
-agentprov --data-dir /tmp/view forensics import <folder>/<run>.forensics.json \
+agentprov --data-dir /tmp/view forensics import <folder>/<run>.forensics.json.gz \
   --pub-key <folder>/attestation.pub          # verifies the signature BEFORE loading
 agentprov --data-dir /tmp/view graph verify --run <run>        # → status=ok
 agentprov --data-dir /tmp/view dashboard serve --addr 127.0.0.1:7396
@@ -75,3 +75,7 @@ Both bundles can be imported into one `--data-dir` and switched via the run
 selector. The **Orchestration** lens (Stage 2) draws the agent topology. Capture
 harnesses live under each `capture/`; full design notes: memory
 `agentprov-multiagent-demo-todo.md`.
+
+Demo replay fixtures are committed as compressed `*.forensics.json.gz` bundles.
+Do not commit regenerated raw `*.forensics.json` captures; keep raw exports local
+or publish large captures as release assets.

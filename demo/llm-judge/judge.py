@@ -581,7 +581,7 @@ def cmd_run(args):
         print("==> importing snake-supply-chain bundle into fresh store")
         sh([binary, "--data-dir", data_dir, "forensics", "import", "--json",
             os.path.join(demo_dir, "..", "snake-supply-chain",
-                         "run-snake-supervised.forensics.json")])
+                         "run-snake-supervised.forensics.json.gz")])
         target = target or "run-snake-supervised"
     if not target:
         sys.exit("--run is required when --data-dir is given")

@@ -93,7 +93,7 @@ func forensicsCmd(dataDir, daemonURL *string) *cobra.Command {
 	exportBatch.Flags().BoolVar(&jsonOut, "json", false, "emit structured batch forensics export JSON")
 	var importPubKey string
 	importCmd := &cobra.Command{
-		Use:   "import <bundle.json>",
+		Use:   "import <bundle.json|bundle.json.gz>",
 		Short: "import a forensics bundle into the local store (replay a captured run)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -139,7 +139,7 @@ func importForensics(dataDir, bundlePath, pubKeyPath string) (forensics.ImportIn
 		if err != nil {
 			return forensics.ImportInfo{}, err
 		}
-		attPath := strings.TrimSuffix(bundlePath, ".json") + ".dsse.json"
+		attPath := forensicsAttestationPath(bundlePath)
 		if err := forensics.VerifyBundleAttestation(bundlePath, attPath, pub); err != nil {
 			return forensics.ImportInfo{}, fmt.Errorf("attestation verify failed: %w", err)
 		}
@@ -155,6 +155,12 @@ func importForensics(dataDir, bundlePath, pubKeyPath string) (forensics.ImportIn
 	defer db.Close()
 	svc := forensics.Service{DB: db, Paths: paths}
 	return svc.ImportBundle(bundlePath)
+}
+
+func forensicsAttestationPath(bundlePath string) string {
+	path := strings.TrimSuffix(bundlePath, ".gz")
+	path = strings.TrimSuffix(path, ".json")
+	return path + ".dsse.json"
 }
 
 func exportForensics(dataDir, daemonURL, runID, signKeyPath string) (forensics.BundleInfo, error) {

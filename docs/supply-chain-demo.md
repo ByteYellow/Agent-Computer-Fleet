@@ -55,7 +55,7 @@ signature verification), then serve it:
 ```bash
 go build -o /tmp/agentprov ./cmd/agentprov
 
-/tmp/agentprov forensics import demo/snake-supply-chain/run-snake-supervised.forensics.json \
+/tmp/agentprov forensics import demo/snake-supply-chain/run-snake-supervised.forensics.json.gz \
   --pub-key demo/snake-supply-chain/attestation.pub \
   --data-dir /tmp/snake-demo
 # --pub-key verifies the in-toto/DSSE attestation BEFORE loading; tamper => refused
@@ -139,7 +139,7 @@ Important semantics:
 
 ```bash
 agentprov forensics verify-attestation \
-  demo/snake-supply-chain/run-snake-supervised.forensics.json \
+  demo/snake-supply-chain/run-snake-supervised.forensics.json.gz \
   --pub-key demo/snake-supply-chain/attestation.pub
 ```
 

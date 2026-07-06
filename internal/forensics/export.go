@@ -17,6 +17,7 @@ import (
 	"github.com/byteyellow/agentprovenance/internal/attest"
 	"github.com/byteyellow/agentprovenance/internal/evidence"
 	"github.com/byteyellow/agentprovenance/internal/ids"
+	"github.com/byteyellow/agentprovenance/internal/redact"
 	"github.com/byteyellow/agentprovenance/internal/store"
 	"github.com/byteyellow/agentprovenance/internal/telemetry"
 )
@@ -121,6 +122,15 @@ func (s Service) ExportBundle(runID string) (BundleInfo, error) {
 		}
 		bundle[spec.key] = rows
 	}
+	// Backstop redaction: mask secrets in every event payload before the bundle
+	// is hashed and signed. Capture-time redaction (telemetry ingest, object
+	// materialize) is the primary defense; this guarantees no bundle ever ships
+	// a plaintext credential regardless of which writer might have missed it —
+	// the export is the one sink that leaves the host and gets committed/shared.
+	// Object blob content is redacted at materialize time instead (it is
+	// content-addressed, so masking here would break its hash on import).
+	redactBundleEventPayloads(bundle["events"])
+
 	// Embed artifact content inline so the bundle is self-contained AND the DSSE
 	// signature covers it (tampering a captured artifact then breaks the signature).
 	// Content over maxInlineContentBytes is NOT embedded — it is recorded in
@@ -193,6 +203,14 @@ func (s Service) ExportBundle(runID string) (BundleInfo, error) {
 // the attestation is missing, the signature is invalid for pub, or the bundle on
 // disk no longer matches the signed digest (i.e. it was tampered after signing).
 func VerifyBundleAttestation(bundlePath, attestationPath string, pub ed25519.PublicKey) error {
+	bundleRaw, err := readBundleBytes(bundlePath)
+	if err != nil {
+		return fmt.Errorf("read bundle: %w", err)
+	}
+	return VerifyBundleAttestationBytes(bundleRaw, attestationPath, pub)
+}
+
+func VerifyBundleAttestationBytes(bundleRaw []byte, attestationPath string, pub ed25519.PublicKey) error {
 	envRaw, err := os.ReadFile(attestationPath)
 	if err != nil {
 		return fmt.Errorf("read attestation: %w", err)
@@ -204,10 +222,6 @@ func VerifyBundleAttestation(bundlePath, attestationPath string, pub ed25519.Pub
 	stmt, err := attest.Verify(env, pub)
 	if err != nil {
 		return err
-	}
-	bundleRaw, err := os.ReadFile(bundlePath)
-	if err != nil {
-		return fmt.Errorf("read bundle: %w", err)
 	}
 	want := attest.DigestSHA256(bundleRaw)
 	if len(stmt.Subject) == 0 || stmt.Subject[0].Digest["sha256"] != want {
@@ -374,4 +388,18 @@ func selectRows(db *sql.DB, query string, args ...any) ([]map[string]any, error)
 		result = append(result, item)
 	}
 	return result, rows.Err()
+}
+
+// redactBundleEventPayloads masks secrets in the `payload` column of every
+// dumped event row, in place, before the bundle is hashed and signed.
+func redactBundleEventPayloads(rows any) {
+	list, ok := rows.([]map[string]any)
+	if !ok {
+		return
+	}
+	for _, row := range list {
+		if p, ok := row["payload"].(string); ok && p != "" {
+			row["payload"] = redact.RedactString(p)
+		}
+	}
 }

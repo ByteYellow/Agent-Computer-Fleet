@@ -13,7 +13,8 @@ import (
 // Options mirrors the Linux build's sensor options so callers compile on any
 // platform (see sensor_linux.go for the real fields).
 type Options struct {
-	SSLLib string
+	SSLLib  string
+	OnReady func()
 }
 
 // Run is unavailable off Linux (eBPF requires a Linux kernel).

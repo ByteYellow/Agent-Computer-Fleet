@@ -206,6 +206,21 @@ func Ingest(db *sql.DB, r io.Reader, opts Options) (Summary, error) {
 					return sum, err
 				}
 			}
+		case "Stop", "StopFailure":
+			// A refusal can also land on the MAIN agent's Stop -- the model
+			// declines the task outright instead of spawning a teammate that then
+			// refuses. Surface it as a refused node too (attributed to main), so a
+			// visible-intent refusal is captured whichever agent said it.
+			agentID := ev.AgentID
+			if agentID == "" {
+				agentID = mainAgentID
+			}
+			ensure(agentID)
+			if ev.LastMsg != "" && isSecurityRefusal(ev.LastMsg) {
+				if err := writeRefusal(db, opts.RunID, agentID, ev.LastMsg, ts, &sum); err != nil {
+					return sum, err
+				}
+			}
 		}
 	}
 

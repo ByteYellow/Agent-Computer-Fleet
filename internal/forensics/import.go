@@ -1,6 +1,8 @@
 package forensics
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -8,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -63,7 +66,7 @@ var importTableOrder = []string{
 // import into a fresh `init`'d store on any machine. Rows are inserted verbatim
 // with INSERT OR REPLACE inside a single transaction.
 func (s Service) ImportBundle(path string) (ImportInfo, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := readBundleBytes(path)
 	if err != nil {
 		return ImportInfo{}, fmt.Errorf("read bundle: %w", err)
 	}
@@ -147,6 +150,26 @@ func (s Service) ImportBundle(path string) (ImportInfo, error) {
 	info.SnapshotFiles = snapshotFiles
 	info.Omitted = omitted
 	return info, nil
+}
+
+func readBundleBytes(path string) ([]byte, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if !strings.HasSuffix(path, ".gz") {
+		return raw, nil
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(raw))
+	if err != nil {
+		return nil, fmt.Errorf("open gzip stream: %w", err)
+	}
+	defer zr.Close()
+	out, err := io.ReadAll(zr)
+	if err != nil {
+		return nil, fmt.Errorf("decompress gzip stream: %w", err)
+	}
+	return out, nil
 }
 
 func (s Service) restoreEmbeddedContent(bundle map[string]any, runID string) (int, int, int, error) {

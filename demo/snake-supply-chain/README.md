@@ -15,7 +15,7 @@ taint lens surfaces the secret-read → egress as a causal edge.
 
 ## Files
 
-- `run-snake-supervised.forensics.json` — the signed bundle (import to replay).
+- `run-snake-supervised.forensics.json.gz` — the signed bundle (import to replay).
 - `run-snake-supervised.forensics.dsse.json` — the DSSE/ed25519 attestation.
 - `attestation.pub` — the public key to verify it.
 - `capture/` — scripts to reproduce the capture on a Linux/eBPF host.
@@ -25,7 +25,7 @@ taint lens surfaces the secret-read → egress as a causal edge.
 ```sh
 go build -o /tmp/agentprov ./cmd/agentprov
 /tmp/agentprov --data-dir /tmp/snake-replay forensics import \
-  demo/snake-supply-chain/run-snake-supervised.forensics.json \
+  demo/snake-supply-chain/run-snake-supervised.forensics.json.gz \
   --pub-key demo/snake-supply-chain/attestation.pub          # verifies the signature, then imports
 /tmp/agentprov --data-dir /tmp/snake-replay dashboard serve  # open run "run-snake-supervised"
 ```

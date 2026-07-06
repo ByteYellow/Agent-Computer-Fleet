@@ -50,6 +50,12 @@ type Options struct {
 	// LibcLib overrides the libc path for the getaddrinfo DNS uprobe; empty =
 	// auto-detect the common system libc paths.
 	LibcLib string
+	// OnReady, when set, is called exactly once after every probe has attached
+	// and the ring buffer reader is open -- i.e. the sensor is genuinely capturing
+	// and the caller may safely start the workload it wants observed. Supervisors
+	// (launch) gate their exec on this to avoid racing a fast agent past a
+	// not-yet-attached sensor. Callable from a goroutine; keep it non-blocking.
+	OnReady func()
 }
 
 // Run loads the eBPF probes (exec/connect/openat), reads events from the ring
@@ -157,6 +163,13 @@ func RunWithOptions(out io.Writer, opts Options) error {
 		return fmt.Errorf("open ringbuf: %w", err)
 	}
 	defer rd.Close()
+
+	// All probes are attached and the ring buffer is open: the sensor is now
+	// genuinely capturing. Signal readiness so a supervisor can start its
+	// workload without racing a not-yet-attached sensor.
+	if opts.OnReady != nil {
+		opts.OnReady()
+	}
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)

@@ -2,6 +2,60 @@
 
 ## Unreleased
 
+One-command capture and an intent-conformance layer. `agentprov launch -- <agent>`
+wraps any agent in a full provenance run with a single command, and the model-
+intent layer moves from "which command did the model run" to contract-vs-effect:
+what each action DECLARED it would do versus what the runtime ACTUALLY did, with
+boundary violations, refusal bypasses, and honest coverage gaps as first-class
+verdicts. The agent's real prompt and reasoning are harvested from the session
+transcript with zero instrumentation.
+
+### Added
+
+- **`agentprov launch -- <agent>` (`internal/launch`).** One command does the
+  whole run: create a run scope, serve the live dashboard, inject a per-run
+  Claude Code hooks overlay via `--settings` (the user's `~/.claude` is never
+  modified), start the kernel sensor when the host can (else degrade honestly),
+  exec the agent in a dedicated cgroup, then seal + sign the evidence graph and
+  print a one-line verdict. Evidence level is printed up front on two honest
+  axes — application side (hooks / transcript vs record-only) and system side
+  (kernel telemetry vs none). A hidden `internal` command group begins the
+  git-style porcelain/plumbing split.
+- **Intent-Runtime Diff conformance engine (`internal/intent`,
+  `agentprov intent diff`).** Reconciles each captured IntentContract (a tool
+  call, peer message, or refusal, each declaring the effects it should and must
+  not produce) against the RuntimeEffects attributed to its scope. Verdicts:
+  `declared_vs_effect_mismatch` (a boundary violation, e.g. an install that read
+  a foreign secret), `refused_but_runtime_happened`, `decided_and_executed`, and
+  the honesty state `intent_coverage_gap` (an effect it could not tie to captured
+  intent is a gap, never a fabricated finding). Effects are classified through
+  the existing policy engine (a foreign-secret read vs the agent's own creds),
+  and the finding is conditional on each action's declared contract — a network
+  connect is drift for a read-only tool but permitted for bash. Results feed a
+  new `intent_conformance` dimension in the unified signal model and flip the
+  launch verdict; `peer_message_intent_mismatch` marks a violation whose intent
+  came from another agent's message.
+- **Transcript harvest (`internal/provenance.HarvestTranscript`).** The Claude
+  Code session transcript (the JSONL a hook's stdin points at) is ingested into
+  the same `llm_call` graph model TLS capture feeds — the model's real prompt,
+  reasoning, and tool decisions — with zero instrumentation and on any platform.
+  Renders through the existing agent-intent flow with no lens change.
+- **Conformance ("Intent · declared vs actual") graph lens.** Renders each
+  contract's scope → the diff verdict → the observed effects, colored by status,
+  alongside the delegation (主从) and peer (对等) agent structure.
+
+### Changed
+
+- **Agent-intent DAG collapses the caused fan-out.** A model response that
+  causes hundreds of syscalls now aggregates into a single "caused N syscalls"
+  summary node above a threshold, so the prompt→decision→action spine stays
+  legible (individual syscalls remain in the process / security lenses).
+- **Demos re-captured with `launch`.** The snake supply-chain and multi-agent
+  team bundles are freshly captured through the one-command flow; both now carry
+  the transcript (cognitive) axis and surface a real conformance mismatch — the
+  poisoned install's secret-read + metadata-egress is flagged as an `install`
+  operation exceeding its declared contract, attributed to the acting sub-agent.
+
 LLM-intent provenance: the sensor now captures the agent's actual LLM traffic
 as full TLS plaintext, reassembles and parses it, and materializes it into the
 signed graph — so the DAG can answer "which model call caused this syscall,
@@ -193,7 +247,7 @@ record's own scopes a real kernel join key.
   refresh interval are eased. Scrubber `edgeVisible` now respects the edge's own
   time instead of only its endpoints'.
 - Recaptured the snake / supply-chain demo bundle under the new supervised mode,
-  signed (`demo/snake-supply-chain/run-snake-supervised.forensics.json`),
+  signed (`demo/snake-supply-chain/run-snake-supervised.forensics.json.gz`),
   replacing the older pre-cgroup bundle: the agent's product (`snake.py`) is
   objectified and previewable, the supply-chain TTP correlates @0.98 +
   `self_launched`, and `graph verify` is clean.
@@ -314,7 +368,7 @@ Import the signed bundle:
 go build -o /tmp/agentprov ./cmd/agentprov
 
 /tmp/agentprov --data-dir /tmp/snake-replay forensics import \
-  demo/snake-supply-chain/run-snake-supervised.forensics.json \
+  demo/snake-supply-chain/run-snake-supervised.forensics.json.gz \
   --pub-key demo/snake-supply-chain/attestation.pub
 
 /tmp/agentprov --data-dir /tmp/snake-replay dashboard serve --addr 127.0.0.1:7396

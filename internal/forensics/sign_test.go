@@ -1,6 +1,7 @@
 package forensics
 
 import (
+	"compress/gzip"
 	"os"
 	"path/filepath"
 	"testing"
@@ -49,6 +50,11 @@ func TestSignedBundleVerifiesAndDetectsTamper(t *testing.T) {
 	if err := VerifyBundleAttestation(info.Path, info.AttestationPath, pub); err != nil {
 		t.Fatalf("verify signed bundle: %v", err)
 	}
+	gzPath := info.Path + ".gz"
+	writeGzipFile(t, gzPath, mustReadFile(t, info.Path))
+	if err := VerifyBundleAttestation(gzPath, info.AttestationPath, pub); err != nil {
+		t.Fatalf("verify gzipped signed bundle: %v", err)
+	}
 
 	// Tamper the bundle on disk, then verification must fail.
 	if err := os.WriteFile(info.Path, []byte(`{"tampered":true}`), 0o644); err != nil {
@@ -56,6 +62,35 @@ func TestSignedBundleVerifiesAndDetectsTamper(t *testing.T) {
 	}
 	if err := VerifyBundleAttestation(info.Path, info.AttestationPath, pub); err == nil {
 		t.Fatal("verification accepted a tampered bundle - B1 tamper-evidence broken")
+	}
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func writeGzipFile(t *testing.T, path string, raw []byte) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := gzip.NewWriter(f)
+	if _, err := zw.Write(raw); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

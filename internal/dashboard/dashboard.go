@@ -28,6 +28,7 @@ import (
 
 	"github.com/byteyellow/agentprovenance/internal/compliance"
 	"github.com/byteyellow/agentprovenance/internal/provenance"
+	"github.com/byteyellow/agentprovenance/internal/redact"
 	securitymodel "github.com/byteyellow/agentprovenance/internal/security"
 	"github.com/byteyellow/agentprovenance/internal/signals"
 	"github.com/byteyellow/agentprovenance/internal/telemetry"
@@ -952,32 +953,16 @@ func mimeForPath(path string) string {
 	}
 }
 
-var (
-	diffHunkRe = regexp.MustCompile(`(?m)^@@ .* @@`)
-	pemKeyRe   = regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----`)
-	awsKeyRe   = regexp.MustCompile(`AKIA[0-9A-Z]{16}`)
-	kvSecretRe = regexp.MustCompile(`(?i)(password|passwd|secret|token|api[_-]?key|aws_secret_access_key|authorization)(["']?\s*[:=]\s*["']?)([^\s"',}]{4,})`)
-)
+var diffHunkRe = regexp.MustCompile(`(?m)^@@ .* @@`)
 
-// redactSecrets masks the obvious secret shapes (private keys, cloud keys,
-// password/token assignments) so a previewed artifact can't leak credentials —
+// redactSecrets masks credentials in a previewed artifact so it can't leak them —
 // the demo plants fake secrets that the poisoned dependency exfiltrates, and the
-// preview must show "it touched a secret" without re-displaying it.
+// preview must show "it touched a secret" without re-displaying it. This is a
+// read-time backstop; capture/write-time redaction (internal/redact via telemetry
+// ingest, object materialize, and forensics export) is the primary defense. Both
+// share the one redactor so their coverage never drifts.
 func redactSecrets(text string) (string, bool) {
-	redacted := false
-	mark := func(re *regexp.Regexp, repl func(string) string) {
-		if re.MatchString(text) {
-			text = re.ReplaceAllStringFunc(text, repl)
-			redacted = true
-		}
-	}
-	mark(pemKeyRe, func(string) string { return "-----BEGIN PRIVATE KEY----- ***REDACTED*** -----END PRIVATE KEY-----" })
-	mark(awsKeyRe, func(string) string { return "AKIA****************" })
-	mark(kvSecretRe, func(m string) string {
-		g := kvSecretRe.FindStringSubmatch(m)
-		return g[1] + g[2] + "***REDACTED***"
-	})
-	return text, redacted
+	return redact.Redact(text)
 }
 
 // --- causality DAG (the signature view) ---

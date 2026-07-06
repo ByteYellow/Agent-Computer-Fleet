@@ -35,3 +35,7 @@ internal/sensor/vmlinux.h
 docs/design-tls-intent-and-generality.md
 demo/llm-judge/.judge-work/
 demo/llm-judge/.build/
+
+# Forensics captures can be tens of MB as raw JSON. Commit compressed replay
+# fixtures (*.forensics.json.gz) or publish large raw captures as release assets.
+*.forensics.json

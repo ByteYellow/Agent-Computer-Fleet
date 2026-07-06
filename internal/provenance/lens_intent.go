@@ -6,6 +6,11 @@ import (
 	"strings"
 )
 
+// causedAggregateThreshold is the number of model-caused syscalls above which
+// the intent DAG collapses them into a single "caused N syscalls" summary node
+// instead of one node each, so the 4-stage spine stays legible.
+const causedAggregateThreshold = 6
+
 func buildIntentDAGEdges(runID string, nodes map[string]GraphLensNode, events map[string]lensEvent, edges []GraphLensEdge) []GraphLensEdge {
 	rootID := "run/" + runID
 	nodes[rootID] = GraphLensNode{ID: rootID, Kind: "run", Label: runID, Data: map[string]any{"run_id": runID}}
@@ -53,12 +58,33 @@ func buildIntentDAGEdges(runID string, nodes map[string]GraphLensNode, events ma
 	add("dag-run-prompt", rootID, promptObj, "prompt_check")
 	add("dag-prompt-call", promptObj, llmCall, "sends")
 	add("dag-call-resp", llmCall, respObj, "responds")
-	for i, c := range caused {
-		add(fmt.Sprintf("dag-caused-%d", i), respObj, c, "caused")
-	}
+	// The model's response can "cause" hundreds of syscalls; rendering each as its
+	// own node buries the 4-stage spine (the whole point of the intent view). When
+	// there are many, aggregate them into a single "③ caused N syscalls" summary
+	// node -- the individual syscalls stay in the security/process lenses and the
+	// raw graph. Below the threshold, show them individually so a small run still
+	// reads as a concrete chain.
 	src := respObj
-	if len(caused) > 0 {
-		src = caused[0]
+	if len(caused) > causedAggregateThreshold {
+		sumID := "intent_caused/" + safeGraphID(respObj)
+		nodes[sumID] = GraphLensNode{
+			ID: sumID, Kind: "intent_stage", Subtype: "after_tool_call",
+			Label:       fmt.Sprintf("③ caused %d syscalls", len(caused)),
+			TrustOrigin: "summary",
+			Data: map[string]any{
+				"count": len(caused), "caused": caused,
+				"drilldown_lens": "process", "drilldown_detail": "raw",
+			},
+		}
+		add("dag-caused-summary", respObj, sumID, "caused")
+		src = sumID
+	} else {
+		for i, c := range caused {
+			add(fmt.Sprintf("dag-caused-%d", i), respObj, c, "caused")
+		}
+		if len(caused) > 0 {
+			src = caused[0]
+		}
 	}
 	for i, m := range capStringSlice(msgs, 4) {
 		add(fmt.Sprintf("dag-send-%d", i), src, m, "send_msg")

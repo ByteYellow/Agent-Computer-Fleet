@@ -2,14 +2,16 @@
 
 # AgentProvenance
 
-### Correlate application context with system telemetry into a verifiable, signable causality graph for sandboxed agents.
+### Three-axis execution observability for sandboxed agents: model intent, application context, and runtime telemetry in one verifiable evidence graph.
 
-Correlate application-side agent context with system-side telemetry, then turn
-runtime evidence, file diffs, artifacts, risk signals, and response decisions
-into a queryable, replayable, and auditable causality graph. Evidence is stored
-content-addressed and hash-verified (a model borrowed from Git) and can be
-signed for tamper-evidence -- but this is an audit/provenance layer, **not a
-version-control system**: there is no merge, checkout, or mutable working tree.
+AgentProvenance correlates three evidence axes for sandboxed, tool-using agents:
+model intent, application-side agent context, and system-side runtime telemetry.
+It turns LLM decisions, tool calls, process/file/network events, artifacts, risk
+signals, and response decisions into a queryable, replayable, and auditable
+causality graph. Evidence is stored content-addressed and hash-verified (a model
+borrowed from Git) and can be signed for tamper-evidence -- but this is an
+audit/provenance layer, **not a version-control system**: there is no merge,
+checkout, or mutable working tree.
 
 [![Release](https://img.shields.io/github/v/release/ByteYellow/AgentProvenance?style=flat-square&color=orange&sort=semver)](https://github.com/ByteYellow/AgentProvenance/releases/latest)
 [![Go](https://img.shields.io/badge/go-1.23+-00ADD8.svg?style=flat-square)](https://go.dev/)
@@ -34,10 +36,11 @@ version-control system**: there is no merge, checkout, or mutable working tree.
 
 AgentProvenance is a local-first security and provenance control plane for
 autonomous, tool-using agents, especially sandboxed coding agents. It captures
-system telemetry from its own eBPF sensor (or ingests Falco/Tetragon),
-correlates it with app-side agent context into a verifiable, signable causality
-graph, and serves that graph over the CLI, a daemon API, AI tools (including an
-MCP server), and a local web dashboard.
+model intent from transcripts/TLS evidence, app-side context from agent hooks and
+tool scopes, and runtime telemetry from its own eBPF sensor or external sources
+such as Falco/Tetragon. The result is a verifiable, signable causality graph
+served over the CLI, a daemon API, AI tools (including an MCP server), and a
+local web dashboard.
 
 It is not a generic sandbox runtime, generic telemetry collector, Kubernetes/Ray
 replacement, RL trainer, trace dashboard, or version-control system (it borrows
@@ -45,13 +48,13 @@ Git's content-addressing and verification model, not its branch/merge workflow).
 It owns a narrower primitive:
 
 ```text
-Execution Context
+Model Intent
+  -> Application Context
+  -> Runtime Telemetry
   -> Evidence Ingest
   -> Runtime Causality Graph
-  -> Provenance DAG
-  -> State Diff / Blame / Artifact Lineage
-  -> Security Analysis / Risk Decision
-  -> Taint / Response Action
+  -> Git-like Provenance DAG
+  -> Intent Diff / Risk / Response
   -> Replay / Forensics / Audit Manifest
 ```
 
@@ -975,7 +978,7 @@ Run:
 ## Architecture
 
 <p align="center">
-  <img src="docs/assets/agentprovenance-architecture.svg" alt="AgentProvenance architecture: application context and system telemetry enter an ingest boundary, then become a verifiable provenance graph." width="100%">
+  <img src="docs/assets/agentprovenance-architecture.svg" alt="AgentProvenance architecture: model intent, application context, and system telemetry enter an ingest boundary, then become a verifiable provenance graph." width="100%">
 </p>
 
 <p align="center">
@@ -985,10 +988,12 @@ Run:
 ```mermaid
 flowchart TD
     Agent["Agent / Harness / Benchmark / Red-team / RL Pipeline"] --> CLI["agentprov CLI"]
+    Agent --> ModelIntent["Model Intent\ntranscript / TLS LLM calls / refusal / judge"]
     Agent --> Enrich["Context Enrichment\nhooks bridge / MCP context-write"]
     Agent --> Recorder["Zero-SDK Recorder\nagentprov record -- <cmd>"]
 
     CLI --> Boundary
+    ModelIntent --> Boundary
     Enrich --> Boundary
     Recorder --> Boundary
     RuntimeTelemetry["Runtime Telemetry\nnative eBPF / Falco / Tetragon / auditd"] --> Boundary
@@ -1007,18 +1012,22 @@ flowchart TD
     Spool --> Core
 
     subgraph Core["Observability + Provenance Core"]
+        Intent["Intent Model\ncontracts / refusals / peer messages / LLM calls"]
         Correlation["ToolCallScope Correlation\npid / cgroup / container / time window"]
         Timeline["Execution Timeline\napplication context + runtime events"]
+        IntentDiff["Intent-Runtime Diff\ndeclared vs actual / mismatch / gap"]
         Causality["Runtime Causality Graph\nprocess / file / network / event"]
         Provenance["Git-like Provenance DAG\nrefs / objects / diff / blame"]
         Derivation["Graph Derivation\nvirtual edges / taint flow / origin / drift"]
-        Lens["Graph Lens System\ndefault / security / process / file / egress / taint"]
+        Lens["Graph Lens System\nintent / security / process / file / egress / taint"]
         Evidence["Evidence Manifest\ncontent-addressed refs / hashes"]
     end
 
-    Core --> Correlation
+    Core --> Intent
+    Intent --> Correlation
     Correlation --> Timeline
-    Timeline --> Causality
+    Timeline --> IntentDiff
+    IntentDiff --> Causality
     Causality --> Provenance
     Provenance --> Derivation
     Derivation --> Lens

@@ -293,6 +293,7 @@ The fastest path: wrap any agent in a full provenance run with a single command.
 ```sh
 go install github.com/ByteYellow/AgentProvenance/cmd/agentprov@latest
 
+agentprov doctor -- claude          # preflight: hooks, cgroup, sensor, dashboard port
 agentprov launch -- claude          # or codex, or any agent command
 ```
 
@@ -303,6 +304,15 @@ dashboard, inject a per-run hooks overlay into the agent (Claude Code today; you
 into one signed, verifiable evidence graph and print a one-line verdict:
 
 ```text
+agentprov preflight
+  ✓ agent command:    /usr/local/bin/claude
+  ✓ Claude hooks:     per-run --settings overlay; ~/.claude untouched
+  ✓ dashboard port:   127.0.0.1:7396 is available
+  - cgroup v2:        not available on darwin; record uses a logical scope id
+  - kernel sensor:    requires Linux; this host is darwin
+```
+
+```text
 ✓  CLEAN   run=run-… exit=0  events=28 signals=0 high_risk=0 intent_mismatch=0
    dashboard=http://127.0.0.1:7396/
 ```
@@ -311,6 +321,8 @@ The evidence level degrades honestly and is printed up front on two independent
 axes -- application side (hooks / transcript vs record-only) and system side
 (kernel telemetry vs none) -- so a macOS run (app-side only) never pretends to
 kernel evidence a Linux run has. See the [conformance layer](#intent-conformance).
+`doctor` runs the same checks without starting the agent and supports `--json`
+for install scripts and CI smoke tests.
 
 Prefer to explore signed evidence without capturing anything? Replay a demo:
 

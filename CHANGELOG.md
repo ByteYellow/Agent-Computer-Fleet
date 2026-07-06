@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.6.0 - 2026-07-06
 
 One-command capture and an intent-conformance layer. `agentprov launch -- <agent>`
 wraps any agent in a full provenance run with a single command, and the model-
@@ -21,6 +21,12 @@ transcript with zero instrumentation.
   axes — application side (hooks / transcript vs record-only) and system side
   (kernel telemetry vs none). A hidden `internal` command group begins the
   git-style porcelain/plumbing split.
+- **`agentprov doctor -- <agent>` launch preflight.** The same readiness checks
+  launch prints can now run without starting the agent: agent binary, Claude
+  hook-injection compatibility, dashboard port availability, cgroup v2 scope
+  support, and kernel sensor capability. Warnings are explicit degradation
+  reasons rather than hidden failures; `--json` gives install scripts a stable
+  machine-readable report.
 - **Intent-Runtime Diff conformance engine (`internal/intent`,
   `agentprov intent diff`).** Reconciles each captured IntentContract (a tool
   call, peer message, or refusal, each declaring the effects it should and must

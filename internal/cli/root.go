@@ -22,6 +22,7 @@ func NewRootCommand() *cobra.Command {
 	root.PersistentFlags().StringVar(&daemonURL, "daemon-url", firstEnv("AGENTPROV_DAEMON_URL"), "local daemon URL; also read from AGENTPROV_DAEMON_URL")
 
 	root.AddCommand(launchCmd(&dataDir))
+	root.AddCommand(doctorCmd(&dataDir))
 	root.AddCommand(internalCmd())
 	root.AddCommand(intentCmd(&dataDir))
 	root.AddCommand(initCmd(&dataDir))

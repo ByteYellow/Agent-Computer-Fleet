@@ -127,6 +127,8 @@ func Run(opts Options) (Report, error) {
 			opts.SelfExe = "agentprov"
 		}
 	}
+	preflight := Preflight(opts)
+	PrintPreflight(opts.Stderr, preflight)
 
 	paths, err := store.Init(opts.DataDir)
 	if err != nil {
@@ -368,6 +370,30 @@ func printBanner(w io.Writer, r Report, command []string) {
 		fmt.Fprintf(w, "  dashboard  : %s\n", r.DashboardURL)
 	}
 	fmt.Fprintln(w, "  ────────────────────────────────────────")
+}
+
+// PrintPreflight renders the same readiness checks used by `agentprov doctor`.
+// Warn/skip states are not fatal: launch is intentionally degradation-friendly.
+func PrintPreflight(w io.Writer, r PreflightReport) {
+	if w == nil {
+		return
+	}
+	fmt.Fprintln(w, "\nagentprov preflight")
+	for _, c := range r.Checks {
+		mark := "✓"
+		switch c.Status {
+		case CheckWarn:
+			mark = "!"
+		case CheckFail:
+			mark = "x"
+		case CheckSkip:
+			mark = "-"
+		}
+		fmt.Fprintf(w, "  %s %-16s %s\n", mark, c.Name+":", c.Detail)
+		if c.Fix != "" {
+			fmt.Fprintf(w, "    fix: %s\n", c.Fix)
+		}
+	}
 }
 
 // evidenceLevel names the combined tier in plain terms so the operator is never

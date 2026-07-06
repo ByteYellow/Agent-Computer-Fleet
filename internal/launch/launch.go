@@ -18,6 +18,7 @@ package launch
 import (
 	"bufio"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -78,6 +79,32 @@ type Report struct {
 	HooksIngested      int    `json:"hooks_ingested"`
 	IntentMismatches   int    `json:"intent_mismatches"`
 	IntentCoverageGaps int    `json:"intent_coverage_gaps"`
+	TranscriptTurns    int    `json:"transcript_turns"`
+}
+
+// transcriptPathFromHookLog returns the first transcript_path found in a run's
+// hook log. Every Claude Code hook event carries it; it is stable across a
+// session, so the first non-empty value is the session transcript.
+func transcriptPathFromHookLog(hookLogPath string) string {
+	if hookLogPath == "" {
+		return ""
+	}
+	f, err := os.Open(hookLogPath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	for sc.Scan() {
+		var ev struct {
+			TranscriptPath string `json:"transcript_path"`
+		}
+		if json.Unmarshal(sc.Bytes(), &ev) == nil && ev.TranscriptPath != "" {
+			return ev.TranscriptPath
+		}
+	}
+	return ""
 }
 
 // Run executes the full launch lifecycle and returns its Report. The returned
@@ -236,12 +263,19 @@ func seal(db *sql.DB, paths store.Paths, runID, hookLogPath, signKeyPath string,
 		}
 	}
 
-	// Materialize any captured TLS bodies into llm_call nodes. A no-op today
-	// (no --ssl-lib and no transcript harvest wired) -- intent stays at the
-	// hooks/tool-call level. This is where the next milestone (transcript
-	// ingestion) lands its model prompt/response evidence.
+	// Materialize any captured TLS bodies into llm_call nodes (a no-op without
+	// --ssl-lib), then harvest the Claude Code session transcript into the SAME
+	// llm_call model -- the model's real prompt, reasoning, and tool decisions
+	// (the cognitive-intent axis), zero-instrumentation and platform-independent.
 	if _, err := provenance.MaterializeLLMCalls(provenance.ObjectStore{DB: db, Paths: paths}, db, runID); err != nil {
 		fmt.Fprintf(stderr, "launch: materialize llm: %v\n", err)
+	}
+	if tp := transcriptPathFromHookLog(hookLogPath); tp != "" {
+		if turns, err := provenance.HarvestTranscript(provenance.ObjectStore{DB: db, Paths: paths}, db, runID, tp); err != nil {
+			fmt.Fprintf(stderr, "launch: harvest transcript: %v\n", err)
+		} else {
+			report.TranscriptTurns = turns
+		}
 	}
 
 	// Reconcile declared intent (hook tool calls) against observed runtime

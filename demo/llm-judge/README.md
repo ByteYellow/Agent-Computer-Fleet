@@ -31,12 +31,26 @@ python3 judge.py run --offline                  # keyless: offline fixture verdi
 python3 judge.py run --run <id> --data-dir <dir>  # judge any existing run
 ```
 
-LLM endpoint reuses the shared demo env contract
-(`~/.agentprov-demo/deepseek-claude.env`: `ANTHROPIC_BASE_URL`,
-`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY`, `AGENTPROV_DEMO_MODEL`). Any
-Anthropic-Messages-compatible endpoint works. Without a token the demo
-completes in offline fixture mode (verdict derived from stored risk signals,
-clearly labeled).
+## Bring your own LLM
+
+This demo is a *pattern*, not a product binding: any external LLM can act as
+the security judge, because the judge only needs (a) an HTTP chat endpoint
+and (b) the evidence contracts below. Two wire protocols cover essentially
+every hosted or local model; pick one with environment variables (the shared
+demo env file `~/.agentprov-demo/deepseek-claude.env` is auto-loaded):
+
+| protocol | endpoint env | key env | examples |
+|---|---|---|---|
+| `anthropic` | `ANTHROPIC_BASE_URL` (default api.anthropic.com) | `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` | Claude, Anthropic-compatible proxies |
+| `openai` | `OPENAI_BASE_URL` (default api.openai.com) | `OPENAI_API_KEY` | OpenAI, Qwen, Moonshot, vLLM, Ollama (`http://localhost:11434`) |
+| `openai` @ deepseek | — | `DEEPSEEK_API_KEY` (shortcut) | DeepSeek native API |
+
+`AGENTPROV_JUDGE_PROVIDER=anthropic|openai` forces the protocol when several
+keys are set; `AGENTPROV_JUDGE_MODEL` picks the model. Whichever provider is
+used, the judge's requests/responses are sha256-attested in the verdict and
+attached to the judge run as tls evidence — swapping the model never weakens
+the audit trail. Without any token the demo completes in offline fixture
+mode (verdict derived from stored risk signals, clearly labeled).
 
 ## Extensibility contract
 

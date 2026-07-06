@@ -31,6 +31,19 @@ full arc:
 
 Bundle: `run-double-attempt`.
 
+## Stage 3 — [`llm-judge/`](llm-judge/) · an external LLM as security judge
+
+The evidence graph is not only for humans: **any external LLM can be wired in
+as a security judge** over a captured run. `python3 llm-judge/judge.py run`
+exports the run's *full* trajectory (every telemetry event, no type filter,
+chunk/map-reduced past the context budget), has the model deliver a
+structured verdict, and imports the verdict back as graph-referenced
+signals. The judge itself runs under `agentprov record`, and its own LLM
+requests/responses become `llm_call` nodes in the judge's provenance run —
+**the judge is itself audited**. Works with any Anthropic- or
+OpenAI-protocol endpoint (Claude, DeepSeek, Qwen, local Ollama/vLLM, ...),
+and degrades to a keyless offline fixture so the pipeline always completes.
+
 ## Why this order
 
 Stage 1 proves the moat on the simplest case — intent/action → real syscall →

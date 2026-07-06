@@ -223,36 +223,101 @@ FINAL_SYSTEM = (
 )
 
 
-class LLM:
-    """Anthropic-Messages-protocol client (BASE_URL configurable, so any
-    compatible endpoint works). Every exchange is retained so the run script
-    can ingest it back as provenance evidence."""
+def resolve_provider(offline_flag):
+    """Pick the judge's LLM endpoint from the environment. Two wire
+    protocols cover essentially every hosted or local model:
 
-    def __init__(self, base_url, token, model, offline):
-        self.base_url = (base_url or "https://api.anthropic.com").rstrip("/")
-        self.token = token
-        self.model = model
-        self.offline = offline
+      anthropic  ANTHROPIC_BASE_URL? + ANTHROPIC_AUTH_TOKEN|ANTHROPIC_API_KEY
+      openai     OPENAI_BASE_URL?    + OPENAI_API_KEY   (OpenAI, Qwen,
+                 Moonshot, Ollama, vLLM, ... anything /v1/chat/completions)
+                 DEEPSEEK_API_KEY is a shortcut for openai @ api.deepseek.com
+
+    AGENTPROV_JUDGE_PROVIDER=anthropic|openai forces the choice;
+    AGENTPROV_JUDGE_MODEL picks the model. Returns None -> offline fixture.
+    """
+    if offline_flag:
+        return None
+    env = os.environ.get
+    anthropic_token = env("ANTHROPIC_AUTH_TOKEN") or env("ANTHROPIC_API_KEY")
+    candidates = {
+        "anthropic": (env("ANTHROPIC_BASE_URL") or "https://api.anthropic.com",
+                      anthropic_token),
+        "openai": (env("OPENAI_BASE_URL") or (
+            "https://api.deepseek.com" if env("DEEPSEEK_API_KEY")
+            else "https://api.openai.com"),
+            env("OPENAI_API_KEY") or env("DEEPSEEK_API_KEY")),
+    }
+    forced = env("AGENTPROV_JUDGE_PROVIDER")
+    order = [forced] if forced in candidates else ["anthropic", "openai"]
+    for protocol in order:
+        base_url, token = candidates[protocol]
+        if not token:
+            continue
+        default_model = ("claude-sonnet-5" if protocol == "anthropic"
+                         else "deepseek-chat")
+        return {
+            "protocol": protocol,
+            "base_url": base_url.rstrip("/"),
+            "token": token,
+            "model": env("AGENTPROV_JUDGE_MODEL") or
+                     env("AGENTPROV_DEMO_MODEL") or default_model,
+        }
+    return None
+
+
+class LLM:
+    """Provider-agnostic judge client (anthropic messages / openai chat
+    completions). Every exchange is retained so the run phase can ingest it
+    back as provenance evidence."""
+
+    PATHS = {"anthropic": "/v1/messages", "openai": "/v1/chat/completions"}
+
+    def __init__(self, provider):
+        self.provider = provider          # None -> offline
+        self.offline = provider is None
+        self.model = provider["model"] if provider else None
         self.exchanges = []
 
+    @property
+    def path(self):
+        return self.PATHS[self.provider["protocol"]]
+
+    @property
+    def host(self):
+        return self.provider["base_url"].split("//")[-1].split("/")[0]
+
+    def _request(self, system, user, max_tokens):
+        p = self.provider
+        if p["protocol"] == "anthropic":
+            body = {"model": p["model"], "max_tokens": max_tokens,
+                    "temperature": 0, "system": system,
+                    "messages": [{"role": "user", "content": user}]}
+            headers = {"content-type": "application/json",
+                       "anthropic-version": "2023-06-01",
+                       "x-api-key": p["token"]}
+        else:
+            body = {"model": p["model"], "max_tokens": max_tokens,
+                    "temperature": 0,
+                    "messages": [{"role": "system", "content": system},
+                                 {"role": "user", "content": user}]}
+            headers = {"content-type": "application/json",
+                       "authorization": "Bearer " + p["token"]}
+        return json.dumps(body, ensure_ascii=False).encode(), headers
+
+    def _text(self, decoded):
+        if self.provider["protocol"] == "anthropic":
+            return "".join(part.get("text", "")
+                           for part in decoded.get("content") or []
+                           if part.get("type") == "text")
+        choices = decoded.get("choices") or []
+        return (choices[0].get("message") or {}).get("content", "") \
+            if choices else ""
+
     def call(self, system, user, max_tokens):
-        body = {
-            "model": self.model,
-            "max_tokens": max_tokens,
-            "temperature": 0,
-            "system": system,
-            "messages": [{"role": "user", "content": user}],
-        }
-        raw_req = json.dumps(body, ensure_ascii=False).encode()
+        raw_req, headers = self._request(system, user, max_tokens)
         req = urllib.request.Request(
-            self.base_url + "/v1/messages",
-            data=raw_req,
-            headers={
-                "content-type": "application/json",
-                "anthropic-version": "2023-06-01",
-                "x-api-key": self.token,
-            },
-        )
+            self.provider["base_url"] + self.path, data=raw_req,
+            headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=180) as resp:
                 raw_resp = resp.read()
@@ -261,10 +326,7 @@ class LLM:
             self._retain(raw_req, raw_resp)
             raise RuntimeError("LLM HTTP %d: %s" % (err.code, raw_resp[:300]))
         self._retain(raw_req, raw_resp)
-        decoded = json.loads(raw_resp)
-        parts = decoded.get("content") or []
-        text = "".join(p.get("text", "") for p in parts
-                       if p.get("type") == "text")
+        text = self._text(json.loads(raw_resp))
         if not text:
             raise RuntimeError("LLM returned no text content")
         return text
@@ -395,15 +457,15 @@ def to_signals(run_id, verdict, coverage, judge_meta):
     return {"signals": signals}
 
 
-def tls_jsonl(exchanges, host):
+def tls_jsonl(exchanges, host, path):
     """Render retained LLM exchanges as native sensor tls events. On a Linux
     host with the eBPF sensor these same bytes are captured at the kernel
     boundary instead; this path keeps the self-audit loop closed elsewhere."""
     pid = os.getpid()
     out = []
     for ex in exchanges:
-        req_text = ("POST /v1/messages HTTP/1.1\r\nhost: %s\r\n"
-                    "content-type: application/json\r\n\r\n" % host
+        req_text = ("POST %s HTTP/1.1\r\nhost: %s\r\n"
+                    "content-type: application/json\r\n\r\n" % (path, host)
                     ) + ex["request"].decode("utf-8", "replace")
         resp_text = ("HTTP/1.1 200 OK\r\ncontent-type: application/json"
                      "\r\n\r\n") + ex["response"].decode("utf-8", "replace")
@@ -419,32 +481,25 @@ def tls_jsonl(exchanges, host):
 
 
 def cmd_judge(args):
-    base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
-    token = os.environ.get("ANTHROPIC_AUTH_TOKEN") or os.environ.get(
-        "ANTHROPIC_API_KEY") or ""
-    model = os.environ.get("AGENTPROV_JUDGE_MODEL") or os.environ.get(
-        "AGENTPROV_DEMO_MODEL") or "claude-sonnet-5"
-    offline = args.offline or not token
-    if offline and not args.offline:
+    provider = resolve_provider(args.offline)
+    if provider is None and not args.offline:
         print("llm-judge: no LLM token found -> offline fixture mode",
               file=sys.stderr)
 
     cli = Cli(args.agentprov, args.data_dir)
     bundle = gather(cli, args.run)
     lines = trajectory_lines(bundle, args.payload_chars)
-    llm = LLM(base_url, token, model, offline)
+    llm = LLM(provider)
     verdict, coverage = judge(bundle, lines, llm, args.budget_chars,
                               args.max_calls)
     if verdict.get("verdict") not in VERDICTS:
         verdict["verdict"] = "suspicious"
 
-    host = "api.anthropic.com"
-    if base_url:
-        host = base_url.split("//")[-1].split("/")[0]
     judge_meta = {
         "mode": coverage["mode"],
-        "model": None if offline else model,
-        "endpoint_host": None if offline else host,
+        "protocol": None if llm.offline else llm.provider["protocol"],
+        "model": llm.model,
+        "endpoint_host": None if llm.offline else llm.host,
         "request_sha256s": [sha256_hex(e["request"]) for e in llm.exchanges],
         "response_sha256s": [sha256_hex(e["response"]) for e in llm.exchanges],
     }
@@ -461,7 +516,8 @@ def cmd_judge(args):
         json.dump(to_signals(args.run, verdict, coverage, judge_meta), f,
                   ensure_ascii=False, indent=2)
     with open(args.tls_out, "w", encoding="utf-8") as f:
-        f.write(tls_jsonl(llm.exchanges, host))
+        f.write("" if llm.offline else
+                tls_jsonl(llm.exchanges, llm.host, llm.path))
 
     print("llm-judge: run=%s verdict=%s confidence=%s findings=%d "
           "events=%d chunks=%d mode=%s llm_calls=%d" % (

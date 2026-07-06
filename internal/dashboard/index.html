@@ -358,7 +358,7 @@ const EDGE_LABEL={llm_call:'request→response',llm_intent_caused:'intent→acti
 const LENS_LABEL={'default':'Default · causality','security':'Security · risk/policy/response',
   'process':'Process · tree + runtime','file-artifact':'File / Artifact · lineage',
   'network-egress':'Network · egress','data-flow-taint':'Data-flow · taint (secret→sink)',
-  'agent-intent':'Agent intent · evidence DAG','orchestration':'Orchestration · agents (delegation/peer)','intent':'Intent · declared vs actual','trust-origin':'Trust · origin','sandbox-boundary':'Sandbox · boundary'};
+  'agent-intent':'Agent intent · causal DAG (prompt→action)','orchestration':'Orchestration · agents (delegation/peer)','intent':'Conformance · declared vs actual (violations)','trust-origin':'Trust · origin','sandbox-boundary':'Sandbox · boundary'};
 const $=s=>document.querySelector(s);
 
 async function j(u){const r=await fetch(u);return r.json();}

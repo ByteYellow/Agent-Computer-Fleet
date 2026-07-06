@@ -71,6 +71,14 @@ func edgeMatchesLens(lens, detail string, edge GraphLensEdge, nodes map[string]G
 	to := nodes[edge.ToID]
 	fromEvent := events[edge.FromID]
 	toEvent := events[edge.ToID]
+	// Intent-diff artifacts belong ONLY to the "intent" lens (and the raw full
+	// graph). Their intent_contract edge starts at a tool_call node, which several
+	// lenses (agent-intent, trust-origin, ...) include by endpoint kind -- without
+	// this guard the diff nodes leak into those lenses and clutter their summaries.
+	isIntentArtifact := strings.HasPrefix(edge.EdgeType, "intent_") || from.Kind == "intent_diff" || to.Kind == "intent_diff"
+	if isIntentArtifact && lens != "intent" && detail != "raw" {
+		return false
+	}
 	if detail != "raw" && !edgeIsMaterializedSignal(edge, from, to, fromEvent, toEvent) {
 		return false
 	}

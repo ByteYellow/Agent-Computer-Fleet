@@ -266,6 +266,12 @@ func normalizeEffects(db *sql.DB, runID string, eng security.Engine) ([]RuntimeE
 // than a command-match or a kernel cgroup correlation, stronger than nothing).
 const timeWindowConfidence = 0.7
 
+// grace is how far outside a tool call's hook window an effect may still be
+// attributed to it. Small on purpose: big enough for the hook/syscall skew
+// (~3s), small enough that an async effect tens of seconds later is NOT pinned
+// to a nearby same-program tool call. Bigger gaps are honest coverage_gaps.
+const grace = 10 * time.Second
+
 type toolCallWindow struct {
 	agent, toolCall string
 	program         string // basename of the tool call's leading program token
@@ -299,15 +305,16 @@ func loadToolCallWindows(db *sql.DB, runID string) toolCallWindows {
 		if err != nil {
 			end = start
 		}
-		// Widen generously: PostToolUse can fire seconds before the tool's
-		// subprocess actually performs its syscalls (observed 3s on the lab VM), so
-		// a tight window misses the real effect. A wide window is safe here ONLY
-		// because attribution also requires a comm match (see containing) -- a
-		// background harness read can never match a cat/python3 tool's program no
-		// matter how wide the window, so widening trades no precision for recall.
+		// Grace: PostToolUse can fire a few seconds before the tool's subprocess
+		// actually performs its syscalls (observed ~3s on the lab VM), so a tight
+		// window misses the real effect. But it must stay SMALL: a truly async
+		// effect (e.g. an install that triggers a background exfil ~35s later) must
+		// NOT be pinned to a same-program tool call that merely ran nearby -- that
+		// is a wrong-tool attribution. Effects outside this grace fall to an honest
+		// coverage_gap; tying them back needs command-match, not a wider window.
 		out = append(out, toolCallWindow{
 			agent: agent, toolCall: id, program: programName(command),
-			start: start.Add(-30 * time.Second), end: end.Add(30 * time.Second),
+			start: start.Add(-grace), end: end.Add(grace),
 		})
 	}
 	return out

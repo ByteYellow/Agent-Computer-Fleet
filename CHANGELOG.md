@@ -58,6 +58,23 @@ demo has an external LLM render an audited verdict over the full trajectory.
   recaptured, re-signed Stage 1/2 bundles now carry the model call that
   decided the poisoned install — `llm_call` → `llm_caused` → the exact syscall.
 
+### Changed
+
+- **README narrative: evidence layers, not integration modes.** The
+  "White-box mode / Zero-SDK mode" split is gone: one entry point
+  (`record -- <cmd>`), kernel/runtime facts as the foundation, application
+  context (hooks bridge / MCP context-write, `ai_asserted` ≤0.5) as an
+  automatically stacking enrichment layer. "SDK/framework integration"
+  phrasing removed throughout; `docs/product.md` aligned.
+- **README slimmed into docs/ references.** Full command references moved to
+  `docs/security-commands.md`, `docs/graph-commands.md`, and
+  `docs/compliance.md`; the Python custom-rules content merged into the
+  External Evaluator Protocol section (one topic, told once).
+- **Falco receiver demoted to a compatibility path.** The README section moved
+  to `docs/falco-receiver.md`; the native eBPF sensor is the featured
+  kernel-evidence source, and third-party receivers (Falco/Tetragon) are
+  maintained for compatibility, not extended.
+
 ### Fixed
 
 - **`graph explain` no longer crashes on large scopes.** Telemetry batches are

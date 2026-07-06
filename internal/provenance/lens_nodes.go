@@ -54,6 +54,9 @@ func graphLensNodes(db *sql.DB, runID string) (map[string]GraphLensNode, map[str
 	if err := addAgentNodes(db, runID, add); err != nil {
 		return nil, nil, err
 	}
+	if err := addIntentDiffNodes(db, runID, add); err != nil {
+		return nil, nil, err
+	}
 	if err := addProcessNodes(db, runID, add); err != nil {
 		return nil, nil, err
 	}
@@ -307,6 +310,76 @@ func addAgentNodes(db *sql.DB, runID string, add func(GraphLensNode)) error {
 		})
 	}
 	return rows.Err()
+}
+
+// addIntentDiffNodes renders the Intent-Runtime Diff results (internal/intent):
+// each row is a node keyed by its "diff/<id>" id, which the intent_contract edge
+// (scope -> diff) and intent_diff_effect edge (diff -> observed event) point at.
+// Colored by status via Risk so the lens reads at a glance: a red mismatch, a
+// refusal bypass, a healthy green match, or a muted coverage gap.
+func addIntentDiffNodes(db *sql.DB, runID string, add func(GraphLensNode)) error {
+	rows, err := db.Query(`SELECT id, COALESCE(agent_id,''), COALESCE(contract_kind,''), COALESCE(operation,''),
+		COALESCE(status,''), COALESCE(finding,''), COALESCE(confidence,0), COALESCE(observed_effects,'[]'), COALESCE(mismatch_reason,'')
+		FROM intent_diffs WHERE run_id = ?`, runID)
+	if err != nil {
+		// Table may not exist on an older imported store: degrade to no nodes.
+		return nil
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, agentID, kind, operation, status, finding, observed, reason string
+		var confidence float64
+		if err := rows.Scan(&id, &agentID, &kind, &operation, &status, &finding, &confidence, &observed, &reason); err != nil {
+			return err
+		}
+		label := intentDiffLabel(status, finding, operation)
+		add(GraphLensNode{
+			ID:      id,
+			Kind:    "intent_diff",
+			Subtype: status,
+			Label:   label,
+			Risk:    intentDiffRisk(status),
+			Data: map[string]any{
+				"status": status, "finding": finding, "operation": operation, "contract_kind": kind,
+				"agent_id": agentID, "confidence": confidence, "observed_effects": observed, "reason": reason,
+			},
+		})
+	}
+	return rows.Err()
+}
+
+func intentDiffLabel(status, finding, operation string) string {
+	head := finding
+	if head == "" {
+		head = status
+	}
+	switch status {
+	case "declared_vs_effect_mismatch":
+		return "⚠ " + operation + ": declared≠actual"
+	case "refused_but_runtime_happened":
+		return "⊘ refusal bypassed"
+	case "decided_and_executed":
+		return "✓ " + operation + " as declared"
+	case "intent_coverage_gap":
+		return "? uncaptured intent"
+	default:
+		return head
+	}
+}
+
+// intentDiffRisk maps a diff status to a lens risk tier so the dashboard's
+// existing risk coloring highlights divergence without new plumbing.
+func intentDiffRisk(status string) string {
+	switch status {
+	case "refused_but_runtime_happened":
+		return "critical"
+	case "declared_vs_effect_mismatch":
+		return "high"
+	case "intent_coverage_gap":
+		return "info"
+	default:
+		return ""
+	}
 }
 
 // llmMetaCache memoizes parsed llm_message metadata by object-file path. Object

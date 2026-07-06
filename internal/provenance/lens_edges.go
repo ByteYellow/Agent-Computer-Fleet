@@ -106,6 +106,13 @@ func edgeMatchesLens(lens, detail string, edge GraphLensEdge, nodes map[string]G
 		return strings.HasPrefix(edge.EdgeType, "agent_") || from.Kind == "agent" || to.Kind == "agent" ||
 			strings.HasPrefix(edge.FromID, "agent/") || strings.HasPrefix(edge.ToID, "agent/") ||
 			from.Risk == "refused" || to.Risk == "refused"
+	case "intent":
+		// The declared-vs-actual story: each contract's scope (its tool call /
+		// agent) -> the diff verdict -> the observed effects that back it, plus
+		// the agent tool-call/message edges that give the diff its intent origin.
+		return strings.HasPrefix(edge.EdgeType, "intent_") ||
+			from.Kind == "intent_diff" || to.Kind == "intent_diff" ||
+			edge.EdgeType == "agent_tool_call" || edge.EdgeType == "agent_message"
 	case "trust-origin":
 		return from.TrustOrigin != "" || to.TrustOrigin != "" || from.Kind == "artifact" || to.Kind == "artifact" || from.Kind == "tool_call" || to.Kind == "tool_call"
 	case "sandbox-boundary":
@@ -142,7 +149,8 @@ func isStructuralEdge(edgeType string) bool {
 		// intent->action edge.
 		"llm_call", "llm_request", "llm_response", "llm_caused",
 		"attempt_snapshot", "snapshot_parent", "promotion_winner",
-		"agent_spawn", "agent_message", "agent_tool_call", "agent_syscall":
+		"agent_spawn", "agent_message", "agent_tool_call", "agent_syscall",
+		"intent_contract", "intent_diff_effect":
 		return true
 	default:
 		return strings.Contains(edgeType, "policy") || strings.Contains(edgeType, "risk") ||
@@ -152,7 +160,7 @@ func isStructuralEdge(edgeType string) bool {
 
 func isGraphValueNode(node GraphLensNode) bool {
 	switch node.Kind {
-	case "tool_call", "process", "artifact", "file", "policy_decision", "risk_signal", "response_action", "attempt", "snapshot", "agent", "message", "relay", "llm_call", "llm_prompt", "llm_completion":
+	case "tool_call", "process", "artifact", "file", "policy_decision", "risk_signal", "response_action", "attempt", "snapshot", "agent", "message", "relay", "llm_call", "llm_prompt", "llm_completion", "intent_diff":
 		return true
 	default:
 		return false
@@ -329,6 +337,8 @@ func graphLensRules(lens string) []string {
 		return []string{"causal DAG over real evidence: prompt → response → caused exec → send msg"}
 	case "orchestration":
 		return []string{"agent_spawn (delegation)", "agent_message (peer, body objectified)", "each agent's tool calls incl. refused proposals"}
+	case "intent":
+		return []string{"contract scope → diff verdict → observed effects", "declared_vs_effect_mismatch / refused_bypass / coverage_gap", "conditional on each action's declared contract, not a global rule"}
 	case "trust-origin":
 		return []string{"trust_origin annotations", "agent/tool/artifact nodes"}
 	case "sandbox-boundary":
@@ -354,6 +364,8 @@ func graphLensLayout(lens string) string {
 		return "intent_to_action"
 	case "orchestration":
 		return "agent_topology"
+	case "intent":
+		return "contract_vs_effect"
 	case "trust-origin":
 		return "origin_overlay"
 	case "sandbox-boundary":
@@ -375,6 +387,8 @@ func inferLensNode(id string) GraphLensNode {
 		return GraphLensNode{ID: id, Kind: "agent", Label: strings.TrimPrefix(id, "agent/"), TrustOrigin: "agent_asserted"}
 	case strings.HasPrefix(id, "llm_call/"):
 		return GraphLensNode{ID: id, Kind: "llm_call", Label: "LLM call", TrustOrigin: "content_addressed"}
+	case strings.HasPrefix(id, "diff/"):
+		return GraphLensNode{ID: id, Kind: "intent_diff", Label: "intent diff", TrustOrigin: "derived_summary"}
 	case strings.HasPrefix(id, "egress_group/"):
 		return GraphLensNode{ID: id, Kind: "egress_group", Subtype: "risky_egress", Label: "risky egress group", Risk: "high", TrustOrigin: "derived_summary"}
 	case strings.HasPrefix(id, "policy_decision/"):

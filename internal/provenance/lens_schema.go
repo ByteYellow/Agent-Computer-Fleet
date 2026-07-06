@@ -11,6 +11,7 @@ var availableGraphLenses = []string{
 	"data-flow-taint",
 	"agent-intent",
 	"orchestration",
+	"intent",
 	"trust-origin",
 	"sandbox-boundary",
 }

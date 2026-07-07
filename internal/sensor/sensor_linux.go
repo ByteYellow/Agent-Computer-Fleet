@@ -50,6 +50,11 @@ type Options struct {
 	// LibcLib overrides the libc path for the getaddrinfo DNS uprobe; empty =
 	// auto-detect the common system libc paths.
 	LibcLib string
+	// GoTLSBin, when set, attaches a uprobe to crypto/tls.(*Conn).Write in this Go
+	// binary to capture the request/prompt plaintext for Go agents, which use Go's
+	// own TLS (no libssl for the SSLLib uprobes to hook). Best-effort: a stripped
+	// binary (-ldflags "-s -w") has no symbol to attach.
+	GoTLSBin string
 	// OnReady, when set, is called exactly once after every probe has attached
 	// and the ring buffer reader is open -- i.e. the sensor is genuinely capturing
 	// and the caller may safely start the workload it wants observed. Supervisors
@@ -173,6 +178,24 @@ func RunWithOptions(out io.Writer, opts Options) error {
 
 		if !attachedWrite || !attachedRead {
 			return fmt.Errorf("attach OpenSSL TLS uprobes on %s: write=%v read=%v (%s)", opts.SSLLib, attachedWrite, attachedRead, strings.Join(attachErrs, "; "))
+		}
+	}
+
+	// Go crypto/tls: Go agents use Go's own TLS stack (no libssl), so the SSLLib
+	// uprobes never fire for them. crypto/tls.(*Conn).Write(b []byte) holds the
+	// request/prompt plaintext in b at entry; on the arm64 ABIInternal the
+	// receiver is x0 and the slice ptr/len land in x1/x2 -- exactly the registers
+	// handle_ssl_write reads as (ssl, buf, num), so we reuse that program. Entry
+	// uprobe only (the request path); no uretprobe, since Go's moving goroutine
+	// stacks make return probes unsafe. Best-effort and non-fatal: a stripped
+	// binary exposes no symbol to attach.
+	if opts.GoTLSBin != "" {
+		if ex, err := link.OpenExecutable(opts.GoTLSBin); err != nil {
+			fmt.Fprintf(os.Stderr, "agentprov-sensor: open go-tls bin %s: %v\n", opts.GoTLSBin, err)
+		} else if up, err := ex.Uprobe("crypto/tls.(*Conn).Write", objs.HandleSslWrite, nil); err != nil {
+			fmt.Fprintf(os.Stderr, "agentprov-sensor: go-tls uprobe not attached (%v; stripped binary?)\n", err)
+		} else {
+			defer up.Close()
 		}
 	}
 

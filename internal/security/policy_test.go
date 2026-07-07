@@ -41,6 +41,23 @@ func TestEvaluateLoopbackDoesNotDenyAsPrivateCIDR(t *testing.T) {
 	}
 }
 
+func TestRuleMatchesEitherPathOrArgsWhenBothSet(t *testing.T) {
+	r := Rule{Match: RuleMatch{PathContains: []string{"id_rsa"}, ArgsContains: []string{"curl"}}}
+	// args matches, path does not: must still match (regression - PathContains
+	// used to short-circuit to false before ArgsContains was consulted).
+	if !r.Matches(Event{Path: "/tmp/harmless.txt", Args: []string{"curl", "https://x"}}) {
+		t.Error("path+args rule should match on args when path does not")
+	}
+	// path matches, args does not: match.
+	if !r.Matches(Event{Path: "/home/u/.ssh/id_rsa"}) {
+		t.Error("path+args rule should match on path")
+	}
+	// neither matches: no match.
+	if r.Matches(Event{Path: "/tmp/x", Args: []string{"ls"}}) {
+		t.Error("path+args rule should not match when neither matches")
+	}
+}
+
 func TestEvaluateSecretPathKills(t *testing.T) {
 	decision := DefaultEngine().Evaluate(Event{
 		EventType: "file_open",

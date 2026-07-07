@@ -55,6 +55,30 @@ func sandboxCmd(dataDir *string) *cobra.Command {
 			defer db.Close()
 			stderr := c.ErrOrStderr()
 
+			// record needs a real working directory; an empty one leaves the
+			// workload's cwd at "/", which record cannot snapshot/exec cleanly.
+			if workdir == "" {
+				if tmp, terr := os.MkdirTemp("", "agentprov-sandbox-"); terr == nil {
+					workdir = tmp
+					defer os.RemoveAll(tmp)
+				}
+			}
+
+			// Model-intent auto-discovery: unless --ssl-lib is given, inspect the
+			// workload's executable and point the TLS uprobes at its stack (Go
+			// crypto/tls, static OpenSSL like node, or dynamic libssl) so intent
+			// capture works out of the box instead of needing a hand-picked path.
+			goTLSBin := ""
+			tlsStack := "none"
+			if sslLib == "" {
+				if exe, lerr := exec.LookPath(args[0]); lerr == nil {
+					t := producer.DetectTLSTarget(exe)
+					sslLib, goTLSBin, tlsStack = t.SSLLib, t.GoTLSBin, t.Stack
+				}
+			} else {
+				tlsStack = "explicit"
+			}
+
 			// 1) system telemetry: start the sensor as a raw-JSONL subprocess.
 			sysTier := "collecting"
 			sensorJSONL := filepath.Join(paths.Logs, "sandbox-"+runID+"-sensor.jsonl")
@@ -73,9 +97,14 @@ func sandboxCmd(dataDir *string) *cobra.Command {
 					defer errf.Close()
 				}
 				sensorProc.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+				sensorProc.Env = os.Environ()
 				if sslLib != "" {
-					sensorProc.Env = append(os.Environ(), "AGENTPROV_SSL_LIB="+sslLib)
+					sensorProc.Env = append(sensorProc.Env, "AGENTPROV_SSL_LIB="+sslLib)
 				}
+				if goTLSBin != "" {
+					sensorProc.Env = append(sensorProc.Env, "AGENTPROV_GO_TLS_BIN="+goTLSBin)
+				}
+				fmt.Fprintf(stderr, "sandbox: model-intent tls stack=%s ssl_lib=%q go_tls_bin=%q\n", tlsStack, sslLib, goTLSBin)
 				if serr := sensorProc.Start(); serr != nil {
 					fmt.Fprintf(stderr, "sandbox: sensor unavailable (%v); degrading to record-only\n", serr)
 					f.Close()

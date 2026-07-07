@@ -8,9 +8,10 @@ import (
 func execCmd(dataDir, daemonURL *string) *cobra.Command {
 	var stream bool
 	cmd := &cobra.Command{
-		Use:   "exec <session_id> -- <command...>",
-		Short: "execute a command in a sandbox session",
-		Args:  cobra.MinimumNArgs(2),
+		Use:    "exec <session_id> -- <command...>",
+		Short:  "execute a command in a sandbox session",
+		Hidden: true,
+		Args:   cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if client, ok := daemonClient(*daemonURL); ok {
 				processID, err := client.Exec(args[0], args[1:], stream, cmd.OutOrStdout())

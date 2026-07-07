@@ -105,7 +105,7 @@ func ProjectCostSamples(db *sql.DB) (int, error) {
 			Dimension: Cost, Type: "resource_sample",
 			GraphRefKind: kind, GraphRefID: refID, RunID: runID, SessionID: sessionID,
 			Value: activeCPU, Reference: "active_cpu_seconds",
-			ProducedBy: "economics", CreatedAt: createdAt,
+			ProducedBy: "cost", CreatedAt: createdAt,
 			SourceTable: "cost_samples", SourceID: id,
 		})
 	}

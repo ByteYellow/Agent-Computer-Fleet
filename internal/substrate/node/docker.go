@@ -61,7 +61,6 @@ func (r *DockerRuntime) CreateSession(req CreateSessionRequest) (string, error) 
 		Tty:        false,
 		OpenStdin:  true,
 		Cmd:        []string{"sleep", "infinity"},
-		Env:        proxyEnv(req.ProxyURL, req.NoProxy),
 		Labels: map[string]string{
 			"agentprov.session_id": req.SessionID,
 			"agentprov.lease_id":   req.LeaseID,
@@ -174,26 +173,6 @@ func (r *DockerRuntime) Remove(containerID string) error {
 		return nil
 	}
 	return err
-}
-
-func proxyEnv(proxyURL, noProxy string) []string {
-	if proxyURL == "" {
-		return nil
-	}
-	if noProxy == "" {
-		noProxy = "localhost,127.0.0.1,::1"
-	}
-	return []string{
-		"HTTP_PROXY=" + proxyURL,
-		"http_proxy=" + proxyURL,
-		"HTTPS_PROXY=" + proxyURL,
-		"https_proxy=" + proxyURL,
-		"ALL_PROXY=" + proxyURL,
-		"all_proxy=" + proxyURL,
-		"NO_PROXY=" + noProxy,
-		"no_proxy=" + noProxy,
-		"AGENTPROV_EGRESS_PROXY=" + proxyURL,
-	}
 }
 
 func isNoSuchImage(err error) bool {

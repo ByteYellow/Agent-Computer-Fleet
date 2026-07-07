@@ -13,17 +13,24 @@ type ReplayManifest struct {
 	Scope         string          `json:"scope"`
 	RunID         string          `json:"run_id,omitempty"`
 	AttemptID     string          `json:"attempt_id,omitempty"`
+	ExecutionID   string          `json:"execution_scope_id,omitempty"`
+	Trajectories  []ReplayRollout `json:"trajectories"`
 	Rollouts      []ReplayRollout `json:"rollouts"`
 }
 
 type ReplayRollout struct {
 	ID              string              `json:"id"`
+	TrajectoryID    string              `json:"trajectory_id"`
 	RunID           string              `json:"run_id"`
+	BaseStateID     string              `json:"base_state_id"`
 	BaseSnapshotID  string              `json:"base_snapshot_id"`
 	Status          string              `json:"status"`
+	SelectedScopeID string              `json:"selected_execution_scope_id"`
 	WinnerAttemptID string              `json:"winner_attempt_id"`
 	PromotionID     string              `json:"promotion_id"`
 	RiskStatus      string              `json:"risk_status"`
+	BaseState       *ReplaySnapshot     `json:"base_state,omitempty"`
+	ExecutionScopes []ReplayAttemptPlan `json:"execution_scopes"`
 	BaseSnapshot    *ReplaySnapshot     `json:"base_snapshot,omitempty"`
 	Attempts        []ReplayAttemptPlan `json:"attempts"`
 }
@@ -42,26 +49,29 @@ type ReplaySnapshot struct {
 }
 
 type ReplayAttemptPlan struct {
-	ID              string                 `json:"id"`
-	SnapshotID      string                 `json:"snapshot_id"`
-	ToolCallID      string                 `json:"tool_call_id,omitempty"`
-	Workspace       string                 `json:"workspace"`
-	Strategy        string                 `json:"strategy"`
-	Command         string                 `json:"command"`
-	Status          string                 `json:"status"`
-	RiskStatus      string                 `json:"risk_status"`
-	ArtifactResult  string                 `json:"artifact_result,omitempty"`
-	ArtifactDigest  *ReplayArtifactDigest  `json:"artifact_digest,omitempty"`
-	IsWinner        bool                   `json:"is_winner"`
-	BudgetExceeded  bool                   `json:"budget_exceeded"`
-	ReplayBlocked   bool                   `json:"replay_blocked"`
-	BlockReasons    []string               `json:"block_reasons,omitempty"`
-	Score           float64                `json:"score"`
-	CostEstimate    float64                `json:"cost_estimate"`
-	ToolCall        *ReplayToolCall        `json:"tool_call,omitempty"`
-	Processes       []ReplayProcess        `json:"processes,omitempty"`
-	ExternalEffects []ReplayExternalEffect `json:"external_effects,omitempty"`
-	Events          []ReplayEvent          `json:"events,omitempty"`
+	ID               string                 `json:"id"`
+	ExecutionID      string                 `json:"execution_scope_id"`
+	BaseStateID      string                 `json:"base_state_id,omitempty"`
+	SnapshotID       string                 `json:"snapshot_id"`
+	ToolCallID       string                 `json:"tool_call_id,omitempty"`
+	SubstrateScopeID string                 `json:"substrate_scope_id,omitempty"`
+	Workspace        string                 `json:"workspace"`
+	Strategy         string                 `json:"strategy"`
+	Command          string                 `json:"command"`
+	Status           string                 `json:"status"`
+	RiskStatus       string                 `json:"risk_status"`
+	ArtifactResult   string                 `json:"artifact_result,omitempty"`
+	ArtifactDigest   *ReplayArtifactDigest  `json:"artifact_digest,omitempty"`
+	IsWinner         bool                   `json:"is_winner"`
+	BudgetExceeded   bool                   `json:"budget_exceeded"`
+	ReplayBlocked    bool                   `json:"replay_blocked"`
+	BlockReasons     []string               `json:"block_reasons,omitempty"`
+	Score            float64                `json:"score"`
+	CostEstimate     float64                `json:"cost_estimate"`
+	ToolCall         *ReplayToolCall        `json:"tool_call,omitempty"`
+	Processes        []ReplayProcess        `json:"processes,omitempty"`
+	ExternalEffects  []ReplayExternalEffect `json:"external_effects,omitempty"`
+	Events           []ReplayEvent          `json:"events,omitempty"`
 }
 
 type ReplayArtifactDigest struct {
@@ -172,6 +182,7 @@ func BuildReplayRun(db *sql.DB, runID string) (ReplayManifest, error) {
 		if err != nil {
 			return ReplayManifest{}, err
 		}
+		manifest.Trajectories = append(manifest.Trajectories, rollout)
 		manifest.Rollouts = append(manifest.Rollouts, rollout)
 	}
 	if err := rows.Err(); err != nil {
@@ -198,7 +209,7 @@ func BuildReplayAttempt(db *sql.DB, attemptID string) (ReplayManifest, error) {
 	if err != nil {
 		return ReplayManifest{}, err
 	}
-	return ReplayManifest{SchemaVersion: "agentprovenance.replay/v1", Mode: "plan_only", Scope: "attempt", RunID: runID, AttemptID: attemptID, Rollouts: []ReplayRollout{rollout}}, nil
+	return ReplayManifest{SchemaVersion: "agentprovenance.replay/v1", Mode: "plan_only", Scope: "execution_scope", RunID: runID, AttemptID: attemptID, ExecutionID: attemptID, Trajectories: []ReplayRollout{rollout}, Rollouts: []ReplayRollout{rollout}}, nil
 }
 
 func buildReplayRollout(db *sql.DB, rolloutID, onlyAttemptID string) (ReplayRollout, error) {
@@ -213,8 +224,12 @@ func buildReplayRollout(db *sql.DB, rolloutID, onlyAttemptID string) (ReplayRoll
 		if err != nil {
 			return ReplayRollout{}, err
 		}
+		rollout.BaseStateID = rollout.BaseSnapshotID
+		rollout.BaseState = &snapshot
 		rollout.BaseSnapshot = &snapshot
 	}
+	rollout.TrajectoryID = rollout.ID
+	rollout.SelectedScopeID = rollout.WinnerAttemptID
 	query := `SELECT id FROM fork_attempts WHERE rollout_id = ?`
 	args := []any{rolloutID}
 	if onlyAttemptID != "" {
@@ -236,6 +251,7 @@ func buildReplayRollout(db *sql.DB, rolloutID, onlyAttemptID string) (ReplayRoll
 		if err != nil {
 			return ReplayRollout{}, err
 		}
+		rollout.ExecutionScopes = append(rollout.ExecutionScopes, attempt)
 		rollout.Attempts = append(rollout.Attempts, attempt)
 	}
 	if err := rows.Err(); err != nil {
@@ -269,6 +285,8 @@ func buildReplayAttemptNode(db *sql.DB, rolloutID, attemptID string) (ReplayAtte
 	if err != nil {
 		return ReplayAttemptPlan{}, err
 	}
+	attempt.ExecutionID = attempt.ID
+	attempt.BaseStateID = attempt.SnapshotID
 	attempt.IsWinner = isWinner != 0
 	attempt.BudgetExceeded = budgetExceeded != 0
 	attempt.BlockReasons = replayBlockReasons(attempt.Status, attempt.RiskStatus, attempt.BudgetExceeded)
@@ -393,7 +411,7 @@ func PrintReplayManifest(out io.Writer, manifest ReplayManifest) {
 		fmt.Fprintf(out, "replay_run=%s mode=%s schema=%s\n", manifest.RunID, manifest.Mode, manifest.SchemaVersion)
 	}
 	for _, rollout := range manifest.Rollouts {
-		fmt.Fprintf(out, "rollout=%s run=%s base_snapshot=%s status=%s winner=%s promotion=%s risk=%s\n",
+		fmt.Fprintf(out, "trajectory=%s run=%s base_state=%s status=%s selected_execution=%s promotion=%s risk=%s\n",
 			rollout.ID, rollout.RunID, rollout.BaseSnapshotID, rollout.Status, rollout.WinnerAttemptID, rollout.PromotionID, rollout.RiskStatus)
 		if rollout.BaseSnapshot != nil {
 			printReplaySnapshot(out, *rollout.BaseSnapshot)
@@ -405,12 +423,12 @@ func PrintReplayManifest(out io.Writer, manifest ReplayManifest) {
 }
 
 func printReplaySnapshot(out io.Writer, snapshot ReplaySnapshot) {
-	fmt.Fprintf(out, "  base_snapshot name=%s kind=%s physical=%s status=%s tainted=%t files=%d bytes=%d manifest=%s path=%s\n",
+	fmt.Fprintf(out, "  base_state name=%s kind=%s physical=%s status=%s tainted=%t files=%d bytes=%d manifest=%s path=%s\n",
 		snapshot.Name, snapshot.Kind, snapshot.PhysicalType, snapshot.Status, snapshot.Tainted, snapshot.FileCount, snapshot.Bytes, snapshot.ManifestHash, snapshot.Path)
 }
 
 func printReplayAttempt(out io.Writer, attempt ReplayAttemptPlan) {
-	fmt.Fprintf(out, "  attempt=%s snapshot=%s strategy=%s status=%s risk=%s winner=%t replay_blocked=%t score=%.3f cost=%.6f workspace=%s\n",
+	fmt.Fprintf(out, "  execution_scope=%s base_state=%s strategy=%s status=%s risk=%s selected=%t replay_blocked=%t score=%.3f cost=%.6f workspace=%s\n",
 		attempt.ID, attempt.SnapshotID, attempt.Strategy, attempt.Status, attempt.RiskStatus, attempt.IsWinner, attempt.ReplayBlocked, attempt.Score, attempt.CostEstimate, attempt.Workspace)
 	if len(attempt.BlockReasons) > 0 {
 		fmt.Fprintf(out, "    block_reasons=%v\n", attempt.BlockReasons)

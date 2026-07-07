@@ -171,7 +171,7 @@ func TestEvaluateJSONLWithStatePersistsAndQuarantines(t *testing.T) {
 	insertPolicySession(t, db)
 
 	eventsPath := filepath.Join(root, "events.jsonl")
-	if err := os.WriteFile(eventsPath, []byte(`{"source":"egress_proxy","event_type":"network_connect","run_id":"run-test","session_id":"sbx-test","dst_ip":"169.254.169.254"}`+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(eventsPath, []byte(`{"source":"telemetry_fixture","event_type":"network_connect","run_id":"run-test","session_id":"sbx-test","dst_ip":"169.254.169.254"}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := EvaluateJSONLWithState(db, eventsPath, os.Stdout); err != nil {
@@ -309,7 +309,7 @@ func TestPolicyViolationEmitsUnifiedSignal(t *testing.T) {
 	insertPolicySession(t, db)
 
 	eventsPath := filepath.Join(root, "events.jsonl")
-	if err := os.WriteFile(eventsPath, []byte(`{"source":"egress_proxy","event_type":"network_connect","run_id":"run-test","session_id":"sbx-test","process_id":"proc-1","dst_ip":"169.254.169.254"}`+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(eventsPath, []byte(`{"source":"telemetry_fixture","event_type":"network_connect","run_id":"run-test","session_id":"sbx-test","process_id":"proc-1","dst_ip":"169.254.169.254"}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := EvaluateJSONLWithState(db, eventsPath, os.Stdout); err != nil {
@@ -376,7 +376,7 @@ func TestPolicyWritebackFailureIsObservable(t *testing.T) {
 	}
 
 	eventsPath := filepath.Join(root, "events.jsonl")
-	if err := os.WriteFile(eventsPath, []byte(`{"source":"egress_proxy","event_type":"network_connect","run_id":"run-test","session_id":"sbx-test","process_id":"proc-1","dst_ip":"169.254.169.254"}`+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(eventsPath, []byte(`{"source":"telemetry_fixture","event_type":"network_connect","run_id":"run-test","session_id":"sbx-test","process_id":"proc-1","dst_ip":"169.254.169.254"}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := EvaluateJSONLWithState(db, eventsPath, os.Stdout); err != nil {

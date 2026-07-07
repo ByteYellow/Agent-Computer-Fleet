@@ -31,7 +31,7 @@ func owaspASI() Framework {
 				Evidence: []string{"binding", "session", "credential_event"},
 				Partial:  []string{"binding", "session"},
 				Gap:      "runtime identity exists but credential or privilege evidence is missing",
-				NextStep: "record credential injection, identity, or privilege boundary events",
+				NextStep: "record credential access, identity, or privilege boundary evidence",
 			},
 			{
 				ID:       "ASI04",

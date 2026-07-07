@@ -60,13 +60,13 @@ Model Intent
 
 The goal is to answer questions ordinary traces do not answer well:
 
-- Which snapshot did this execution start from?
-- Which attempt produced this artifact?
+- Which base state did this execution start from?
+- Which execution scope produced this artifact?
 - Which tool call started this process?
 - Which child process caused this runtime event?
 - Which process changed this file?
 - Which behavior is anomalous for this agent or task profile?
-- Which execution branch was tainted, quarantined, interrupted, or blocked by
+- Which trajectory or execution scope was tainted, quarantined, interrupted, or blocked by
   a response gate?
 - Which evidence supports a risk decision?
 - What response action should be triggered: audit, deny, kill, quarantine,
@@ -98,7 +98,7 @@ The goal is to answer questions ordinary traces do not answer well:
 - [Current Capability](#current-capability)
 - [Core Demo Acceptance](#core-demo-acceptance)
 - [Architecture](#architecture)
-- [Substrate Signals](#substrate-signals)
+- [Substrates and Telemetry](#substrates-and-telemetry)
 - [Boundaries](#boundaries)
 - [Repository Layout](#repository-layout)
 - [Roadmap](#roadmap)
@@ -107,7 +107,7 @@ The goal is to answer questions ordinary traces do not answer well:
 ## Why
 
 Modern agent execution is not one prompt and one tool call. Coding agents and
-autonomous workflows fork attempts, edit files, run tests, create artifacts,
+autonomous workflows create execution scopes, edit files, run tests, create artifacts,
 spawn subprocesses, touch external systems, and trigger runtime telemetry.
 Logs, traces, metrics, and sandbox events each capture pieces of that story,
 but they rarely produce a Git-like causal record of execution state.
@@ -116,8 +116,8 @@ AgentProvenance turns sandboxed execution into a security-oriented evidence
 graph:
 
 ```text
-base snapshot
-  -> attempt
+base state
+  -> execution scope
   -> execution context
   -> tool_call
   -> process / child process
@@ -128,13 +128,11 @@ base snapshot
   -> replay / forensics / audit manifest
 ```
 
-The primary path is recording and explaining sandboxed agent execution. The
-branch-heavy coding-agent script is only a stress demo: it creates many
-branches, artifacts, runtime events, and risk cases quickly enough to exercise
-the graph. AgentProvenance does not choose the reward winner. It emits
-structured trajectory evidence and expectation-deviation signals so an external
-evaluator or training pipeline can turn them into reward, penalty, filtering,
-or human-review decisions.
+The primary path is recording and explaining sandboxed agent execution.
+AgentProvenance does not choose the reward winner. It emits structured
+trajectory evidence and expectation-deviation signals so an external evaluator
+or training pipeline can turn them into reward, penalty, filtering, or
+human-review decisions.
 
 For RL pipelines, the useful primitive is not "best-of-one" or automatic winner
 selection. The useful primitive is observability over each trajectory: what the
@@ -148,7 +146,7 @@ The security model is intentionally simple and concrete:
 
 ```text
 application context
-  run / session / attempt / tool_call / user / task / workspace
+  run / trajectory / execution_scope / tool_call / user / task / workspace
 
 system telemetry
   process / file / network / resource / sandbox / eBPF event
@@ -196,12 +194,12 @@ that base automatically.
 | Layer | Source | Trust semantics |
 |---|---|---|
 | Kernel / runtime facts (foundation) | `record` process tree + file diffs, native eBPF sensor, Falco/Tetragon/LoongCollector receivers | hard facts keyed by pid / cgroup / container / time; the agent cannot fabricate them |
-| Application context (enrichment) | harness hooks (`hooks bridge`), MCP context-write (`bind_scope` / `record_tool_call`), explicit `run_id / session_id / attempt_id / tool_call_id / tool_name / args_hash` | semantics the kernel can never infer — agent identity, delegation and peer messages, refused intents; app-asserted claims carry `binding_source=ai_asserted` and a `<=0.5` confidence cap, and never override kernel facts |
+| Application context (enrichment) | harness hooks (`hooks bridge`), MCP context-write (`bind_scope` / `record_tool_call`), explicit `run_id / trajectory_id / execution_scope_id / tool_call_id / tool_name / args_hash` | semantics the kernel can never infer — agent identity, delegation and peer messages, refused intents; app-asserted claims carry `binding_source=ai_asserted` and a `<=0.5` confidence cap, and never override kernel facts |
 
 The kernel layer answers "what actually happened on this host." The
 application-context layer answers "which agent, which tool call, which intent"
 — including things no syscall stream can express, such as an orchestrator's
-`agent_spawn`/`agent_message` edges or an attempt the LLM refused to execute.
+`agent_spawn`/`agent_message` edges or an action the LLM refused to execute.
 Application context is not a separate deployment or a required SDK: when a
 harness emits hooks or calls the MCP context-write tools, the enrichment layer
 attaches to the same run; when it doesn't, the kernel layer still stands on its
@@ -224,8 +222,8 @@ back to execution context.
 Today, the CLI exposes the underlying binding primitive:
 
 ```sh
-agentprov telemetry bind --run <run_id> --session <session_id> \
-  --attempt <attempt_id> --tool-call <tool_call_id> --process <process_id> \
+agentprov telemetry bind --run <run_id> --substrate-scope <substrate_scope_id> \
+  --execution-scope <execution_scope_id> --tool-call <tool_call_id> --process <process_id> \
   --container-id <container_id> --cgroup-id <cgroup_id> --pid <pid>
 ```
 
@@ -274,7 +272,7 @@ LLM tracing systems, and sandbox runtimes.
 |---|---|---|
 | system observability | low-intrusion system-side capture, eBPF/runtime event collection, cross-process visibility | AgentProvenance treats those events as evidence input, then builds a Git-like causality/provenance DAG, diff/blame, taint lineage, risk decision, forensics, and response-control surface |
 | OpenTelemetry / LLM trace platforms | spans, logs, metrics, LLM/tool traces, dashboards, latency/cost views | AgentProvenance focuses on state provenance, artifact lineage, sandbox runtime effects, security decisions, replay, and audit manifests |
-| HIDS / EDR / runtime security | host/process/file/network detection and enforcement | AgentProvenance adds agent context: run/session/attempt/tool_call, snapshot lineage, file diffs, artifact provenance, risk signals, baseline deviations, and response gates |
+| HIDS / EDR / runtime security | host/process/file/network detection and enforcement | AgentProvenance adds agent context: run/trajectory/execution_scope/tool_call, state lineage, file diffs, artifact provenance, risk signals, baseline deviations, and response gates |
 | Sandbox runtimes | isolation, process/container/VM execution, filesystem and network boundaries | AgentProvenance consumes sandbox identity and telemetry; it does not try to replace Docker, OpenSandbox, gVisor, Firecracker, Kata, or Kubernetes |
 
 So the differentiation is not "another zero-SDK eBPF observer." The narrow
@@ -436,7 +434,7 @@ ingest, retention, and query services.
 
 | Mode | Shape | Best for | Tradeoff |
 |---|---|---|---|
-| Library / CLI-only recorder | one `agentprov` binary, optional Python helper, local SQLite/object store | RL rollout, evaluator jobs, benchmarks, CI, local red-team harnesses | easiest to adopt; weaker shared query and long-running ingest |
+| Library / CLI-only recorder | one `agentprov` binary, optional Python helper, local SQLite/object store | evaluator jobs, benchmarks, CI, RL pipelines, local red-team harnesses | easiest to adopt; weaker shared query and long-running ingest |
 | Sidecar / local daemon | `agentprov daemon serve` beside one worker or sandbox host; the CLI and evaluator clients talk to it | sandbox worker, CI runner, local security harness, medium-volume telemetry ingest | adds a local service boundary, spool, backpressure, and stable query API |
 | Central evidence service | shared ingest/query service with object storage, retention, auth, and UI/API | enterprise security, audit, SRE, compliance, incident review | highest operational cost; not the default RL entry point |
 
@@ -898,8 +896,8 @@ per-command purpose: [docs/graph-commands.md](docs/graph-commands.md).
 
 | Capability | What it does |
 |---|---|
-| Execution context | explicit ToolCallScope binding across run / session / attempt / tool_call / process / container / cgroup / pid |
-| Runtime causality | native `runtime_*` graph edges (tool call, process tree, snapshot, event, file) |
+| Execution context | explicit execution-scope binding across run / trajectory / execution_scope / tool_call / process / container / cgroup / pid |
+| Runtime causality | native `runtime_*` graph edges (tool call, process tree, base state, event, file) |
 | Provenance DAG | `graph trace / refs / log / materialize / objects / verify / replay` over content-addressed objects |
 | Multi-agent orchestration | `hooks bridge` folds a Claude Code (or compatible) agent team's harness hooks into the graph — agent nodes, delegation (`agent_spawn`) + peer (`agent_message`, body objectified as evidence) edges, per-agent tool_calls, and command-match syscall attribution (`agent_syscall`) since in-process sub-agents share one cgroup |
 | LLM-intent causality | captured LLM traffic is materialized into the signed graph (`graph materialize-llm`): each body becomes a content-addressed `llm_message` object, each request/response pair a first-class `llm_call` node, and `llm_caused` edges attribute a syscall to the model call **only when the executed command matches what the model's response actually decided** — so "the model told it to" stays narrow and verifiable |
@@ -913,7 +911,7 @@ per-command purpose: [docs/graph-commands.md](docs/graph-commands.md).
 |---|---|
 | Timeline | `timeline [--view causality] [--json]` — merged app-context + system telemetry, paged with integrity metadata |
 | Observability | `observe summary / coverage / scopes / event / process / flow` — correlation coverage, gaps, per-scope and event→response views |
-| Evidence query | `graph explain` over file / artifact / process / event / tool_call / attempt / risk with bounded, paged causality paths |
+| Evidence query | `graph explain` over file / artifact / process / event / tool_call / execution scope / risk with bounded, paged causality paths |
 | Diff / blame | file-level diff and blame, joined to runtime events and content-addressed objects |
 | Evidence manifest | `evidence manifest` — a run-level, hash-indexed evidence index (`--materialize` to an object) |
 | Web dashboard | `dashboard serve` — local read-only UI: Run Overview question entries, Graph Explorer lenses (summary follows the LLM lifecycle spine when a captured model call exists), Focused Evidence, Run Timeline, verify status, signals, process tree, egress; readable execve labels and tool_call/event content previews |
@@ -938,13 +936,13 @@ per-command purpose: [docs/graph-commands.md](docs/graph-commands.md).
 | Daemon API | `daemon serve` — binding, ingest, query, verify, record, forensics, signals over HTTP; optional bearer-token auth |
 | AI tools + MCP | the read surface, the `evaluate_action` gate, and context-write (`bind_scope` / `record_tool_call`) via `ai call` and stdio MCP (`ai mcp`) |
 | Evaluator / RL | `signal context / import`, trajectory manifests, and a Python SDK (offline batch + in-loop scoring) — emits evidence, not reward policy |
-| Substrate | Docker runtime (gVisor/Firecracker stubs); snapshot fork/resume/taint; telemetry spool, windows, retention, 100k-pressure tested |
+| Substrate evidence | Docker/local process metadata, cgroup/pid identity, filesystem baseline/diff/replay, telemetry spool, windows, retention, 100k-pressure tested |
 
 ## Core Demo Acceptance
 
 The main demo must prove:
 
-- Multiple attempts fork from the same clean snapshot.
+- Multiple execution scopes can be compared against the same clean base state.
 - Raw telemetry does not need `tool_call_id`.
 - Paged `graph objects` and `graph explain` responses expose stable
   `result_set_id` and per-page `page_hash` integrity metadata.
@@ -972,7 +970,8 @@ Run:
 
 ```sh
 ./scripts/demo_telemetry_jsonl.sh
-./scripts/demo_provenance_trace.sh
+./scripts/accept_phase1.sh
+./scripts/accept_zero_sdk_realistic.sh
 ```
 
 ## Architecture
@@ -998,7 +997,7 @@ flowchart TD
     Recorder --> Boundary
     RuntimeTelemetry["Runtime Telemetry\nnative eBPF / Falco / Tetragon / auditd"] --> Boundary
     SandboxIdentity["Sandbox Identity\ncontainer / cgroup / pid / cwd / time"] --> Boundary
-    AppContext["Application Context\nrun / session / attempt / tool_call"] --> Boundary
+    AppContext["Application Context\nrun / trajectory / execution_scope / tool_call"] --> Boundary
     ExternalSignals["External Evaluator Signals\nreward_feature / penalty / label / quality"] --> Boundary
 
     subgraph Boundary["API / Ingest Boundary"]
@@ -1037,10 +1036,10 @@ flowchart TD
 ```
 
 Capability gating is a hard design rule. Upper layers must query the runtime,
-snapshot, telemetry, and isolation capabilities before assuming fast fork,
-memory snapshot, restore, identity, or enforcement semantics. Docker-only
-execution degrades to directory/filesystem provenance instead of pretending to
-provide VM-level resume.
+state, telemetry, and isolation capabilities before assuming identity,
+filesystem, replay, or enforcement semantics. Docker-only execution degrades to
+directory/filesystem provenance instead of pretending to provide VM-level
+resume.
 
 All producers enter through the API/Ingest Boundary. Zero-SDK recorders,
 context-enrichment producers (hooks bridge, MCP context-write), telemetry
@@ -1049,30 +1048,42 @@ signals are producer inputs; they should not bypass validation, normalization,
 identity binding, redaction, spool/backpressure, or retention controls to write
 directly into the core evidence graph.
 
-## Substrate Signals
+## Substrates and Telemetry
 
-Substrate integrations are downstream of the provenance model:
+The provenance model is the product; substrate integrations sit downstream of
+it. Every source funnels through one normalized ingest schema
+([docs/telemetry-schema.md](docs/telemetry-schema.md)), and the evidence graph
+is built from that schema — not from any specific runtime. Adding a substrate
+means teaching a collector to emit the schema, not extending the core.
 
-- Docker is the active local runtime.
-- OpenSandbox, gVisor, Firecracker, and Kata are future runtime substrates.
-- Kubernetes, Ray, Batch, and cloud systems are orchestration substrates.
-- Falco, Tetragon, LoongCollector, auditd, and eBPF are telemetry substrates.
-  The featured kernel-evidence source is the native Linux eBPF sensor; hosts
-  that already run Falco/Tetragon (or can't load the native sensor) can fold
-  their filtered JSONL into the same DAG via `telemetry ingest-jsonl` /
-  `ingest-falco`, with a hashable batch manifest
-  ([docs/falco-receiver.md](docs/falco-receiver.md)).
-- `agentprov sensor stream` is the supervised local path: a per-node native
-  sensor streams normalized kernel events into the same ingest/correlation/
-  policy/risk path. When paired with `record` on Linux, a real cgroup-per-scope
-  join can correlate the agent's whole process subtree without requiring raw
-  events to carry `tool_call_id`.
-- Sensor capability is data, not a hidden assumption. Modern eBPF is used when
-  kernel and permissions support it; other telemetry substrates stay pluggable.
+Substrates fall on three axes:
 
-The project value is not collecting more logs. The value is correlating
-substrate signals with execution context and making them affect diff, blame,
-taint, replay, and auditability.
+- **Runtime** — where agent processes execute. Docker is the active local
+  runtime; gVisor, Firecracker, Kata, and OpenSandbox are future targets.
+- **Orchestration** — where runtimes are scheduled: Kubernetes, Ray, Batch, and
+  cloud systems.
+- **Telemetry** — where kernel and behavior evidence comes from. The featured
+  source is the native Linux eBPF sensor (`agentprov sensor stream`), which
+  streams normalized kernel events straight into the
+  ingest/correlation/policy/risk path. Hosts already running Falco, Tetragon,
+  LoongCollector, or auditd — or that can't load the native sensor — fold their
+  filtered JSONL into the same DAG via `telemetry ingest-jsonl` / `ingest-falco`,
+  with a hashable batch manifest ([docs/falco-receiver.md](docs/falco-receiver.md)).
+
+Two properties keep this honest:
+
+- **Capability is data, not an assumption.** Modern eBPF is used when the kernel
+  and permissions allow; every other telemetry substrate stays pluggable, and
+  degraded capability is recorded rather than hidden. Docker-only execution
+  degrades to directory/filesystem provenance instead of faking VM-level resume.
+- **Correlation needs keys, not adaptation.** The one requirement a substrate
+  must meet is emitting usable correlation keys (cgroup id, pid, run/scope id).
+  On Linux, `record` plus a cgroup-per-scope join correlates an agent's whole
+  process subtree without raw events carrying `tool_call_id`; where those keys
+  are unavailable, correlation degrades gracefully.
+
+The value is not collecting more logs. It is correlating substrate signals with
+execution context so they affect diff, blame, taint, replay, and auditability.
 
 ## Boundaries
 
@@ -1105,10 +1116,11 @@ internal/sensor/      native eBPF sensor (exec/connect/file/privesc/tamper/TLS-b
 internal/tlsintent/   TLS chunk -> full HTTP message reassembly + LLM request/response semantics
 internal/telemetry/   normalized runtime event schema, JSONL ingest, TLS HTTP metadata, correlation inputs
 internal/correlation/ ToolCallScope and runtime identity binding
-internal/provenance/  timeline, graph trace, refs, objects, diff, blame, verify, replay
+internal/provenance/  timeline, graph trace, refs, objects, diff, blame, verify, replay, domain aliases
 internal/evidence/    compact evidence records and external effects
 internal/security/    policy decisions, risk signals, baseline deviations, response actions
 internal/signals/     unified graph-attached signal model (behavior/cost/quality/security)
+internal/cost/        resource telemetry, Docker stats sampling, and resource-window evidence
 internal/baseline/    behavior baseline learning and deviation records
 internal/attest/      in-toto/DSSE ed25519 evidence signing (tamper-evidence)
 internal/forensics/   evidence bundle export (optional signed attestation)
@@ -1117,24 +1129,20 @@ internal/hooksbridge/ harness-hooks -> agent orchestration graph (delegation/pee
 internal/mcpserver/   stdio MCP (JSON-RPC 2.0) server over the aitools catalog
 internal/dashboard/   local read-only web dashboard (embedded UI)
 
-internal/substrate/   Docker/runtime/snapshot adapters used as execution substrates
-internal/control/     local lease/session control for substrate-backed demos
-internal/computerapi/ file/tool API over local sandbox sessions
+internal/substrate/   execution substrate facts and compatibility adapters
+internal/control/     hidden substrate scope compatibility plumbing
+internal/computerapi/ hidden compatibility file/tool API for substrate-backed demos
 internal/ports/       local preview proxy support
 
-internal/stressdemo/  branch-heavy fanout demos that exercise provenance under load
-internal/experimental/ resource windows, scheduler, node metadata, warm-pool experiments
 internal/store/       SQLite schema and repositories
-examples/             tasks, events, policies
+examples/             events, telemetry, policies
 scripts/              runnable demos
 docs/                 product direction, MVP details, comparisons
 ```
 
 The main product path lives in `record`, `telemetry`, `correlation`,
-`provenance`, `evidence`, `security`, `signals`, `baseline`, `attest`, and
-`forensics`. `substrate` contains runtime facts AgentProvenance can consume.
-`stressdemo` and `experimental` are intentionally separated so branch fanout and
-old resource experiments do not define the project identity.
+`provenance`, `evidence`, `security`, `signals`, `cost`, `baseline`, `attest`,
+and `forensics`. `substrate` contains runtime facts AgentProvenance can consume.
 
 ## Roadmap
 

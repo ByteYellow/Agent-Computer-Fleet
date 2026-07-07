@@ -43,7 +43,7 @@ func graphCmd(dataDir, daemonURL *string) *cobra.Command {
 				}
 			}
 			if selected > 1 {
-				return fmt.Errorf("use only one of --run, --artifact, --attempt, --tool-call, or --process")
+				return fmt.Errorf("use only one of --run, --artifact, --execution-scope/--attempt, --tool-call, or --process")
 			}
 			if processID != "" {
 				return provenance.TraceProcess(db, processID, cmd.OutOrStdout())
@@ -60,14 +60,16 @@ func graphCmd(dataDir, daemonURL *string) *cobra.Command {
 			if runID != "" {
 				return provenance.TraceRun(db, runID, cmd.OutOrStdout())
 			}
-			return fmt.Errorf("one of --run, --artifact, --attempt, --tool-call, or --process is required")
+			return fmt.Errorf("one of --run, --artifact, --execution-scope/--attempt, --tool-call, or --process is required")
 		},
 	}
 	trace.Flags().StringVar(&runID, "run", "", "run id")
 	trace.Flags().StringVar(&artifactRef, "artifact", "", "artifact result ref")
-	trace.Flags().StringVar(&attemptID, "attempt", "", "attempt id")
+	trace.Flags().StringVar(&attemptID, "execution-scope", "", "execution scope id")
+	trace.Flags().StringVar(&attemptID, "attempt", "", "legacy alias for --execution-scope")
 	trace.Flags().StringVar(&toolCallID, "tool-call", "", "tool call id")
 	trace.Flags().StringVar(&processID, "process", "", "process id")
+	_ = trace.Flags().MarkHidden("attempt")
 
 	var refsRunID string
 	refs := &cobra.Command{
@@ -195,7 +197,7 @@ func graphCmd(dataDir, daemonURL *string) *cobra.Command {
 	var diffJSON bool
 	diffCmd := &cobra.Command{
 		Use:   "diff",
-		Short: "diff a workspace file across execution attempts",
+		Short: "diff a workspace file across execution scopes",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			db, err := openDB()
 			if err != nil {
@@ -217,7 +219,7 @@ func graphCmd(dataDir, daemonURL *string) *cobra.Command {
 	var blameJSON bool
 	blameCmd := &cobra.Command{
 		Use:   "blame",
-		Short: "attribute a workspace file to execution attempts",
+		Short: "attribute a workspace file to execution scopes",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			db, err := openDB()
 			if err != nil {
@@ -279,7 +281,7 @@ func graphCmd(dataDir, daemonURL *string) *cobra.Command {
 	var replayJSON bool
 	replayCmd := &cobra.Command{
 		Use:   "replay",
-		Short: "emit a replay plan for a run or attempt without executing it",
+		Short: "emit a replay plan for a run or execution scope without executing it",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			db, err := openDB()
 			if err != nil {
@@ -287,7 +289,7 @@ func graphCmd(dataDir, daemonURL *string) *cobra.Command {
 			}
 			defer db.Close()
 			if replayRunID != "" && replayAttemptID != "" {
-				return fmt.Errorf("use only one of --run or --attempt")
+				return fmt.Errorf("use only one of --run or --execution-scope/--attempt")
 			}
 			if replayAttemptID != "" {
 				if replayJSON {
@@ -301,18 +303,20 @@ func graphCmd(dataDir, daemonURL *string) *cobra.Command {
 				}
 				return provenance.ReplayRun(db, replayRunID, cmd.OutOrStdout())
 			}
-			return fmt.Errorf("one of --run or --attempt is required")
+			return fmt.Errorf("one of --run or --execution-scope/--attempt is required")
 		},
 	}
 	replayCmd.Flags().StringVar(&replayRunID, "run", "", "run id")
-	replayCmd.Flags().StringVar(&replayAttemptID, "attempt", "", "attempt id")
+	replayCmd.Flags().StringVar(&replayAttemptID, "execution-scope", "", "execution scope id")
+	replayCmd.Flags().StringVar(&replayAttemptID, "attempt", "", "legacy alias for --execution-scope")
 	replayCmd.Flags().BoolVar(&replayJSON, "json", false, "emit structured replay manifest JSON")
+	_ = replayCmd.Flags().MarkHidden("attempt")
 
 	var trajectoriesRunID string
 	var trajectoriesJSON bool
 	trajectoriesCmd := &cobra.Command{
 		Use:   "trajectories",
-		Short: "emit per-attempt trajectory evidence for external evaluators",
+		Short: "emit per-execution-scope trajectory evidence for external evaluators",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			db, err := openDB()
 			if err != nil {
@@ -429,12 +433,14 @@ func graphCmd(dataDir, daemonURL *string) *cobra.Command {
 	}
 	explainCmd.Flags().StringVar(&explainRunID, "run", "", "run id")
 	explainCmd.Flags().StringVar(&explainArtifact, "artifact", "", "artifact result ref")
-	explainCmd.Flags().StringVar(&explainAttempt, "attempt", "", "attempt id")
+	explainCmd.Flags().StringVar(&explainAttempt, "execution-scope", "", "execution scope id")
+	explainCmd.Flags().StringVar(&explainAttempt, "attempt", "", "legacy alias for --execution-scope")
 	explainCmd.Flags().StringVar(&explainToolCall, "tool-call", "", "tool call id")
 	explainCmd.Flags().StringVar(&explainProcess, "process", "", "process id")
 	explainCmd.Flags().StringVar(&explainEvent, "event", "", "runtime event id")
 	explainCmd.Flags().StringVar(&explainRisk, "risk", "", "policy decision id")
 	explainCmd.Flags().StringVar(&explainFile, "file", "", "workspace-relative file path")
+	_ = explainCmd.Flags().MarkHidden("attempt")
 	explainCmd.Flags().IntVar(&explainDepth, "depth", 2, "maximum graph traversal depth for causality_path")
 	explainCmd.Flags().IntVar(&explainLimit, "limit", 100, "maximum graph edges returned in causality_path")
 	explainCmd.Flags().StringVar(&explainCursor, "cursor", "", "pagination cursor from previous graph explain output")

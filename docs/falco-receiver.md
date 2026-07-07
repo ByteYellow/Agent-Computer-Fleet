@@ -9,8 +9,8 @@ kernel/runtime events — its output can be folded into the same DAG,
 correlation, policy, and risk path.
 
 ```sh
-./agentprov telemetry bind --run run-falco-demo --session session-falco-demo \
-  --attempt attempt-falco-demo --tool-call tool-falco-demo \
+./agentprov telemetry bind --run run-falco-demo --substrate-scope substrate-falco-demo \
+  --execution-scope exec-falco-demo --tool-call tool-falco-demo \
   --process process-falco-demo --container-id container-falco-demo --pid 4242 \
   --started-at 2026-01-01T00:00:00Z
 

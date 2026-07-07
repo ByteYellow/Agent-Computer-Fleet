@@ -38,15 +38,15 @@ README carries a short summary; this is the complete reference.
 | Command | Purpose |
 |---|---|
 | `trace` | Show execution context, runtime causality, provenance edges, risk, and response-gate evidence |
-| `refs` | Emit stable Git-like references for attempts, snapshots, artifacts, and decisions |
+| `refs` | Emit stable Git-like references for execution scopes, artifact states, artifacts, and decisions |
 | `log` | Show chronological execution history |
 | `materialize` | Write content-addressed provenance objects |
 | `materialize-llm` | Objectify captured LLM request/response bodies and build `llm_call` nodes with `llm_caused` edges for a run |
 | `objects` | List content-addressed object refs, hashes, parent hashes, source IDs, paths, and sizes; supports `--limit` and `--cursor` |
 | `verify` | Check graph integrity, risk/response evidence chains, taint/response barriers, object hashes, replay generation, drain watermarks, telemetry batch hashes, and orphan lifecycle evidence for outlived zero-SDK child processes |
 | `replay` | Emit a plan-only reconstruction of the run |
-| `trajectories --json` | Emit per-attempt behavior evidence, risk/deviation context, cost, artifacts, and runtime events for external evaluators or RL reward/penalty pipelines |
+| `trajectories --json` | Emit per-execution-scope behavior evidence, risk/deviation context, cost, artifacts, and runtime events for external evaluators or RL reward/penalty pipelines |
 | `lens` | Project the canonical graph through a Graph Explorer lens. Emits `agentprovenance.graph_lens/v1` with canonical nodes/edges, derived edges, focus state, overlays, layout hints, raw event count, omitted counts, and `--detail summary\|expanded\|raw` |
-| `diff` | Compare file state between base and attempts |
-| `blame` | Attribute file state to attempt, tool call, process, strategy, command, and local candidate status |
+| `diff` | Compare file state between a base state and execution scopes |
+| `blame` | Attribute file state to execution scope, tool call, process, strategy, command, and local candidate status |
 | `explain` | Explain a target by combining trace, runtime causality, diff/blame, telemetry receiver details, telemetry batch manifests, process observations, policy, object refs, risk signals, baseline deviations, and response evidence; `--json` emits `agentprovenance.explain/v1` with `upstream`, `downstream`, bounded `causality_path`, `query`, `evidence`, `objects`, `risks`, `telemetry_batches`, `process_observations`, and `replay_refs`; runtime events include receiver/source format, normalized event type, identity keys, schema status, and correlation status; use `--depth`, `--limit`, and `--cursor` to bound and page DAG traversal |

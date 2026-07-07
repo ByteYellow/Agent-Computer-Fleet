@@ -310,14 +310,19 @@ func telemetryIngestFalcoCmd(dataDir *string) *cobra.Command {
 	}
 	ingest.Flags().StringVar(&opts.Path, "file", "-", "Falco JSON/stdout file path, or - for stdin")
 	ingest.Flags().StringVar(&opts.RunID, "run", "", "default run id")
-	ingest.Flags().StringVar(&opts.RolloutID, "rollout", "", "default rollout id")
-	ingest.Flags().StringVar(&opts.AttemptID, "attempt", "", "default attempt id")
-	ingest.Flags().StringVar(&opts.SessionID, "session", "", "default session id")
+	ingest.Flags().StringVar(&opts.RolloutID, "trajectory", "", "default trajectory id")
+	ingest.Flags().StringVar(&opts.RolloutID, "rollout", "", "legacy alias for --trajectory")
+	ingest.Flags().StringVar(&opts.AttemptID, "execution-scope", "", "default execution scope id")
+	ingest.Flags().StringVar(&opts.AttemptID, "attempt", "", "legacy alias for --execution-scope")
+	ingest.Flags().StringVar(&opts.SessionID, "substrate-scope", "", "default substrate scope id")
+	ingest.Flags().StringVar(&opts.SessionID, "session", "", "legacy alias for --substrate-scope")
 	ingest.Flags().StringVar(&opts.ToolCallID, "tool-call", "", "default tool call id")
 	ingest.Flags().StringVar(&opts.ProcessID, "process", "", "default process id")
-	ingest.Flags().StringVar(&opts.SnapshotID, "snapshot", "", "default snapshot id")
+	ingest.Flags().StringVar(&opts.SnapshotID, "artifact-state", "", "default artifact state id")
+	ingest.Flags().StringVar(&opts.SnapshotID, "snapshot", "", "legacy alias for --artifact-state")
 	ingest.Flags().BoolVar(&noPolicy, "no-policy", false, "disable automatic policy/risk/response evaluation")
 	ingest.Flags().BoolVar(&jsonOut, "json", false, "emit JSON result")
+	hideTelemetryLegacyScopeFlags(ingest)
 	return ingest
 }
 
@@ -325,7 +330,7 @@ func telemetryBindCmd(dataDir *string) *cobra.Command {
 	var binding correlation.Binding
 	bind := &cobra.Command{
 		Use:   "bind",
-		Short: "register a ToolCallScope binding for runtime telemetry correlation",
+		Short: "register an execution-scope binding for runtime telemetry correlation",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			paths, err := store.Init(*dataDir)
 			if err != nil {
@@ -341,14 +346,16 @@ func telemetryBindCmd(dataDir *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "binding_id=%s run=%s session=%s attempt=%s tool_call=%s process=%s container=%s cgroup=%s pid=%d source=%s confidence=%.2f\n",
+			fmt.Fprintf(cmd.OutOrStdout(), "binding_id=%s run=%s substrate_scope=%s execution_scope=%s tool_call=%s process=%s container=%s cgroup=%s pid=%d source=%s confidence=%.2f\n",
 				id, binding.RunID, binding.SessionID, binding.AttemptID, binding.ToolCallID, binding.ProcessID, binding.ContainerID, binding.CgroupID, binding.PID, binding.BindingSource, binding.Confidence)
 			return nil
 		},
 	}
 	bind.Flags().StringVar(&binding.RunID, "run", "", "run id")
-	bind.Flags().StringVar(&binding.SessionID, "session", "", "session id")
-	bind.Flags().StringVar(&binding.AttemptID, "attempt", "", "attempt id")
+	bind.Flags().StringVar(&binding.SessionID, "substrate-scope", "", "substrate scope id")
+	bind.Flags().StringVar(&binding.SessionID, "session", "", "legacy alias for --substrate-scope")
+	bind.Flags().StringVar(&binding.AttemptID, "execution-scope", "", "execution scope id")
+	bind.Flags().StringVar(&binding.AttemptID, "attempt", "", "legacy alias for --execution-scope")
 	bind.Flags().StringVar(&binding.ToolCallID, "tool-call", "", "tool call id")
 	bind.Flags().StringVar(&binding.ProcessID, "process", "", "process id")
 	bind.Flags().StringVar(&binding.ContainerID, "container-id", "", "container id visible to runtime telemetry")
@@ -361,6 +368,8 @@ func telemetryBindCmd(dataDir *string) *cobra.Command {
 	bind.Flags().Float64Var(&binding.Confidence, "confidence", 1, "binding confidence")
 	_ = bind.MarkFlagRequired("run")
 	_ = bind.MarkFlagRequired("tool-call")
+	_ = bind.Flags().MarkHidden("session")
+	_ = bind.Flags().MarkHidden("attempt")
 	return bind
 }
 
@@ -384,7 +393,7 @@ func telemetryBindingsCmd(dataDir *string) *cobra.Command {
 				return err
 			}
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "ID\tRUN\tSESSION\tATTEMPT\tTOOL_CALL\tPROCESS\tCONTAINER\tCGROUP\tROOT_PID\tPID\tSOURCE\tCONFIDENCE\tSTARTED_AT\tENDED_AT")
+			fmt.Fprintln(w, "ID\tRUN\tSUBSTRATE_SCOPE\tEXECUTION_SCOPE\tTOOL_CALL\tPROCESS\tCONTAINER\tCGROUP\tROOT_PID\tPID\tSOURCE\tCONFIDENCE\tSTARTED_AT\tENDED_AT")
 			for _, item := range items {
 				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%.2f\t%s\t%s\n",
 					item.ID, item.RunID, item.SessionID, item.AttemptID, item.ToolCallID, item.ProcessID, item.ContainerID, item.CgroupID, item.RootPID, item.PID, item.BindingSource, item.Confidence, item.StartedAt, item.EndedAt)
@@ -393,10 +402,14 @@ func telemetryBindingsCmd(dataDir *string) *cobra.Command {
 		},
 	}
 	bindings.Flags().StringVar(&filter.RunID, "run", "", "filter by run id")
-	bindings.Flags().StringVar(&filter.SessionID, "session", "", "filter by session id")
-	bindings.Flags().StringVar(&filter.AttemptID, "attempt", "", "filter by attempt id")
+	bindings.Flags().StringVar(&filter.SessionID, "substrate-scope", "", "filter by substrate scope id")
+	bindings.Flags().StringVar(&filter.SessionID, "session", "", "legacy alias for --substrate-scope")
+	bindings.Flags().StringVar(&filter.AttemptID, "execution-scope", "", "filter by execution scope id")
+	bindings.Flags().StringVar(&filter.AttemptID, "attempt", "", "legacy alias for --execution-scope")
 	bindings.Flags().StringVar(&filter.ToolCallID, "tool-call", "", "filter by tool call id")
 	bindings.Flags().StringVar(&filter.ProcessID, "process", "", "filter by process id")
+	_ = bindings.Flags().MarkHidden("session")
+	_ = bindings.Flags().MarkHidden("attempt")
 	return bindings
 }
 
@@ -425,12 +438,16 @@ func telemetryIngestCmd(dataDir *string) *cobra.Command {
 		},
 	}
 	ingest.Flags().StringVar(&event.RunID, "run", "", "run id")
-	ingest.Flags().StringVar(&event.RolloutID, "rollout", "", "rollout id")
-	ingest.Flags().StringVar(&event.AttemptID, "attempt", "", "attempt id")
-	ingest.Flags().StringVar(&event.SessionID, "session", "", "session id")
+	ingest.Flags().StringVar(&event.RolloutID, "trajectory", "", "trajectory id")
+	ingest.Flags().StringVar(&event.RolloutID, "rollout", "", "legacy alias for --trajectory")
+	ingest.Flags().StringVar(&event.AttemptID, "execution-scope", "", "execution scope id")
+	ingest.Flags().StringVar(&event.AttemptID, "attempt", "", "legacy alias for --execution-scope")
+	ingest.Flags().StringVar(&event.SessionID, "substrate-scope", "", "substrate scope id")
+	ingest.Flags().StringVar(&event.SessionID, "session", "", "legacy alias for --substrate-scope")
 	ingest.Flags().StringVar(&event.ToolCallID, "tool-call", "", "tool call id")
 	ingest.Flags().StringVar(&event.ProcessID, "process", "", "process id")
-	ingest.Flags().StringVar(&event.SnapshotID, "snapshot", "", "snapshot id")
+	ingest.Flags().StringVar(&event.SnapshotID, "artifact-state", "", "artifact state id")
+	ingest.Flags().StringVar(&event.SnapshotID, "snapshot", "", "legacy alias for --artifact-state")
 	ingest.Flags().StringVar(&event.RawEventID, "raw-event", "", "raw telemetry event id from the substrate")
 	ingest.Flags().StringVar(&event.ContainerID, "container-id", "", "container id observed by runtime telemetry")
 	ingest.Flags().StringVar(&event.CgroupID, "cgroup-id", "", "cgroup id observed by runtime telemetry")
@@ -442,6 +459,7 @@ func telemetryIngestCmd(dataDir *string) *cobra.Command {
 	ingest.Flags().StringVar(&event.EventType, "type", "", "filtered event type")
 	ingest.Flags().StringVar(&event.Payload, "payload", "{}", "JSON payload")
 	_ = ingest.MarkFlagRequired("type")
+	hideTelemetryLegacyScopeFlags(ingest)
 	return ingest
 }
 
@@ -486,16 +504,27 @@ func telemetryIngestJSONLCmd(dataDir *string) *cobra.Command {
 	ingest.Flags().StringVar(&opts.Format, "format", "auto", "jsonl format: auto, tetragon, falco, loongcollector, or native (agentprov eBPF sensor)")
 	ingest.Flags().StringVar(&opts.Path, "file", "", "JSONL file path, or - to read a piped stream from stdin (e.g. the agentprov sensor)")
 	ingest.Flags().StringVar(&opts.RunID, "run", "", "default run id")
-	ingest.Flags().StringVar(&opts.RolloutID, "rollout", "", "default rollout id")
-	ingest.Flags().StringVar(&opts.AttemptID, "attempt", "", "default attempt id")
-	ingest.Flags().StringVar(&opts.SessionID, "session", "", "default session id")
+	ingest.Flags().StringVar(&opts.RolloutID, "trajectory", "", "default trajectory id")
+	ingest.Flags().StringVar(&opts.RolloutID, "rollout", "", "legacy alias for --trajectory")
+	ingest.Flags().StringVar(&opts.AttemptID, "execution-scope", "", "default execution scope id")
+	ingest.Flags().StringVar(&opts.AttemptID, "attempt", "", "legacy alias for --execution-scope")
+	ingest.Flags().StringVar(&opts.SessionID, "substrate-scope", "", "default substrate scope id")
+	ingest.Flags().StringVar(&opts.SessionID, "session", "", "legacy alias for --substrate-scope")
 	ingest.Flags().StringVar(&opts.ToolCallID, "tool-call", "", "default tool call id")
 	ingest.Flags().StringVar(&opts.ProcessID, "process", "", "default process id")
-	ingest.Flags().StringVar(&opts.SnapshotID, "snapshot", "", "default snapshot id")
+	ingest.Flags().StringVar(&opts.SnapshotID, "artifact-state", "", "default artifact state id")
+	ingest.Flags().StringVar(&opts.SnapshotID, "snapshot", "", "legacy alias for --artifact-state")
 	ingest.Flags().BoolVar(&noPolicy, "no-policy", false, "disable automatic policy/risk/response evaluation")
 	ingest.Flags().BoolVar(&jsonOut, "json", false, "emit JSON result")
 	_ = ingest.MarkFlagRequired("file")
+	hideTelemetryLegacyScopeFlags(ingest)
 	return ingest
+}
+
+func hideTelemetryLegacyScopeFlags(cmd *cobra.Command) {
+	for _, name := range []string{"rollout", "attempt", "session", "snapshot"} {
+		_ = cmd.Flags().MarkHidden(name)
+	}
 }
 
 func evaluateTelemetryPolicy(db *sql.DB, result *telemetry.JSONLIngestResult) {

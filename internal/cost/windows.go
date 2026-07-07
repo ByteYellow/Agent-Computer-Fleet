@@ -1,4 +1,4 @@
-package economics
+package cost
 
 import (
 	"database/sql"

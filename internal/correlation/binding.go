@@ -228,7 +228,7 @@ func resolveByProcess(db *sql.DB, runID, processID string) (Match, bool, error) 
 
 // MaxOpenBindingAge bounds how long a binding left open (ended_at = "") is
 // allowed to match telemetry. Without it, a binding whose CloseBinding was
-// dropped - every close call is best-effort (record/control/stressdemo) - would
+// dropped - every close call is best-effort (record/control) - would
 // match every future event for its container/pid forever, silently over-binding
 // later, unrelated executions to a stale context. An open binding only matches
 // events within this window after it started; older events fall through to the

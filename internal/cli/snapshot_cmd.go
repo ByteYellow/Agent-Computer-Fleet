@@ -183,7 +183,7 @@ func snapshotCmd(dataDir, daemonURL *string) *cobra.Command {
 	}
 	resume.Flags().StringVar(&resumeLeaseID, "lease", "", "lease id used for resumed session runtime/task settings")
 	_ = resume.MarkFlagRequired("lease")
-	cmd := &cobra.Command{Use: "snapshot", Short: "snapshot operations"}
+	cmd := &cobra.Command{Use: "snapshot", Short: "snapshot operations", Hidden: true}
 	cmd.AddCommand(create)
 	cmd.AddCommand(stack)
 	cmd.AddCommand(list)
@@ -196,9 +196,10 @@ func snapshotCmd(dataDir, daemonURL *string) *cobra.Command {
 func forkCmd(dataDir *string) *cobra.Command {
 	var count int
 	cmd := &cobra.Command{
-		Use:   "fork <snapshot_name_or_id>",
-		Short: "fork prepared workspaces from a snapshot",
-		Args:  cobra.ExactArgs(1),
+		Use:    "fork <snapshot_name_or_id>",
+		Short:  "fork prepared workspaces from a snapshot",
+		Hidden: true,
+		Args:   cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			paths, err := store.Init(*dataDir)
 			if err != nil {

@@ -1,6 +1,6 @@
 //go:build linux
 
-package cli
+package producer
 
 import (
 	"os"
@@ -9,12 +9,13 @@ import (
 	"syscall"
 )
 
-// ownCgroupID returns this process's cgroup v2 id -- the cgroup directory inode,
+// SelfCgroupID returns this process's cgroup v2 id -- the cgroup directory inode,
 // which is exactly the value the eBPF sensor emits (bpf_get_current_cgroup_id).
-// The sensor stream uses it to exclude its own process's activity from capture.
-// Returns "" if it cannot be determined (correlation simply won't self-exclude
-// by cgroup, and the path-based data-dir exclusion still applies).
-func ownCgroupID() string {
+// Inside a sandbox every process shares the sandbox's cgroup, so this is the key
+// that ties the sandbox's kernel telemetry to a scope. Returns "" when it cannot
+// be determined (not cgroup v2, or unreadable), in which case passive cgroup
+// binding is simply skipped.
+func SelfCgroupID() string {
 	data, err := os.ReadFile("/proc/self/cgroup")
 	if err != nil {
 		return ""

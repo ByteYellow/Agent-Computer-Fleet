@@ -37,6 +37,7 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(templateCmd(&dataDir))
 	root.AddCommand(apiCmd(&dataDir))
 	root.AddCommand(recordCmd(&dataDir))
+	root.AddCommand(sandboxCmd(&dataDir))
 	root.AddCommand(sensorCmd(&dataDir))
 	root.AddCommand(observeCmd(&dataDir, &daemonURL))
 	root.AddCommand(telemetryCmd(&dataDir, &daemonURL))

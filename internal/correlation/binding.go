@@ -51,18 +51,28 @@ type BindingFilter struct {
 	ProcessID  string
 }
 
-// defaultBindingConfidence caps how much a binding may vouch for a match by how
+// BindingSourceK8sCgroup marks a scope established by passive cgroup→pod
+// attribution (a node sensor observing an externally-scheduled pod we did not
+// launch), as opposed to a scope we launched via record/control-plane.
+const BindingSourceK8sCgroup = "k8s_cgroup"
+
+// DefaultBindingConfidence caps how much a binding may vouch for a match by how
 // it was established, when the caller did not set an explicit confidence.
 // scanOne takes the MIN of this binding confidence and the resolution method's
 // own confidence, so an app-asserted (ai_asserted) join can never read as
 // certain as a kernel-verified one even if it happens to match by pid. This is
 // the honesty tier: a scope the model merely CLAIMED is worth less than one the
 // control plane launched or the kernel witnessed.
-func defaultBindingConfidence(bindingSource string) float64 {
+func DefaultBindingConfidence(bindingSource string) float64 {
 	switch bindingSource {
 	case "ai_asserted":
 		// App-asserted only: a join key the model provided. Real, but unverified.
 		return 0.5
+	case BindingSourceK8sCgroup:
+		// Passive cgroup→pod attribution: the kernel really witnessed these
+		// events in this cgroup, but we did not launch the scope via record, so
+		// it sits below a control-plane/record binding and above a bare claim.
+		return 0.8
 	default:
 		// Control-plane / record / rollout launches and direct API binds are
 		// first-party facts about a process we started; keep them authoritative.
@@ -78,7 +88,7 @@ func RecordBinding(db *sql.DB, binding Binding) (string, error) {
 		binding.BindingSource = "control_plane"
 	}
 	if binding.Confidence <= 0 {
-		binding.Confidence = defaultBindingConfidence(binding.BindingSource)
+		binding.Confidence = DefaultBindingConfidence(binding.BindingSource)
 	}
 	if binding.ID == "" {
 		binding.ID = ids.New("bind")

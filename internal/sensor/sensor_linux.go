@@ -44,8 +44,8 @@ const (
 
 // Options configures optional sensor probes beyond the always-on syscall set.
 type Options struct {
-	// SSLLib, when set, attaches the PoC SSL_write uprobe to this libssl path to
-	// capture TLS plaintext (the agent's LLM request body) zero-instrumentation.
+	// SSLLib, when set, attaches SSL_write/read and SSL_write_ex/read_ex uprobes
+	// to this libssl path to capture TLS plaintext zero-instrumentation.
 	SSLLib string
 	// LibcLib overrides the libc path for the getaddrinfo DNS uprobe; empty =
 	// auto-detect the common system libc paths.
@@ -128,21 +128,52 @@ func RunWithOptions(out io.Writer, opts Options) error {
 		if err != nil {
 			return fmt.Errorf("open ssl lib %s: %w", opts.SSLLib, err)
 		}
-		upSSL, err := ex.Uprobe("SSL_write", objs.HandleSslWrite, nil)
-		if err != nil {
-			return fmt.Errorf("attach SSL_write uprobe on %s: %w", opts.SSLLib, err)
+
+		var attachErrs []string
+		attachedWrite := false
+		if up, err := ex.Uprobe("SSL_write", objs.HandleSslWrite, nil); err == nil {
+			defer up.Close()
+			attachedWrite = true
+		} else {
+			attachErrs = append(attachErrs, "SSL_write: "+err.Error())
 		}
-		defer upSSL.Close()
-		upReadEnter, err := ex.Uprobe("SSL_read", objs.HandleSslReadEnter, nil)
-		if err != nil {
-			return fmt.Errorf("attach SSL_read uprobe on %s: %w", opts.SSLLib, err)
+		if up, err := ex.Uprobe("SSL_write_ex", objs.HandleSslWriteEx, nil); err == nil {
+			defer up.Close()
+			attachedWrite = true
+		} else {
+			attachErrs = append(attachErrs, "SSL_write_ex: "+err.Error())
 		}
-		defer upReadEnter.Close()
-		upReadExit, err := ex.Uretprobe("SSL_read", objs.HandleSslReadExit, nil)
-		if err != nil {
-			return fmt.Errorf("attach SSL_read uretprobe on %s: %w", opts.SSLLib, err)
+
+		attachedRead := false
+		if upEnter, err := ex.Uprobe("SSL_read", objs.HandleSslReadEnter, nil); err == nil {
+			if upExit, err := ex.Uretprobe("SSL_read", objs.HandleSslReadExit, nil); err == nil {
+				defer upEnter.Close()
+				defer upExit.Close()
+				attachedRead = true
+			} else {
+				upEnter.Close()
+				attachErrs = append(attachErrs, "SSL_read return: "+err.Error())
+			}
+		} else {
+			attachErrs = append(attachErrs, "SSL_read: "+err.Error())
 		}
-		defer upReadExit.Close()
+
+		if upEnter, err := ex.Uprobe("SSL_read_ex", objs.HandleSslReadExEnter, nil); err == nil {
+			if upExit, err := ex.Uretprobe("SSL_read_ex", objs.HandleSslReadExExit, nil); err == nil {
+				defer upEnter.Close()
+				defer upExit.Close()
+				attachedRead = true
+			} else {
+				upEnter.Close()
+				attachErrs = append(attachErrs, "SSL_read_ex return: "+err.Error())
+			}
+		} else {
+			attachErrs = append(attachErrs, "SSL_read_ex: "+err.Error())
+		}
+
+		if !attachedWrite || !attachedRead {
+			return fmt.Errorf("attach OpenSSL TLS uprobes on %s: write=%v read=%v (%s)", opts.SSLLib, attachedWrite, attachedRead, strings.Join(attachErrs, "; "))
+		}
 	}
 
 	// DNS uprobe on the system libc's getaddrinfo (best-effort, non-fatal): gives
@@ -193,8 +224,9 @@ func RunWithOptions(out io.Writer, opts Options) error {
 	defer close(done)
 	go watchDrops(objs.Drops, emit, done)
 
-	// The SSL_write/SSL_read probes emit ordered TLS-plaintext chunks; reassemble
-	// them into complete HTTP/1.1 request/response messages before emitting.
+	// The SSL_write/read probes emit ordered TLS-plaintext chunks; reassemble them
+	// into complete HTTP/1.1 or HTTP/2/HPACK request/response messages before
+	// emitting.
 	reasm := tlsintent.NewReassembler()
 	for {
 		rec, err := rd.Read()

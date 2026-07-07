@@ -41,3 +41,15 @@ func TestLocalRecordIsKernelVerifiedBaseline(t *testing.T) {
 		t.Fatalf("local-record must be a kernel-verified baseline: mode=%q confidence=%v", p.ScopeMode, p.ScopeConfidence())
 	}
 }
+
+func TestOpenSSLModelIntentIsPartialNotUniversal(t *testing.T) {
+	for _, p := range []Profile{LocalRecord(), MicrovmGuestInit()} {
+		cap := p.Layers[LayerModelIntent]
+		if cap.Coverage != CoveragePartial {
+			t.Fatalf("%s model_intent = %q, want partial because non-OpenSSL TLS stacks are not covered", p.Name, cap.Coverage)
+		}
+		if cap.Note == "" {
+			t.Fatalf("%s model_intent partial coverage must explain the TLS-stack boundary", p.Name)
+		}
+	}
+}

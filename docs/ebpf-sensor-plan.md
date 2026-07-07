@@ -13,9 +13,10 @@ Probes (all → the normalized schema, ingested as `source=agentprov_ebpf`):
   reads** (read of a credential/secret path → `secret_path`), `process_exit`.
 - Privilege/tamper: `setuid`/`setgid`, `ptrace`, `rename`/`renameat`/`renameat2`,
   `unlinkat`.
-- TLS plaintext: `SSL_write`/`SSL_read` uprobes → `tls_write`/`tls_read` with a
-  privacy-safe hash + preview + allow-listed HTTP metadata (never the full body);
-  paired into a DAG `llm_call` edge and an `llm_intent_caused` edge.
+- TLS plaintext: `SSL_write`/`SSL_read` plus modern `SSL_write_ex`/`SSL_read_ex`
+  uprobes → `tls_write`/`tls_read` chunks with privacy-safe hash + preview +
+  allow-listed HTTP metadata; paired into a DAG `llm_call` edge and an
+  `llm_intent_caused` edge.
 - DNS: `getaddrinfo` uprobe (glibc).
 
 Key learnings: noise-prefix filtering runs **before** `bpf_ringbuf_reserve` (a
@@ -26,9 +27,9 @@ The product path is now `agentprov sensor stream`: a per-node supervisor that
 streams native events into the local store, correlates them to open bindings,
 and evaluates runtime policy without a manual JSONL ingest step.
 
-Open follow-ups: universal DNS (musl / UDP:53), IPv6/UDP, HTTP/2 HPACK decode,
-multi-arch (x86 `PT_REGS`; arm64 only today), `ptrace` end-to-end test, and
-rootless container cgroup-delegation validation.
+Open follow-ups: universal DNS (musl / UDP:53), IPv6/UDP, non-OpenSSL TLS stacks
+(Go `crypto/tls`, BoringSSL, statically-linked TLS), multi-arch x86 validation,
+`ptrace` end-to-end test, and rootless container cgroup-delegation validation.
 
 ## Goal
 

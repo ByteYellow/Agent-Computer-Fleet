@@ -12,8 +12,8 @@ import (
 )
 
 func main() {
-	// AGENTPROV_SSL_LIB=/path/to/libssl.so.3 enables the PoC SSL_write uprobe
-	// (zero-instrumentation TLS plaintext capture).
+	// AGENTPROV_SSL_LIB=/path/to/libssl.so.3 enables OpenSSL TLS plaintext
+	// capture via SSL_write/read and SSL_write_ex/read_ex uprobes.
 	opts := sensor.Options{SSLLib: os.Getenv("AGENTPROV_SSL_LIB")}
 	if err := sensor.RunWithOptions(os.Stdout, opts); err != nil {
 		fmt.Fprintln(os.Stderr, "agentprov-sensor:", err)

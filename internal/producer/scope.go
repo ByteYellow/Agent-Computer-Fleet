@@ -48,9 +48,17 @@ func ParseCgroupScope(cgroupPath string) (CgroupScope, bool) {
 		s.ContainerID = m
 	}
 	if m := podUIDRe.FindStringSubmatch(cgroupPath); m != nil {
-		s.PodUID = strings.ReplaceAll(m[1], "_", "-")
+		s.PodUID = canonicalPodUID(m[1])
 	}
 	return s, s.ContainerID != "" || s.PodUID != ""
+}
+
+func canonicalPodUID(uid string) string {
+	uid = strings.ToLower(strings.ReplaceAll(uid, "_", "-"))
+	if len(uid) == 32 && !strings.Contains(uid, "-") {
+		return uid[:8] + "-" + uid[8:12] + "-" + uid[12:16] + "-" + uid[16:20] + "-" + uid[20:]
+	}
+	return uid
 }
 
 // Binding turns a parsed cgroup scope into a passive-attribution binding for the

@@ -467,11 +467,12 @@ int BPF_UPROBE(handle_getaddrinfo, const char *node) {
 	return 0;
 }
 
-// Boundary tracing: uprobes on SSL_write/SSL_read capture the plaintext an agent
-// sends/receives over TLS (the LLM request/response) without instrumenting it.
-// Attached to a libssl path only when --ssl-lib is given. We emit the FULL buffer
-// as ordered SSL_CHUNK-sized chunks keyed by the SSL* pointer (conn); userspace
-// reassembles them into complete HTTP/1.1 messages.
+// Boundary tracing: uprobes on SSL_write/SSL_read and the modern *_ex variants
+// capture the plaintext an agent sends/receives over TLS (the LLM
+// request/response) without instrumenting it. Attached to a libssl path only
+// when --ssl-lib is given. We emit the FULL buffer as ordered SSL_CHUNK-sized
+// chunks keyed by the SSL* pointer (conn); userspace reassembles them into
+// complete HTTP/1.1 or HTTP/2 messages.
 static __always_inline void emit_ssl_chunks(__u32 kind, __u64 conn, const char *buf, int total) {
 	for (int i = 0; i < SSL_MAX_CHUNKS; i++) {
 		int off = i * SSL_CHUNK;
@@ -507,6 +508,18 @@ int BPF_UPROBE(handle_ssl_write, void *ssl, const void *buf, int num) {
 	return 0;
 }
 
+// SSL_write_ex(ssl, buf, num, *written): the size_t-taking variant modern
+// OpenSSL 3.x clients use (notably CPython's _ssl, which never calls SSL_write).
+// The plaintext is in buf at entry, exactly like SSL_write, so we emit here and
+// ignore the *written out-param. num is size_t; clamp before the signed emit.
+SEC("uprobe/SSL_write_ex")
+int BPF_UPROBE(handle_ssl_write_ex, void *ssl, const void *buf, __u64 num) {
+	if (!buf || num == 0 || num > (1u << 20))
+		return 0;
+	emit_ssl_chunks(EVENT_SSL, (__u64)ssl, (const char *)buf, (int)num);
+	return 0;
+}
+
 // SSL_read(ssl, buf, num): the plaintext lands in buf only AFTER the call, so we
 // stash (buf, ssl) at entry and read it on return (the return value is the count).
 struct ssl_read_ctx {
@@ -539,5 +552,47 @@ int BPF_URETPROBE(handle_ssl_read_exit, int ret) {
 	if (ret <= 0 || buf == 0)
 		return 0;
 	emit_ssl_chunks(EVENT_SSL_READ, ssl, (const char *)buf, ret);
+	return 0;
+}
+
+// SSL_read_ex(ssl, buf, num, *readbytes): the modern variant. Unlike SSL_read,
+// the byte count is written to *readbytes (not the return value, which is 1/0
+// success), so we stash the out-param pointer at entry and read *readbytes on
+// return. Separate map from SSL_read so the two paths never clobber each other.
+struct ssl_read_ex_ctx {
+	__u64 buf;
+	__u64 ssl;
+	__u64 readbytes; // *size_t out-param holding the count after the call
+};
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, __u32);
+	__type(value, struct ssl_read_ex_ctx);
+} ssl_read_ex_bufs SEC(".maps");
+
+SEC("uprobe/SSL_read_ex")
+int BPF_UPROBE(handle_ssl_read_ex_enter, void *ssl, void *buf, __u64 num, __u64 *readbytes) {
+	__u32 pid = (__u32)(bpf_get_current_pid_tgid() >> 32);
+	struct ssl_read_ex_ctx c = {.buf = (__u64)buf, .ssl = (__u64)ssl, .readbytes = (__u64)readbytes};
+	bpf_map_update_elem(&ssl_read_ex_bufs, &pid, &c, BPF_ANY);
+	return 0;
+}
+
+SEC("uretprobe/SSL_read_ex")
+int BPF_URETPROBE(handle_ssl_read_ex_exit, int ret) {
+	__u32 pid = (__u32)(bpf_get_current_pid_tgid() >> 32);
+	struct ssl_read_ex_ctx *c = bpf_map_lookup_elem(&ssl_read_ex_bufs, &pid);
+	if (!c)
+		return 0;
+	__u64 buf = c->buf, ssl = c->ssl, rbptr = c->readbytes;
+	bpf_map_delete_elem(&ssl_read_ex_bufs, &pid);
+	if (ret <= 0 || buf == 0 || rbptr == 0)
+		return 0;
+	__u64 n = 0;
+	bpf_probe_read_user(&n, sizeof(n), (void *)rbptr);
+	if (n == 0 || n > (1u << 20))
+		return 0;
+	emit_ssl_chunks(EVENT_SSL_READ, ssl, (const char *)buf, (int)n);
 	return 0;
 }

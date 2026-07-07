@@ -888,8 +888,8 @@ per-command purpose: [docs/graph-commands.md](docs/graph-commands.md).
 |---|---|
 | Zero-SDK record | `record -- <cmd>` snapshots the workdir, samples the process tree, captures file diffs + runtime evidence, no SDK |
 | Batch recorder | `record batch` records many jobs in parallel for RL/benchmark pipelines |
-| Native eBPF sensor | `agentprov-sensor` (Linux/arm64): exec+argv, connect, file write + sensitive **read** → `secret_path`, process_exit, privesc (setuid/setgid/ptrace), tamper (rename/unlink), TLS plaintext (full request/response bodies via chunked SSL_write/SSL_read capture), DNS — in-kernel noise filtering, validated live |
-| LLM intent capture | `internal/tlsintent` reassembles the sensor's TLS chunks into complete HTTP/1.1 messages (Content-Length, chunked, and SSE streaming bodies; HTTP/2 is detected and passed through raw, never mis-parsed) and parses LLM semantics across Anthropic/OpenAI shapes — model, tools offered, tool calls + the shell commands the model decided to run, stop reason |
+| Native eBPF sensor | `agentprov-sensor` (Linux/arm64): exec+argv, connect, file write + sensitive **read** → `secret_path`, process_exit, privesc (setuid/setgid/ptrace), tamper (rename/unlink), TLS plaintext (full request/response bodies via chunked `SSL_write`/`SSL_read` and modern `SSL_write_ex`/`SSL_read_ex` capture), DNS — in-kernel noise filtering, validated live |
+| LLM intent capture | `internal/tlsintent` reassembles the sensor's TLS chunks into complete HTTP/1.1 messages (Content-Length, chunked, and SSE streaming bodies) and HTTP/2 messages (frames + HPACK + stream demux), then parses LLM semantics across Anthropic/OpenAI shapes — model, tools offered, tool calls + the shell commands the model decided to run, stop reason |
 | Evidence ingest | Falco / Tetragon / LoongCollector JSONL + native sensor → normalized events; schema-validated, app-context rejected in raw payloads, paged with integrity hashes |
 
 **Correlate & verify**
@@ -1164,9 +1164,10 @@ Recently landed:
 
 - **LLM-intent provenance** (`internal/tlsintent`, `graph materialize-llm`) -
   the sensor captures the agent's actual LLM traffic as full TLS bodies
-  (chunked SSL_write/SSL_read), userspace reassembles them into complete
-  HTTP/1.1 messages (Content-Length / chunked / SSE; h2 detected, passed
-  through raw) and parses model/tools/decided-commands semantics; each body is
+  (chunked `SSL_write`/`SSL_read` and `SSL_write_ex`/`SSL_read_ex`), userspace
+  reassembles them into complete HTTP/1.1 messages (Content-Length / chunked /
+  SSE) and HTTP/2 messages (frames + HPACK + stream demux), then parses
+  model/tools/decided-commands semantics; each body is
   objectified as a content-addressed `llm_message`, each request/response pair
   becomes an `llm_call` node, and `llm_caused` edges are drawn only to the
   command the model's response actually decided. The agent-intent lens renders
@@ -1220,9 +1221,10 @@ Next / open:
   kprobe; `getaddrinfo` covers glibc today), IPv6/UDP connect, and multi-arch
   (x86 `PT_REGS`; arm64-only today). `ptrace` is captured but not yet exercised
   end to end in a test.
-- **TLS depth** — HTTP/2 HPACK header decode and h2 body reassembly (HTTP/1.1
-  Content-Length / chunked / SSE reassembly is done; h2 is detected and passed
-  through raw today).
+- **TLS breadth** — Go `crypto/tls`, BoringSSL, statically-linked TLS, and x86
+  uprobe validation. OpenSSL dynamic-link clients are covered by
+  `SSL_write`/`SSL_read` and `SSL_write_ex`/`SSL_read_ex`; HTTP/1.1 and
+  HTTP/2/HPACK reassembly are implemented.
 - **Tamper-evidence (v2)** — off-host / capture-time signing (KMS / TPM /
   transparency log). v1 is integrity plus optional local signing, not proof
   against a host-root attacker.

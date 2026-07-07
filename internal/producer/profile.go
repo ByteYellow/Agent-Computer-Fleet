@@ -23,7 +23,7 @@ const (
 )
 
 // LayerCapability declares a layer's coverage in a profile plus a human note
-// explaining any limit (e.g. "OpenSSL only").
+// explaining any limit (e.g. "OpenSSL dynamic-link only").
 type LayerCapability struct {
 	Coverage Coverage `json:"coverage"`
 	Note     string   `json:"note,omitempty"`
@@ -56,7 +56,9 @@ func (p Profile) ScopeConfidence() float64 {
 }
 
 // LocalRecord is the baseline profile: the current local/VM path. record wraps
-// the workload for a kernel-verified scope and all three layers are collected.
+// the workload for a kernel-verified scope. The kernel and hook layers are full;
+// model intent is strong for dynamically-linked OpenSSL clients, but still not a
+// universal TLS-stack capture.
 func LocalRecord() Profile {
 	return Profile{
 		Name:            "local-record",
@@ -64,7 +66,7 @@ func LocalRecord() Profile {
 		ScopeMode:       ScopeModeRecord,
 		Layers: map[Layer]LayerCapability{
 			LayerSystemTelemetry: {Coverage: CoverageFull},
-			LayerModelIntent:     {Coverage: CoverageFull, Note: "OpenSSL dynamic-link only"},
+			LayerModelIntent:     {Coverage: CoveragePartial, Note: "OpenSSL dynamic-link only; captures SSL_write/read and SSL_write_ex/read_ex; HTTP/1.1 + HTTP/2/HPACK parsed"},
 			LayerAppContext:      {Coverage: CoverageFull, Note: "adapted harness (hooks) required for tool-call intent"},
 		},
 	}
@@ -72,8 +74,8 @@ func LocalRecord() Profile {
 
 // K8sDaemonset runs one sensor per node (DaemonSet). It shares the node kernel,
 // so system telemetry is full; scope is passive cgroup→pod attribution unless the
-// pod entrypoint opts into record. Model intent is pending libssl resolution
-// across each pod's container rootfs.
+// pod entrypoint opts into record. Model intent is limited by whether the node
+// sensor can resolve the workload's dynamic libssl in the container rootfs.
 func K8sDaemonset() Profile {
 	return Profile{
 		Name:            "k8s-daemonset",
@@ -81,7 +83,7 @@ func K8sDaemonset() Profile {
 		ScopeMode:       ScopeModeCgroup,
 		Layers: map[Layer]LayerCapability{
 			LayerSystemTelemetry: {Coverage: CoverageFull},
-			LayerModelIntent:     {Coverage: CoveragePartial, Note: "pending libssl-in-container-rootfs uprobe resolution"},
+			LayerModelIntent:     {Coverage: CoveragePartial, Note: "OpenSSL dynamic-link only when libssl is resolvable in the container rootfs; HTTP/1.1 + HTTP/2/HPACK parsed"},
 			LayerAppContext:      {Coverage: CoverageFull, Note: "via command-match; adapted harness required for tool-call intent"},
 		},
 	}
@@ -97,7 +99,7 @@ func MicrovmGuestInit() Profile {
 		ScopeMode:       ScopeModeRecord,
 		Layers: map[Layer]LayerCapability{
 			LayerSystemTelemetry: {Coverage: CoverageFull},
-			LayerModelIntent:     {Coverage: CoverageFull, Note: "OpenSSL dynamic-link only"},
+			LayerModelIntent:     {Coverage: CoveragePartial, Note: "OpenSSL dynamic-link only; captures SSL_write/read and SSL_write_ex/read_ex; HTTP/1.1 + HTTP/2/HPACK parsed"},
 			LayerAppContext:      {Coverage: CoverageFull, Note: "adapted harness (hooks) required for tool-call intent"},
 		},
 	}

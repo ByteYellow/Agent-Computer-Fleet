@@ -92,6 +92,14 @@ func TestParseCgroupScope(t *testing.T) {
 			ok:      true,
 		},
 		{
+			name:    "k8s compact pod uid",
+			path:    "/kubepods/burstable/pod12345678123412341234123456789012/" + cid,
+			runtime: "",
+			cid:     cid,
+			podUID:  "12345678-1234-1234-1234-123456789012",
+			ok:      true,
+		},
+		{
 			name:    "plain docker scope",
 			path:    "/system.slice/docker-" + cid + ".scope",
 			runtime: "docker",

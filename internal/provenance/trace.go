@@ -813,6 +813,14 @@ func collectRunGraphIDs(db *sql.DB, runID string, snapshotIDs map[string]bool) (
 }
 
 func collectRunSnapshotIDs(db *sql.DB, runID string) (map[string]bool, error) {
+	// Preload every snapshot's parent pointer once so the parent-chain walk
+	// below is in-memory. Previously addSnapshotWithParents issued one QueryRow
+	// per ancestor hop - an O(snapshots x chain depth) N+1 that also ran inside
+	// the first open cursor and silently truncated the set on any query error.
+	parents, err := loadSnapshotParents(db)
+	if err != nil {
+		return nil, err
+	}
 	ids := map[string]bool{}
 	rows, err := db.Query(`SELECT id, COALESCE(parent_id, '') FROM snapshots WHERE session_id IN (SELECT id FROM sessions WHERE run_id = ?)`, runID)
 	if err != nil {
@@ -824,8 +832,8 @@ func collectRunSnapshotIDs(db *sql.DB, runID string) (map[string]bool, error) {
 			rows.Close()
 			return nil, err
 		}
-		addSnapshotWithParents(db, ids, id)
-		addSnapshotWithParents(db, ids, parentID)
+		addSnapshotWithParents(parents, ids, id)
+		addSnapshotWithParents(parents, ids, parentID)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -843,7 +851,7 @@ func collectRunSnapshotIDs(db *sql.DB, runID string) (map[string]bool, error) {
 			rows.Close()
 			return nil, err
 		}
-		addSnapshotWithParents(db, ids, id)
+		addSnapshotWithParents(parents, ids, id)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -861,7 +869,7 @@ func collectRunSnapshotIDs(db *sql.DB, runID string) (map[string]bool, error) {
 			rows.Close()
 			return nil, err
 		}
-		addSnapshotWithParents(db, ids, id)
+		addSnapshotWithParents(parents, ids, id)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -871,11 +879,31 @@ func collectRunSnapshotIDs(db *sql.DB, runID string) (map[string]bool, error) {
 	return ids, nil
 }
 
-func addSnapshotWithParents(db *sql.DB, ids map[string]bool, snapshotID string) {
+// loadSnapshotParents maps every snapshot id to its parent id (empty when it has
+// none). A snapshot whose row is absent simply has no entry, which stops the
+// walk exactly as the old per-row lookup did on sql.ErrNoRows.
+func loadSnapshotParents(db *sql.DB) (map[string]string, error) {
+	rows, err := db.Query(`SELECT id, COALESCE(parent_id, '') FROM snapshots`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	parents := map[string]string{}
+	for rows.Next() {
+		var id, parentID string
+		if err := rows.Scan(&id, &parentID); err != nil {
+			return nil, err
+		}
+		parents[id] = parentID
+	}
+	return parents, rows.Err()
+}
+
+func addSnapshotWithParents(parents map[string]string, ids map[string]bool, snapshotID string) {
 	for snapshotID != "" && !ids[snapshotID] {
 		ids[snapshotID] = true
-		var parentID string
-		if err := db.QueryRow(`SELECT COALESCE(parent_id, '') FROM snapshots WHERE id = ?`, snapshotID).Scan(&parentID); err != nil {
+		parentID, ok := parents[snapshotID]
+		if !ok {
 			return
 		}
 		snapshotID = parentID

@@ -571,8 +571,11 @@ func resolveExplainIDs(db *sql.DB, target ExplainTarget) (map[string]string, err
 	}
 	if ids["event_id"] != "" {
 		var runID, sessionID, toolCallID, processID, snapshotID string
-		_ = db.QueryRow(`SELECT COALESCE(run_id, ''), COALESCE(session_id, ''), COALESCE(tool_call_id, ''),
+		err := db.QueryRow(`SELECT COALESCE(run_id, ''), COALESCE(session_id, ''), COALESCE(tool_call_id, ''),
 			COALESCE(process_id, ''), COALESCE(snapshot_id, '') FROM events WHERE id = ?`, ids["event_id"]).Scan(&runID, &sessionID, &toolCallID, &processID, &snapshotID)
+		if err != nil && err != sql.ErrNoRows {
+			return nil, err
+		}
 		fillID(ids, "run_id", runID)
 		fillID(ids, "session_id", sessionID)
 		fillID(ids, "tool_call_id", toolCallID)
@@ -581,8 +584,11 @@ func resolveExplainIDs(db *sql.DB, target ExplainTarget) (map[string]string, err
 	}
 	if ids["tool_call_id"] != "" {
 		var rolloutID, attemptID, sessionID, resultRef string
-		_ = db.QueryRow(`SELECT COALESCE(rollout_id, ''), COALESCE(attempt_id, ''), COALESCE(session_id, ''), COALESCE(result_ref, '')
+		err := db.QueryRow(`SELECT COALESCE(rollout_id, ''), COALESCE(attempt_id, ''), COALESCE(session_id, ''), COALESCE(result_ref, '')
 			FROM tool_calls WHERE id = ?`, ids["tool_call_id"]).Scan(&rolloutID, &attemptID, &sessionID, &resultRef)
+		if err != nil && err != sql.ErrNoRows {
+			return nil, err
+		}
 		fillID(ids, "rollout_id", rolloutID)
 		fillID(ids, "attempt_id", attemptID)
 		fillID(ids, "session_id", sessionID)
@@ -590,8 +596,11 @@ func resolveExplainIDs(db *sql.DB, target ExplainTarget) (map[string]string, err
 	}
 	if ids["attempt_id"] != "" {
 		var rolloutID, toolCallID, snapshotID, artifactRef string
-		_ = db.QueryRow(`SELECT COALESCE(rollout_id, ''), COALESCE(tool_call_id, ''), COALESCE(snapshot_id, ''), COALESCE(artifact_result, '')
+		err := db.QueryRow(`SELECT COALESCE(rollout_id, ''), COALESCE(tool_call_id, ''), COALESCE(snapshot_id, ''), COALESCE(artifact_result, '')
 			FROM fork_attempts WHERE id = ?`, ids["attempt_id"]).Scan(&rolloutID, &toolCallID, &snapshotID, &artifactRef)
+		if err != nil && err != sql.ErrNoRows {
+			return nil, err
+		}
 		fillID(ids, "rollout_id", rolloutID)
 		fillID(ids, "tool_call_id", toolCallID)
 		fillID(ids, "snapshot_id", snapshotID)
@@ -599,12 +608,18 @@ func resolveExplainIDs(db *sql.DB, target ExplainTarget) (map[string]string, err
 	}
 	if ids["process_id"] == "" && ids["tool_call_id"] != "" {
 		var processID string
-		_ = db.QueryRow(`SELECT id FROM processes WHERE tool_call_id = ? ORDER BY started_at ASC LIMIT 1`, ids["tool_call_id"]).Scan(&processID)
+		err := db.QueryRow(`SELECT id FROM processes WHERE tool_call_id = ? ORDER BY started_at ASC LIMIT 1`, ids["tool_call_id"]).Scan(&processID)
+		if err != nil && err != sql.ErrNoRows {
+			return nil, err
+		}
 		fillID(ids, "process_id", processID)
 	}
 	if ids["process_id"] != "" {
 		var sessionID, toolCallID string
-		_ = db.QueryRow(`SELECT COALESCE(session_id, ''), COALESCE(tool_call_id, '') FROM processes WHERE id = ?`, ids["process_id"]).Scan(&sessionID, &toolCallID)
+		err := db.QueryRow(`SELECT COALESCE(session_id, ''), COALESCE(tool_call_id, '') FROM processes WHERE id = ?`, ids["process_id"]).Scan(&sessionID, &toolCallID)
+		if err != nil && err != sql.ErrNoRows {
+			return nil, err
+		}
 		fillID(ids, "session_id", sessionID)
 		fillID(ids, "tool_call_id", toolCallID)
 	}
@@ -910,6 +925,36 @@ func queryExplainEdges(db *sql.DB, query string, args ...any) ([]ExplainGraphEdg
 	return edges, rows.Err()
 }
 
+// loadCausalityAdjacency loads the edges once and buckets them by endpoint so
+// the causality BFS can expand each frontier node from memory instead of one
+// query per node per depth. Each node's slice is exactly what
+// graphEdgesWhere(db, "(from_id=? OR to_id=?)", node, node) would return - the
+// same edges in the same created_at,id order - because the source query shares
+// that ORDER BY. Preserving per-node order is required: the BFS visitation order
+// feeds the page_hash digest and pagination cursor.
+func loadCausalityAdjacency(db *sql.DB, runID string) (map[string][]ExplainGraphEdge, error) {
+	where := ""
+	var args []any
+	if runID != "" {
+		where = "WHERE run_id = ? "
+		args = append(args, runID)
+	}
+	query := `SELECT run_id, rollout_id, from_id, to_id, edge_type, source_event_id, created_at
+		FROM graph_edges ` + where + `ORDER BY created_at ASC, id ASC`
+	edges, err := queryExplainEdges(db, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	adj := make(map[string][]ExplainGraphEdge)
+	for _, e := range edges {
+		adj[e.FromID] = append(adj[e.FromID], e)
+		if e.ToID != e.FromID {
+			adj[e.ToID] = append(adj[e.ToID], e)
+		}
+	}
+	return adj, nil
+}
+
 func causalityPathEdges(db *sql.DB, runID, startID string, maxDepth, limit int, cursor string) ([]ExplainGraphEdge, ExplainQuery, error) {
 	query := ExplainQuery{Depth: maxDepth, Limit: limit, Cursor: cursor}
 	if maxDepth <= 0 {
@@ -925,6 +970,10 @@ func causalityPathEdges(db *sql.DB, runID, startID string, maxDepth, limit int, 
 	if startID == "" {
 		return nil, query, nil
 	}
+	adjacency, err := loadCausalityAdjacency(db, runID)
+	if err != nil {
+		return nil, query, err
+	}
 	seenNodes := map[string]bool{startID: true}
 	seenEdges := map[string]bool{}
 	frontier := []string{startID}
@@ -933,17 +982,7 @@ func causalityPathEdges(db *sql.DB, runID, startID string, maxDepth, limit int, 
 	for depth := 0; depth < query.Depth && len(frontier) > 0; depth++ {
 		next := []string{}
 		for _, node := range frontier {
-			where := `(from_id = ? OR to_id = ?)`
-			args := []any{node, node}
-			if runID != "" {
-				where = `run_id = ? AND ` + where
-				args = append([]any{runID}, args...)
-			}
-			edges, err := graphEdgesWhere(db, where, args...)
-			if err != nil {
-				return nil, query, err
-			}
-			for _, edge := range edges {
+			for _, edge := range adjacency[node] {
 				key := edge.FromID + "\x00" + edge.ToID + "\x00" + edge.EdgeType + "\x00" + edge.SourceEventID
 				if !seenEdges[key] {
 					seenEdges[key] = true

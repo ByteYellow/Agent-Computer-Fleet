@@ -27,9 +27,10 @@ The product path is now `agentprov sensor stream`: a per-node supervisor that
 streams native events into the local store, correlates them to open bindings,
 and evaluates runtime policy without a manual JSONL ingest step.
 
-Open follow-ups: universal DNS (musl / UDP:53), IPv6/UDP, non-OpenSSL TLS stacks
-(Go `crypto/tls`, BoringSSL, statically-linked TLS), multi-arch x86 validation,
-`ptrace` end-to-end test, and rootless container cgroup-delegation validation.
+Open follow-ups: universal DNS (musl / UDP:53), IPv6/UDP, Go `crypto/tls`
+response/read capture, BoringSSL, statically-linked TLS, multi-arch x86
+validation, `ptrace` end-to-end test, and rootless container
+cgroup-delegation validation.
 
 ## Goal
 

@@ -23,7 +23,7 @@ This framing decides what v0.7 can and cannot promise:
 | Layer | Mechanism (code) | Depends on | Universal by one mechanism? |
 |---|---|---|---|
 | **system telemetry** | eBPF tracepoints — `execve`/`connect`/`openat`/`exit` (`internal/sensor/sensor_linux.go`) | the target **kernel** | ✅ yes — harness- and language-agnostic |
-| **model intent** | eBPF uprobes on libssl (`SSL_write`/`SSL_read` and `SSL_write_ex`/`SSL_read_ex`) + `getaddrinfo`; userspace parses HTTP/1.1 and HTTP/2/HPACK (`sensor_linux.go`, `internal/tlsintent`) | the target kernel **and the TLS stack** | ⚠️ no — dynamically-linked OpenSSL only today |
+| **model intent** | eBPF uprobes on libssl (`SSL_write`/`SSL_read` and `SSL_write_ex`/`SSL_read_ex`), plus a partial Go `crypto/tls.(*Conn).Write` request/write uprobe via `AGENTPROV_GO_TLS_BIN`; userspace parses HTTP/1.1 and HTTP/2/HPACK (`sensor_linux.go`, `internal/tlsintent`) | the target kernel **and the TLS stack** | ⚠️ no — dynamic OpenSSL + partial unstripped Go request path today |
 | **app context** | harness hook JSONL (`internal/hooksbridge`, Claude Code format) joined by **command-match** (`agent_syscall` edge) | the **harness format** | ❌ no — inherently one thin adapter per harness |
 
 The unifying property that keeps the system from ever going dark: app-context and
@@ -61,9 +61,9 @@ Producer Profile = {
 
 | Profile | Sensor placement | Scope source | Layers reachable | Net-new work |
 |---|---|---|---|---|
-| **local-record** (baseline, exists) | local host | `record` cgroup leaf | system + app-context full; model-intent partial (dynamic OpenSSL) | — (parity reference) |
-| **k8s-daemonset** | node DaemonSet (privileged / hostPID / CAP_BPF) | passive cgroup→container→pod (+ optional record-wrap entrypoint) | system + app-context directly; model-intent only when workload libssl is resolvable from the node/rootfs | DaemonSet manifest; cgroup→pod resolver; K8s informer for pod metadata |
-| **microvm-guest-init** | inside the guest (init service) | `record` works natively in-guest | system + app-context full; model-intent partial (dynamic OpenSSL) | guest-image integration; **design + minimal runner**; flush + bundle export on teardown |
+| **local-record** (baseline, exists) | local host | `record` cgroup leaf | system + app-context full; model-intent partial (dynamic OpenSSL + Go request/write when configured) | — (parity reference) |
+| **k8s-daemonset** | node DaemonSet (privileged / hostPID / CAP_BPF) | passive cgroup→container→pod (+ optional record-wrap entrypoint) | system + app-context directly; model-intent only when workload TLS symbols are resolvable from the node/rootfs | DaemonSet manifest; cgroup→pod resolver; K8s informer for pod metadata |
+| **microvm-guest-init** | inside the guest (init service) | `record` works natively in-guest | system + app-context full; model-intent partial (dynamic OpenSSL + Go request/write when configured) | guest-image integration; **design + minimal runner**; flush + bundle export on teardown |
 
 The sensor already parses `docker-<id>.scope`, `cri-containerd-<id>.scope`, and
 `kubepods/<id>` cgroups (`sensor_linux.go` `cgroupResolver.refresh`), so pod/
@@ -106,20 +106,20 @@ them block shipping the environment profiles.
 
 ### v0.8.0 — model-intent multi-TLS-stack hardening (intent axis)
 
-- Capture LLM intent beyond dynamically-linked OpenSSL: Go `crypto/tls`,
-  BoringSSL, and statically-linked TLS. This is the single attack that makes
-  model-intent harness-agnostic across the whole ecosystem (many agents are Go
-  binaries that evade the libssl uprobes).
+- Harden LLM intent beyond the current dynamic OpenSSL + partial Go request
+  path: Go `crypto/tls` response/read capture, BoringSSL, statically-linked TLS,
+  stripped Go binary handling, and x86 live validation. This is the remaining
+  attack that makes model-intent harness-agnostic across the whole ecosystem.
 
 ## Capability matrix (target state)
 
 | Environment | system telemetry | model intent | app context | scope |
 |---|---|---|---|---|
-| local-linux / VM (today) | ✅ | ⚠️ dynamic OpenSSL (`SSL_*` + `SSL_*_ex`; h1 + h2/HPACK) | ✅ | record (kernel-verified) |
-| microVM (Firecracker/Kata) | ✅ in-guest | ⚠️ in-guest dynamic OpenSSL | ✅ | record in-guest |
-| K8s Pod | ✅ node | ⚠️ dynamic OpenSSL when libssl is resolvable from node/rootfs | ✅ | passive cgroup→pod, or record-wrap |
+| local-linux / VM (today) | ✅ | ⚠️ dynamic OpenSSL (`SSL_*` + `SSL_*_ex`; h1 + h2/HPACK) + partial Go request/write | ✅ | record (kernel-verified) |
+| microVM (Firecracker/Kata) | ✅ in-guest | ⚠️ in-guest dynamic OpenSSL + partial Go request/write | ✅ | record in-guest |
+| K8s Pod | ✅ node | ⚠️ dynamic OpenSSL or Go write path when symbols are resolvable from node/rootfs | ✅ | passive cgroup→pod, or record-wrap |
 | K8s Job | ✅ node | ⚠️ same | ✅ | + job/owner metadata |
-| bare-metal / multi-node | ✅ per-node | ⚠️ dynamic OpenSSL | ✅ | record or cgroup |
+| bare-metal / multi-node | ✅ per-node | ⚠️ dynamic OpenSSL + partial Go request/write | ✅ | record or cgroup |
 | serverless / managed (no kernel access) | ❌ | ❌ (unless platform exposes it) | ✅ | explicit id only |
 
 The only hard break is environments where you cannot get to the kernel

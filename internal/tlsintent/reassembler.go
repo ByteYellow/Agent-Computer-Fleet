@@ -8,9 +8,9 @@
 // accumulates them and parses the message once whole. Clean-room implementation
 // (technique only; our own code, Go stdlib HTTP framing).
 //
-// Scope: HTTP/1.1 with Content-Length, chunked, and SSE (streaming) bodies.
-// HTTP/2 is DETECTED (the h2 client preface) and passed through as raw, never
-// mis-parsed. Platform-neutral (no eBPF/Linux deps) so it unit-tests anywhere.
+// Scope: HTTP/1.1 with Content-Length, chunked, and SSE (streaming) bodies, and
+// HTTP/2 (h2 frames + HPACK, see http2.go) which dominates real LLM APIs.
+// Platform-neutral (no eBPF/Linux deps) so it unit-tests anywhere.
 package tlsintent
 
 import (
@@ -30,7 +30,7 @@ const (
 // Protocol values on a reassembled Message.
 const (
 	ProtoHTTP11 = "http/1.1"
-	ProtoH2     = "h2" // detected, not parsed; Body is the raw plaintext
+	ProtoH2     = "h2" // parsed from h2 frames + HPACK (see http2.go)
 )
 
 // Chunk is one ordered segment of TLS plaintext from the eBPF probe. A large
@@ -71,7 +71,8 @@ type Message struct {
 // one connection) by keeping the pipelined remainder after each complete message.
 type Reassembler struct {
 	streams  map[streamKey]*stream
-	MaxBytes int // per-stream buffer cap; 0 -> defaultMaxBytes
+	h2Conns  map[connKey]struct{} // connections seen to speak h2 (client preface)
+	MaxBytes int                  // per-stream buffer cap; 0 -> defaultMaxBytes
 }
 
 type streamKey struct {
@@ -80,17 +81,23 @@ type streamKey struct {
 	direction string
 }
 
+type connKey struct {
+	pid  uint32
+	conn uint64
+}
+
 type stream struct {
 	buf       bytes.Buffer
 	truncated bool
 	isH2      bool
+	h2        *h2Parser // set once the stream is known to be h2
 }
 
 const defaultMaxBytes = 1 << 20 // 1 MiB per stream
 
 // NewReassembler returns an empty Reassembler.
 func NewReassembler() *Reassembler {
-	return &Reassembler{streams: map[streamKey]*stream{}, MaxBytes: defaultMaxBytes}
+	return &Reassembler{streams: map[streamKey]*stream{}, h2Conns: map[connKey]struct{}{}, MaxBytes: defaultMaxBytes}
 }
 
 // Add feeds one Chunk and returns every message that completed as a result
@@ -98,6 +105,9 @@ func NewReassembler() *Reassembler {
 func (r *Reassembler) Add(c Chunk) []Message {
 	if r.streams == nil {
 		r.streams = map[streamKey]*stream{}
+	}
+	if r.h2Conns == nil {
+		r.h2Conns = map[connKey]struct{}{}
 	}
 	if len(c.Data) == 0 && !c.Truncated {
 		return nil
@@ -111,6 +121,36 @@ func (r *Reassembler) Add(c Chunk) []Message {
 	if c.Truncated {
 		s.truncated = true
 	}
+
+	// h2 detection: the client preface on the request stream marks the whole
+	// connection h2 (the response side carries no preface but is framed too).
+	ck := connKey{c.PID, c.Conn}
+	if !s.isH2 {
+		combined := c.Data
+		if s.buf.Len() > 0 {
+			combined = append(append([]byte(nil), s.buf.Bytes()...), c.Data...)
+		}
+		if c.Direction == Request && h2PrefaceRelated(combined) {
+			s.isH2 = true
+			r.h2Conns[ck] = struct{}{}
+		} else if _, ok := r.h2Conns[ck]; ok {
+			s.isH2 = true
+		}
+	}
+	if s.isH2 {
+		if s.h2 == nil {
+			s.h2 = newH2Parser(c.Direction)
+		}
+		// Hand over any bytes buffered before detection, then this chunk.
+		if s.buf.Len() > 0 {
+			pre := append([]byte(nil), s.buf.Bytes()...)
+			s.buf.Reset()
+			out := s.h2.consume(pre, c.PID, c.Conn)
+			return append(out, s.h2.consume(c.Data, c.PID, c.Conn)...)
+		}
+		return s.h2.consume(c.Data, c.PID, c.Conn)
+	}
+
 	max := r.MaxBytes
 	if max <= 0 {
 		max = defaultMaxBytes
@@ -119,9 +159,6 @@ func (r *Reassembler) Add(c Chunk) []Message {
 		s.buf.Write(c.Data)
 	} else {
 		s.truncated = true
-	}
-	if !s.isH2 && c.Direction == Request && looksLikeH2(s.buf.Bytes()) {
-		s.isH2 = true
 	}
 
 	var out []Message
@@ -149,7 +186,15 @@ func (r *Reassembler) Flush(pid uint32, conn uint64) []Message {
 	for _, dir := range []string{Request, Response} {
 		k := streamKey{pid, conn, dir}
 		s := r.streams[k]
-		if s == nil || s.buf.Len() == 0 {
+		if s == nil {
+			continue
+		}
+		if s.h2 != nil {
+			out = append(out, s.h2.flush(pid, conn)...)
+			delete(r.streams, k)
+			continue
+		}
+		if s.buf.Len() == 0 {
 			continue
 		}
 		if msg, ok := parseBestEffort(pid, conn, dir, s.buf.Bytes(), s.isH2); ok {
@@ -158,11 +203,8 @@ func (r *Reassembler) Flush(pid uint32, conn uint64) []Message {
 		}
 		delete(r.streams, k)
 	}
+	delete(r.h2Conns, connKey{pid, conn})
 	return out
-}
-
-func looksLikeH2(b []byte) bool {
-	return bytes.HasPrefix(b, []byte("PRI * HTTP/2.0\r\n"))
 }
 
 // parseOne tries to parse exactly one complete HTTP/1.1 message from the front of

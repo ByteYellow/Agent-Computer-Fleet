@@ -186,7 +186,7 @@ func sandboxCmd(dataDir *string) *cobra.Command {
 	// correlates to a run. Then `telemetry ingest-jsonl --run <id>` + `forensics
 	// export` + `graph verify` produce a verifiable bundle for an externally-
 	// scheduled pod (no `record` wrap).
-	var bcRun, bcCgroup, bcSession, bcStarted, bcPodName, bcNamespace, bcLabels, bcCluster, bcNode, bcImage, bcServiceAccount, bcContainer string
+	var bcRun, bcCgroup, bcSession, bcStarted, bcPodName, bcNamespace, bcLabels, bcCluster, bcNode, bcImage, bcServiceAccount, bcContainer, bcPodIP string
 	bindCgroup := &cobra.Command{
 		Use:   "bind-cgroup",
 		Short: "bind a pod's cgroup to a run scope for node-observed telemetry (k8s-daemonset)",
@@ -216,7 +216,7 @@ func sandboxCmd(dataDir *string) *cobra.Command {
 					"pod_name": bcPodName, "namespace": bcNamespace, "labels": bcLabels,
 					"cgroup_id": bcCgroup, "pod_uid": bcSession,
 					"cluster": bcCluster, "node": bcNode, "image": bcImage,
-					"service_account": bcServiceAccount, "container": bcContainer,
+					"service_account": bcServiceAccount, "container": bcContainer, "pod_ip": bcPodIP,
 				})
 				now := time.Now().UTC().Format(time.RFC3339Nano)
 				if _, eerr := db.Exec(`INSERT INTO events (id, run_id, session_id, tool_call_id, process_id, source, event_type, payload, created_at)
@@ -241,6 +241,7 @@ func sandboxCmd(dataDir *string) *cobra.Command {
 	bindCgroup.Flags().StringVar(&bcContainer, "container", "", "container name for metadata enrichment")
 	bindCgroup.Flags().StringVar(&bcImage, "image", "", "container image for metadata enrichment")
 	bindCgroup.Flags().StringVar(&bcServiceAccount, "service-account", "", "service account for metadata enrichment")
+	bindCgroup.Flags().StringVar(&bcPodIP, "pod-ip", "", "pod IP for cross-pod influence edges (substrate lens)")
 	cmd.AddCommand(bindCgroup)
 
 	run.Flags().SetInterspersed(false)

@@ -297,6 +297,74 @@ func TestGraphLensSubstrateShowsK8sCgroupAttribution(t *testing.T) {
 	}
 }
 
+func TestGraphLensSubstrateDrawsCrossPodInfluence(t *testing.T) {
+	db := newLensTestDB(t)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	insertLensFixture(t, db, now)
+	// Two pods on one node bound to one run; an egress from alice's cgroup targets
+	// bob's pod IP — a real A2A network call the substrate lens must draw pod->pod.
+	for _, p := range []struct{ name, cg, ip string }{{"bob", "100", "10.0.0.2"}, {"alice", "200", "10.0.0.1"}} {
+		payload := `{"pod_name":"` + p.name + `","namespace":"team","cgroup_id":"` + p.cg + `","pod_uid":"uid-` + p.name + `","pod_ip":"` + p.ip + `"}`
+		if _, err := db.Exec(`INSERT INTO events (id, run_id, session_id, source, event_type, payload, created_at)
+			VALUES (?, 'run-lens', 'session-lens', 'k8s', 'pod_metadata', ?, ?)`, "evt-pod-"+p.name, payload, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO events (id, run_id, session_id, source, event_type, cgroup_id, binding_source, correlation_confidence, payload, created_at)
+		VALUES ('evt-a2a', 'run-lens', 'session-lens', 'agentprov_ebpf', 'network_connect', '200', 'k8s_cgroup', 0.8, '{"dst_ip":"10.0.0.2","host":"10.0.0.2","port":"8080"}', ?)`, now); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest, err := BuildGraphLens(db, GraphLensOptions{RunID: "run-lens", Lens: "substrate", Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !lensHasNode(manifest, "substrate/cgroup/100", "substrate_cgroup_group") || !lensHasNode(manifest, "substrate/cgroup/200", "substrate_cgroup_group") {
+		t.Fatalf("per-pod cgroup nodes missing (pods must not collapse onto one cgroup): %+v", manifest.Nodes)
+	}
+	var influence *GraphLensEdge
+	for i := range manifest.Edges {
+		if manifest.Edges[i].EdgeType == "pod_influences_pod" {
+			influence = &manifest.Edges[i]
+		}
+	}
+	if influence == nil {
+		t.Fatalf("cross-pod influence edge missing: %+v", manifest.Edges)
+	}
+	nodeName := func(id string) any {
+		for _, n := range manifest.Nodes {
+			if n.ID == id {
+				return n.Data["pod_name"]
+			}
+		}
+		return nil
+	}
+	if nodeName(influence.FromID) != "alice" || nodeName(influence.ToID) != "bob" {
+		t.Fatalf("influence edge should be alice->bob, got %s->%s", influence.FromID, influence.ToID)
+	}
+}
+
+func TestGraphLensFileArtifactMaterializesRawFileWrites(t *testing.T) {
+	db := newLensTestDB(t)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	insertLensFixture(t, db, now)
+	// A passive node-side capture has no record workspace diff; the file lens must
+	// still surface a real file_write path, and filter pseudo-file noise.
+	insertLensEvent(t, db, "evt-realfile", "file_write", `{"path":"/work/workspace/harvested_creds.bin"}`, addSeconds(t, now, 2))
+	insertLensEvent(t, db, "evt-devnull", "file_write", `{"path":"/dev/null"}`, addSeconds(t, now, 3))
+
+	manifest, err := BuildGraphLens(db, GraphLensOptions{RunID: "run-lens", Lens: "file-artifact", Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !lensHasNode(manifest, "file_group/other", "file_group") {
+		t.Fatalf("file_group/other missing: raw file_write not materialized: %+v", manifest.Nodes)
+	}
+	if got := lensNodeDataInt(manifest, "file_group/other", "count"); got != 1 {
+		t.Fatalf("file_group other count=%d, want 1 (/dev/null must be filtered): %+v", got, manifest.Nodes)
+	}
+}
+
 func TestGraphLensSummaryOmitsLowValueRuntimeNoise(t *testing.T) {
 	db := newLensTestDB(t)
 	now := time.Now().UTC().Format(time.RFC3339Nano)

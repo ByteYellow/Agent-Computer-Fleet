@@ -17,7 +17,7 @@ func summaryLensEdges(runID, lens, focus, detail string, nodes map[string]GraphL
 	case "process":
 		return buildProcessGroupEdges(nodes, events), true
 	case "file-artifact":
-		return buildFileGroupEdges(runID, nodes, edges), true
+		return buildFileGroupEdges(runID, nodes, events, edges), true
 	case "security":
 		return buildSecurityRuleEdges(runID, nodes, events), true
 	case "network-egress":
@@ -169,19 +169,54 @@ func buildSubstrateEdges(runID string, nodes map[string]GraphLensNode, events ma
 		{ID: "substrate-cgroup-events", FromID: cgroupID, ToID: eventID, EdgeType: "cgroup_observed_events", Data: map[string]any{"event_count": sumIntMap(stats.events), "pid_count": len(stats.pids)}},
 		{ID: "substrate-events-run", FromID: eventID, ToID: rootID, EdgeType: "events_materialize_run"},
 	}
+	// Per-pod cgroup nodes (so N pods don't collapse onto the single aggregate
+	// cgroup node) + indexes for the cross-pod influence pass.
+	podByCgroup := map[string]string{} // cgroup_id -> podID
+	podByIP := map[string]string{}     // pod_ip    -> podID
 	for i, pod := range stats.pods {
 		podID := "substrate/pod/" + safeGraphID(podDisplayName(pod))
 		nodes[podID] = GraphLensNode{ID: podID, Kind: "substrate_pod", Subtype: "pod", Label: "pod " + podDisplayName(pod), TrustOrigin: "k8s_api_asserted", Data: map[string]any{
 			"cluster": pod.Cluster, "node": pod.Node, "pod_name": pod.Name, "namespace": pod.Namespace,
 			"container": pod.Container, "image": pod.Image, "service_account": pod.ServiceAccount,
-			"labels": pod.Labels, "pod_uid": pod.UID, "cgroup_id": pod.CgroupID,
+			"labels": pod.Labels, "pod_uid": pod.UID, "cgroup_id": pod.CgroupID, "pod_ip": pod.PodIP,
 		}}
 		out = append(out, GraphLensEdge{ID: fmt.Sprintf("substrate-workload-pod-%d", i), FromID: workloadID, ToID: podID, EdgeType: "workload_has_pod"})
+		if pod.PodIP != "" {
+			podByIP[pod.PodIP] = podID
+		}
 		if pod.CgroupID != "" {
-			out = append(out, GraphLensEdge{ID: fmt.Sprintf("substrate-pod-cgroup-%d", i), FromID: podID, ToID: cgroupID, EdgeType: "pod_bound_cgroup", Data: map[string]any{"cgroup_id": pod.CgroupID}})
+			podByCgroup[pod.CgroupID] = podID
+			pcg := "substrate/cgroup/" + safeGraphID(pod.CgroupID)
+			nodes[pcg] = GraphLensNode{ID: pcg, Kind: "substrate_cgroup_group", Subtype: "cgroup", Label: "cgroup " + pod.CgroupID, TrustOrigin: "kernel_observed", Data: map[string]any{"cgroup_id": pod.CgroupID, "pod": podDisplayName(pod)}}
+			out = append(out,
+				GraphLensEdge{ID: fmt.Sprintf("substrate-pod-cgroup-%d", i), FromID: podID, ToID: pcg, EdgeType: "pod_bound_cgroup", Data: map[string]any{"cgroup_id": pod.CgroupID}},
+				GraphLensEdge{ID: fmt.Sprintf("substrate-podcgroup-scope-%d", i), FromID: pcg, ToID: scopeID, EdgeType: "cgroup_binds_scope", Confidence: substrateScopeConfidence(scope)},
+			)
 		}
 	}
+	// Cross-pod influence: an egress from pod X's cgroup to pod Y's pod IP is a
+	// real A2A network call between two pods on this node — kernel ground truth.
+	seen := map[string]bool{}
+	for _, ev := range lensEventsInOrder(events) {
+		if ev.CgroupID == "" || ev.Destination == "" || !isSubstrateEgress(ev.Type) {
+			continue
+		}
+		src, dst := podByCgroup[ev.CgroupID], podByIP[ev.Destination]
+		if src == "" || dst == "" || src == dst || seen[src+"->"+dst] {
+			continue
+		}
+		seen[src+"->"+dst] = true
+		out = append(out, GraphLensEdge{ID: "substrate-influence-" + safeGraphID(src+"-"+dst), FromID: src, ToID: dst, EdgeType: "pod_influences_pod", Data: map[string]any{"via": ev.Type, "dst_ip": ev.Destination}})
+	}
 	return out
+}
+
+func isSubstrateEgress(t string) bool {
+	switch t {
+	case "network_connect", "net_connect", "private_cidr", "metadata_ip":
+		return true
+	}
+	return false
 }
 
 type substratePod struct {
@@ -195,6 +230,7 @@ type substratePod struct {
 	Container      string `json:"container"`
 	Image          string `json:"image"`
 	ServiceAccount string `json:"service_account"`
+	PodIP          string `json:"pod_ip"`
 }
 
 func podDisplayName(pod substratePod) string {
@@ -472,20 +508,22 @@ func buildProcessGroupEdges(nodes map[string]GraphLensNode, events map[string]le
 	return out
 }
 
-func buildFileGroupEdges(runID string, nodes map[string]GraphLensNode, edges []GraphLensEdge) []GraphLensEdge {
+func buildFileGroupEdges(runID string, nodes map[string]GraphLensNode, events map[string]lensEvent, edges []GraphLensEdge) []GraphLensEdge {
 	rootID := "run/" + runID
 	nodes[rootID] = GraphLensNode{ID: rootID, Kind: "run", Label: runID, Data: map[string]any{"run_id": runID}}
 	filesByCategory := map[string]map[string]bool{}
-	addFile := func(id string) {
-		if !strings.HasPrefix(id, "workspace_file/") {
-			return
-		}
-		path := strings.TrimPrefix(id, "workspace_file/")
+	addPath := func(path string) {
 		category := filePathCategory(path)
 		if filesByCategory[category] == nil {
 			filesByCategory[category] = map[string]bool{}
 		}
 		filesByCategory[category][path] = true
+	}
+	addFile := func(id string) {
+		if !strings.HasPrefix(id, "workspace_file/") {
+			return
+		}
+		addPath(strings.TrimPrefix(id, "workspace_file/"))
 	}
 	for id, node := range nodes {
 		if node.Kind != "file" {
@@ -496,6 +534,18 @@ func buildFileGroupEdges(runID string, nodes map[string]GraphLensNode, edges []G
 	for _, edge := range edges {
 		for _, id := range []string{edge.FromID, edge.ToID} {
 			addFile(id)
+		}
+	}
+	// Passive node-side capture has no `record` workspace diff, so file writes
+	// arrive only as raw file_write/openat events. Materialize their real paths
+	// here so file activity is visible without a record wrap (record still
+	// contributes workspace_file/ nodes above; the two sources merge).
+	for _, ev := range lensEventsInOrder(events) {
+		if ev.Type != "file_write" && ev.Type != "file_open" {
+			continue
+		}
+		if path := ev.Path; substantiveFilePath(path) {
+			addPath(path)
 		}
 	}
 	keys := []string{"source", "build_artifact", "dependency_cache", "secret_or_config", "other"}

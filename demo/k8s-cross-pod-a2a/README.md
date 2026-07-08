@@ -47,30 +47,29 @@ from both pods.
 ## 3. Architecture
 
 ```
-                          ┌─────────────────────  ONE k8s node  ─────────────────────┐
-                          │                                                            │
-   ┌─── pod A: alice ───┐ │                                    ┌─── pod B: bob ──────┐ │
-   │ orchestrator       │ │                                    │ worker              │ │
-   │                    │ │   A2A call  (real network egress)  │                     │ │
-   │ urllib → bob:8080 ─┼─┼───────────────────────────────────▶│ http.server :8080   │ │
-   │                    │ │       captured: private_cidr        │                     │ │
-   │ cgroup 364197      │ │       alice → 10.42.0.x (bob)        │ python3 setup.py    │ │
-   └────────┬───────────┘ │                                     │   install --user    │ │
-            │             │                                      │   ├ openat ~/.aws/credentials   secret_path
-            │             │      ┌───────────────────────┐      │   ├ openat api_token            secret_path
-            │             │      │  agentprov-sensor      │      │   └ connect 169.254.169.254     metadata_ip
-            │             │      │  (node DaemonSet, eBPF)│◀─────┤ cgroup 363918       │ │
-            │             │      │  sees BOTH cgroups     │      └─────────┬───────────┘ │
-            │             │      └───────────┬───────────┘                │             │
-            └─────────────┼──────────────────┼───────── bind-cgroup ──────┘             │
-                          │                  │        (both cgroups → ONE run)          │
-                          └──────────────────┼──────────────────────────────────────────┘
-                                             ▼
-                       ┌──────────────────────────────────────────────┐
-                       │  run "a2a-demo"  — one verifiable graph        │
-                       │  + hooks bridge (--correlate): app delegation  │
-                       │    joined to kernel by command-match           │
-                       └──────────────────────────────────────────────┘
+   ┌──────────────────────────────  ONE k8s node  ─────────────────────────────────┐
+   │                                                                                 │
+   │  ┌─ pod A: alice (orchestrator) ─┐        ┌─ pod B: bob (worker) ────────────┐  │
+   │  │                               │  A2A   │ python3 ../pysnake-helper/        │  │
+   │  │ urllib ─────────────────────────call──▶│   setup.py install --user         │  │
+   │  │   → bob:8080                  │  (real │   ├ openat ~/.aws/credentials   secret_path │
+   │  │                               │  net   │   ├ openat api_token            secret_path │
+   │  │ cgroup 364197                 │  edge) │   ├ write  harvested_creds.bin  file_write  │
+   │  └───────────────┬───────────────┘        │   └ connect 169.254.169.254     metadata_ip │
+   │                  │                         │ cgroup 363918                    │  │
+   │                  │      ┌──────────────────┴────┐        └──────────┬─────────┘  │
+   │                  └─────▶│  agentprov-sensor      │◀──────────────────┘            │
+   │                         │  (node DaemonSet, eBPF)│  sees BOTH cgroups             │
+   │                         └───────────┬───────────┘                                │
+   │            bind-cgroup (both cgroups → ONE run, each keeps its own cgroup_id)     │
+   └─────────────────────────────────────┼───────────────────────────────────────────┘
+                                          ▼
+              ┌──────────────────────────────────────────────────────┐
+              │  run "a2a-demo"  — one verifiable graph                 │
+              │  + hooks bridge (--correlate): app delegation joined    │
+              │    to kernel by command-match                           │
+              │  substrate lens: alice ──pod_influences_pod──▶ bob      │
+              └──────────────────────────────────────────────────────┘
 ```
 
 Why **one run, two cgroups** (not two runs): in a constructed demo, run assignment
@@ -104,8 +103,12 @@ main orchestrator (run a2a-demo)
               └─ [execve] python3 setup.py    ← command-match join to the node sensor
                    ├─ [openat]  ~/.aws/credentials          secret_path   (pod B cgroup)
                    ├─ [openat]  ~/.config/.../api_token      secret_path   (pod B cgroup)
+                   ├─ [write]   harvested_creds.bin          file_write    (pod B cgroup)
                    └─ [connect] 169.254.169.254              metadata_ip   (pod B cgroup)
 ```
+
+The install hook stages the harvested creds to a workspace file before exfil, so
+the chain is `secret read → file write → network egress`, all pinned to bob's pid.
 
 ---
 
@@ -114,8 +117,9 @@ main orchestrator (run a2a-demo)
 | Lens | Shows |
 |---|---|
 | **Orchestration** ⭐ | full agent team: delegation, `alice → bob` peer edge, recon's **refused** node, `agent_syscall` edges pinning the exfil to bob |
-| **Substrate** ⭐ | **two pods** (alice + bob) → their cgroups → one run; "pod group: 2 pods" |
+| **Substrate** ⭐ | **two pods** (alice + bob), each on its **own** cgroup node, and an `alice ──pod_influences_pod──▶ bob` edge derived from the real cross-pod call |
 | **Data-flow / taint** ⭐ | `secret_path → metadata_ip` causal flow (`possible_sensitive_data_flow`), scoped to bob's pid |
+| **File-artifact** | `harvested_creds.bin` — bob's staged exfil, materialized from the raw `file_write` (no `record` workspace diff on a passive pod) |
 | **Security** | `secret_path_access` + `metadata_ip_dst` fire; event → policy → risk → response |
 | **Network-egress** | bob → `169.254.169.254` (metadata exfil) and alice → bob (cross-pod A2A) |
 | **Process / Trust-origin / Sandbox-boundary** | process trees per pod, trust tiers (kernel vs k8s-asserted vs correlation), boundary crossings |
@@ -167,6 +171,12 @@ HOOKLOG=demo/multiagent-provenance/capture/double-attempt-hooklog.jsonl \
   the bridge only says *which agent* intended it, joined by command-match. Agent
   intent (LLM prompt/response) is therefore thin here — the reliable, deterministic
   half is the kernel exfil and its per-pod attribution.
+- **Files come from the sensor, not a workspace diff.** A passive, externally-
+  scheduled pod is not wrapped by `agentprov record`, so there is no before/after
+  workspace snapshot. The file lens therefore materializes file nodes directly
+  from the sensor's raw `file_write` events (filtering `/dev/null` and other
+  pseudo-file noise) — which is why only *substantive* writes like
+  `harvested_creds.bin` show, not every transient open.
 - **Detect, not prevent.** Record-only capture. Attempt A is caught at the intent
   layer (recon refused); Attempt B's install is *allowed* by the gate and only the
   sensor catches the exfil — the honest posture of a detect-mode HIDS.

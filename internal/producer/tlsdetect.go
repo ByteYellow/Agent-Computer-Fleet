@@ -66,7 +66,28 @@ func DetectTLSTarget(exePath string) TLSTarget {
 			return t
 		}
 	}
+
+	// Interpreters (notably CPython) load OpenSSL via a runtime-loaded extension
+	// module (_ssl.so), so libssl is not in the interpreter's own ELF imports and
+	// the checks above miss it. For a known interpreter, fall back to the system
+	// libssl (best-effort: assumes it uses the system OpenSSL, true for stock
+	// python; a venv/custom OpenSSL still needs an explicit path).
+	if isInterpreterUsingModuleTLS(filepath.Base(exePath)) {
+		for _, soname := range []string{"libssl.so.3", "libssl.so.1.1"} {
+			if p := resolveSharedLib(soname); p != "" {
+				return TLSTarget{SSLLib: p, Stack: "openssl-interp"}
+			}
+		}
+	}
 	return TLSTarget{}
+}
+
+// isInterpreterUsingModuleTLS reports whether an executable base name is an
+// interpreter that reaches OpenSSL through a dynamically-loaded module rather
+// than a direct ELF link.
+func isInterpreterUsingModuleTLS(base string) bool {
+	base = strings.ToLower(base)
+	return strings.HasPrefix(base, "python")
 }
 
 func symsOf(fn func() ([]elf.Symbol, error)) []elf.Symbol {

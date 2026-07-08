@@ -142,10 +142,28 @@ the thing only correct substrate attribution can deliver.
 
 ---
 
-## 7. Run it
+## 7. View it (no VM needed)
 
-Needs a single-node k3s/k8s + Docker, run on the node as root (the sensor needs
-privileged eBPF; the k3s kubeconfig is root-only).
+This folder ships the **signed, replayable bundle** of a real capture — import it
+into a fresh local store (this also verifies the DSSE attestation) and serve it:
+
+```sh
+agentprov --data-dir /tmp/a2a-view init
+# --pub-key verifies the ed25519/DSSE attestation BEFORE loading; tamper => refused
+agentprov --data-dir /tmp/a2a-view forensics import \
+  demo/k8s-cross-pod-a2a/run-a2a-demo.forensics.json.gz \
+  --pub-key demo/k8s-cross-pod-a2a/attestation.pub
+agentprov --data-dir /tmp/a2a-view graph verify --run a2a-demo     # → status=ok, errors=0
+agentprov --data-dir /tmp/a2a-view dashboard serve                 # open, run "a2a-demo"
+```
+
+Files: `run-a2a-demo.forensics.json.gz` (bundle), `run-a2a-demo.forensics.dsse.json`
+(attestation), `attestation.pub` (public key).
+
+## 8. Re-capture it (needs the VM)
+
+Single-node k3s/k8s + Docker, run on the node as root (the sensor needs privileged
+eBPF; the k3s kubeconfig is root-only).
 
 ```sh
 AGENTPROV=./agentprov \
@@ -153,12 +171,11 @@ SENSOR=./agentprov-sensor \
 HOOKLOG=demo/multiagent-provenance/capture/double-attempt-hooklog.jsonl \
   bash scripts/demo_k8s_a2a.sh
 # prints the attribution checks, verifies errors=0, and serves the dashboard.
-# Open the printed URL, run "a2a-demo", start on the Orchestration lens.
 ```
 
 ---
 
-## 8. Honesty notes (what the graph does and does not claim)
+## 9. Honesty notes (what the graph does and does not claim)
 
 - **One run, two cgroups — by construction, not by capability.** This demo binds
   both pod cgroups to one run so the *existing* intra-run peer/command-match logic

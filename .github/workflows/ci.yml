@@ -23,8 +23,18 @@ jobs:
           go-version: "1.23.x"
           cache: true
 
-      - name: Run unit tests
-        run: GOTOOLCHAIN=local go test ./...
+      - name: gofmt (fail on unformatted files)
+        run: |
+          unformatted="$(gofmt -l internal cmd)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needs to be run on:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: go vet
+        run: GOTOOLCHAIN=local go vet ./...
+
+      - name: Run unit tests (race detector)
+        run: GOTOOLCHAIN=local go test -race ./...
 
   sensor-build:
     name: eBPF sensor builds from committed bindings

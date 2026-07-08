@@ -2,6 +2,7 @@
 
 # Local AgentProvenance state and build outputs.
 /agentprov
+/agentprov-sensor
 /.agentprov/
 /.agentprov-*/
 /.acf/

@@ -21,6 +21,7 @@ They are generated from the portable `demo/snake-supply-chain` forensics bundle.
 | `demo-multiagent-agent-network-07-play.png` | Native playback source frame. |
 | `demo-multiagent-risk-path.png` | Focused risk selection: metadata-IP risk plus focused evidence table. |
 | `demo-multiagent-network-egress.png` | Network / egress lens for the multi-agent run, focused on outbound evidence. |
+| `demo-k8s-a2a-substrate-dashboard.png` | K8s cross-pod A2A substrate lens: one node sensor, two pod cgroups, Alice -> Bob influence edge, and pod-level risk attribution. |
 
 To regenerate them: replay the captured run and open the dashboard —
 

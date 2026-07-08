@@ -861,6 +861,34 @@ explicit malicious request is refused at the intent layer, while the hidden
 supply-chain path is caught by kernel telemetry and linked back to the agent
 orchestration graph.
 
+### Demo: Kubernetes cross-pod A2A (one node sensor, two pods, one graph)
+
+The K8s A2A demo moves the same provenance problem across a substrate boundary:
+`alice` and `bob` run in separate pods on one Kubernetes node. `alice` calls
+`bob` over the real pod network, while `bob` runs a poisoned setup command that
+reads planted secrets and connects to the cloud-metadata IP. A single
+node-level `agentprov-sensor` observes both pod cgroups, K8s metadata enriches
+the graph with namespace/pod/container identity, and both cgroups are bound into
+one signed run.
+
+This is the current shape of the **k8s-daemonset producer profile**: the core
+graph does not become Kubernetes-specific; Kubernetes only supplies producer
+placement and passive scope attribution.
+
+<p align="center">
+  <img src="docs/assets/k8s-cross-pod-a2a-architecture.png" alt="Kubernetes cross-pod A2A architecture: one node-level eBPF sensor observes alice and bob pods, binds both cgroups into one AgentProvenance evidence graph, and shows cross-pod causality." width="100%">
+</p>
+
+<p align="center">
+  <img src="docs/img/demo-k8s-a2a-substrate-dashboard.png" alt="Dashboard substrate lens for the Kubernetes A2A demo showing pod default/alice influencing pod default/bob, per-pod cgroups, and risk groups for secret path, metadata IP, and private CIDR access." width="100%">
+</p>
+
+See [`demo/k8s-cross-pod-a2a/`](demo/k8s-cross-pod-a2a) for the replay bundle,
+capture script, and honesty notes. The key acceptance result is not "more
+events"; it is that `secret_path` and `metadata_ip` runtime evidence is pinned
+to Bob's pod/cgroup while Alice's pod remains clean, and the cross-pod
+`alice -> bob` call is visible as a substrate influence edge.
+
 ## Graph Commands
 
 The Git-like surface over content-addressed evidence objects:
@@ -975,6 +1003,10 @@ Run:
 ```
 
 ## Architecture
+
+<p align="center">
+  <img src="docs/assets/producer-profile-architecture.svg" alt="AgentProvenance producer profile architecture: local record and Kubernetes pods feed substrate-neutral evidence into the AgentProvenance core; microVM guest support is adapting; dashboard, query, and replay surfaces consume the signed graph." width="100%">
+</p>
 
 <p align="center">
   <img src="docs/assets/agentprovenance-architecture.svg" alt="AgentProvenance architecture: model intent, application context, and system telemetry enter an ingest boundary, then become a verifiable provenance graph." width="100%">

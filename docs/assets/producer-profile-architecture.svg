@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="520" viewBox="0 0 1280 520" role="img" aria-labelledby="title desc">
+  <title id="title">AgentProvenance Producer Profile Architecture</title>
+  <desc id="desc">Agent and sandbox workloads flow through producer profiles into the AgentProvenance core, then into dashboard, query, and replay surfaces.</desc>
+  <defs>
+    <style>
+      .bg{fill:#f8fafc}
+      .title{font:800 28px ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;fill:#0f172a}
+      .subtitle{font:15px ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;fill:#64748b}
+      .card{fill:#fff;stroke:#d8e0ea;stroke-width:1.8;filter:url(#shadow)}
+      .work{stroke:#0ea5e9}.profile{stroke:#10b981}.core{stroke:#6366f1}.out{stroke:#f97316}
+      .h{font:800 18px ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;fill:#0f172a}
+      .t{font:14px ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;fill:#334155}
+      .small{font:12.5px ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;fill:#64748b}
+      .pill{fill:#f8fafc;stroke:#e2e8f0;stroke-width:1.1}
+      .edge{fill:none;stroke:#475569;stroke-width:3;stroke-linecap:round;marker-end:url(#arrow)}
+      .note{font:13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;fill:#475569}
+    </style>
+    <filter id="shadow" x="-18%" y="-18%" width="136%" height="136%">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#0f172a" flood-opacity=".10"/>
+      <feDropShadow dx="0" dy="1" stdDeviation="1.5" flood-color="#0f172a" flood-opacity=".08"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8.7" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#475569"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" width="1280" height="520"/>
+  <text x="52" y="58" class="title"><tspan fill="#0071e3">Agent</tspan>Provenance: Portable Producer Profiles</text>
+  <text x="52" y="86" class="subtitle">Keep the core graph substrate-neutral: local and Kubernetes producers are active; microVM guest support is adapting.</text>
+
+  <g transform="translate(48 142)">
+    <rect width="252" height="238" rx="22" class="card work"/>
+    <text x="28" y="40" class="h">Agent / Sandbox</text>
+    <text x="28" y="64" class="h">Workloads</text>
+    <text x="28" y="92" class="small">where agent execution happens</text>
+    <rect x="28" y="102" width="196" height="34" rx="17" class="pill"/>
+    <text x="50" y="124" class="t">local record</text>
+    <rect x="28" y="148" width="196" height="34" rx="17" class="pill"/>
+    <text x="50" y="170" class="t">k8s pods</text>
+    <rect x="28" y="194" width="196" height="34" rx="17" class="pill"/>
+    <text x="50" y="216" class="t">microVM guest</text>
+    <text x="152" y="216" class="small">(adapting)</text>
+  </g>
+
+  <g transform="translate(374 118)">
+    <rect width="252" height="286" rx="22" class="card profile"/>
+    <text x="28" y="44" class="h">Producer Profile</text>
+    <text x="28" y="74" class="small">placement + attribution contract</text>
+    <rect x="28" y="102" width="196" height="34" rx="17" class="pill"/>
+    <text x="50" y="124" class="t">sensor placement</text>
+    <rect x="28" y="148" width="196" height="34" rx="17" class="pill"/>
+    <text x="50" y="170" class="t">scope attribution</text>
+    <rect x="28" y="194" width="196" height="34" rx="17" class="pill"/>
+    <text x="50" y="216" class="t">event transport</text>
+    <rect x="28" y="240" width="196" height="34" rx="17" class="pill"/>
+    <text x="50" y="262" class="t">capability report</text>
+  </g>
+
+  <g transform="translate(700 118)">
+    <rect width="252" height="286" rx="22" class="card core"/>
+    <text x="28" y="44" class="h">AgentProvenance Core</text>
+    <text x="28" y="74" class="small">substrate-neutral evidence model</text>
+    <rect x="28" y="102" width="196" height="34" rx="17" class="pill"/>
+    <text x="50" y="124" class="t">correlation</text>
+    <rect x="28" y="148" width="196" height="34" rx="17" class="pill"/>
+    <text x="50" y="170" class="t">evidence graph</text>
+    <rect x="28" y="194" width="196" height="34" rx="17" class="pill"/>
+    <text x="50" y="216" class="t">risk signals</text>
+    <rect x="28" y="240" width="196" height="34" rx="17" class="pill"/>
+    <text x="50" y="262" class="t">signed bundle</text>
+  </g>
+
+  <g transform="translate(1026 142)">
+    <rect width="206" height="238" rx="22" class="card out"/>
+    <text x="28" y="44" class="h">Investigation</text>
+    <text x="28" y="74" class="small">query surfaces</text>
+    <rect x="28" y="104" width="150" height="34" rx="17" class="pill"/>
+    <text x="50" y="126" class="t">Dashboard</text>
+    <rect x="28" y="150" width="150" height="34" rx="17" class="pill"/>
+    <text x="50" y="172" class="t">Query</text>
+    <rect x="28" y="196" width="150" height="34" rx="17" class="pill"/>
+    <text x="50" y="218" class="t">Replay</text>
+  </g>
+
+  <path d="M300 260H374" class="edge"/>
+  <path d="M626 260H700" class="edge"/>
+  <path d="M952 260H1026" class="edge"/>
+
+  <text x="354" y="446" class="note">Profiles adapt evidence production; the core graph, verify, diff, risk, and replay model do not become substrate-specific.</text>
+</svg>

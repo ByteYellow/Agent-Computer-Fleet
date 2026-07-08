@@ -248,6 +248,55 @@ func TestGraphLensSummaryGroupsWideLenses(t *testing.T) {
 	}
 }
 
+func TestGraphLensSubstrateShowsK8sCgroupAttribution(t *testing.T) {
+	db := newLensTestDB(t)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	insertLensFixture(t, db, now)
+	if _, err := db.Exec(`UPDATE events SET binding_source = 'k8s_cgroup', cgroup_id = '334746', container_id = '', correlation_method = 'cgroup_time_window:run_id+cgroup_id+time', correlation_confidence = 0.8 WHERE run_id = 'run-lens'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO events (id, run_id, session_id, tool_call_id, process_id, source, event_type, payload, created_at)
+		VALUES ('evt-podmeta', 'run-lens', 'session-lens', '', '', 'k8s', 'pod_metadata', ?, ?)`,
+		`{"cluster":"local-k3s","node":"codex-kvm-k8s","pod_name":"agent-sandbox-0","namespace":"agentprov","container":"agent","image":"busybox","service_account":"default","labels":"app=agent","cgroup_id":"334746","pod_uid":"pod-uid-1"}`, now); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest, err := BuildGraphLens(db, GraphLensOptions{RunID: "run-lens", Lens: "substrate", Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Query.LayoutHint != "substrate_topology" {
+		t.Fatalf("layout=%s, want substrate_topology", manifest.Query.LayoutHint)
+	}
+	if !lensHasNode(manifest, "substrate/profile/k8s-daemonset", "substrate_profile") {
+		t.Fatalf("substrate profile node missing: %+v", manifest.Nodes)
+	}
+	if !lensHasNode(manifest, "substrate/scope/k8s_cgroup", "substrate_scope") {
+		t.Fatalf("k8s scope node missing: %+v", manifest.Nodes)
+	}
+	if got := lensNodeDataInt(manifest, "substrate/cgroup_group", "count"); got != 1 {
+		t.Fatalf("cgroup group count=%d, want 1: %+v", got, manifest.Nodes)
+	}
+	if !lensHasNode(manifest, "substrate/pod/local-k3s_agentprov_agent-sandbox-0", "substrate_pod") {
+		t.Fatalf("pod metadata node missing: %+v", manifest.Nodes)
+	}
+	var hasPodEdge, hasPodCgroupEdge bool
+	for _, edge := range manifest.Edges {
+		if edge.EdgeType == "workload_has_pod" && edge.ToID == "substrate/pod/local-k3s_agentprov_agent-sandbox-0" {
+			hasPodEdge = true
+		}
+		if edge.EdgeType == "pod_bound_cgroup" && edge.FromID == "substrate/pod/local-k3s_agentprov_agent-sandbox-0" {
+			hasPodCgroupEdge = true
+		}
+	}
+	if !hasPodEdge || !hasPodCgroupEdge {
+		t.Fatalf("pod edges missing (workload_has_pod=%v pod_bound_cgroup=%v): %+v", hasPodEdge, hasPodCgroupEdge, manifest.Edges)
+	}
+	if got := lensNodeDataInt(manifest, "substrate/workload_group", "pods"); got != 1 {
+		t.Fatalf("workload pods=%d, want 1", got)
+	}
+}
+
 func TestGraphLensSummaryOmitsLowValueRuntimeNoise(t *testing.T) {
 	db := newLensTestDB(t)
 	now := time.Now().UTC().Format(time.RFC3339Nano)

@@ -17,7 +17,9 @@ func graphLensNodes(db *sql.DB, runID string) (map[string]GraphLensNode, map[str
 			nodes[node.ID] = node
 		}
 	}
-	rows, err := db.Query(`SELECT id, COALESCE(session_id,''), COALESCE(tool_call_id,''), COALESCE(process_id,''), COALESCE(snapshot_id,''), COALESCE(pid,0), COALESCE(ppid,0), COALESCE(tgid,0), source, event_type, payload, created_at
+	rows, err := db.Query(`SELECT id, COALESCE(session_id,''), COALESCE(tool_call_id,''), COALESCE(process_id,''), COALESCE(snapshot_id,''), COALESCE(pid,0), COALESCE(ppid,0), COALESCE(tgid,0),
+			COALESCE(container_id,''), COALESCE(cgroup_id,''), COALESCE(binding_source,''), COALESCE(correlation_method,''), COALESCE(correlation_confidence,0),
+			source, event_type, payload, created_at
 		FROM events WHERE run_id = ? ORDER BY created_at ASC`, runID)
 	if err != nil {
 		return nil, nil, err
@@ -25,7 +27,9 @@ func graphLensNodes(db *sql.DB, runID string) (map[string]GraphLensNode, map[str
 	defer rows.Close()
 	for rows.Next() {
 		var ev lensEvent
-		if err := rows.Scan(&ev.ID, &ev.SessionID, &ev.ToolCallID, &ev.ProcessID, &ev.SnapshotID, &ev.PID, &ev.PPID, &ev.TGID, &ev.Source, &ev.Type, &ev.Payload, &ev.CreatedAt); err != nil {
+		if err := rows.Scan(&ev.ID, &ev.SessionID, &ev.ToolCallID, &ev.ProcessID, &ev.SnapshotID, &ev.PID, &ev.PPID, &ev.TGID,
+			&ev.ContainerID, &ev.CgroupID, &ev.BindingSource, &ev.CorrelationMethod, &ev.CorrelationConfidence,
+			&ev.Source, &ev.Type, &ev.Payload, &ev.CreatedAt); err != nil {
 			return nil, nil, err
 		}
 		ev.NodeID = "runtime_event/" + ev.ID
@@ -40,6 +44,8 @@ func graphLensNodes(db *sql.DB, runID string) (map[string]GraphLensNode, map[str
 			Risk:    riskForLensEvent(ev),
 			Data: map[string]any{
 				"event_id": ev.ID, "source": ev.Source, "pid": ev.PID, "ppid": ev.PPID,
+				"container_id": ev.ContainerID, "cgroup_id": ev.CgroupID, "binding_source": ev.BindingSource,
+				"correlation_method": ev.CorrelationMethod, "correlation_confidence": ev.CorrelationConfidence,
 				"process_id": ev.ProcessID, "tool_call_id": ev.ToolCallID, "path": ev.Path, "destination": ev.Destination,
 				"created_at": ev.CreatedAt,
 			},

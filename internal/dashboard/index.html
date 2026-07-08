@@ -53,6 +53,14 @@
   .qbtn .q{font-weight:650;font-size:12.5px;margin-bottom:4px}
   .qbtn .m{font-size:11px;color:var(--mut);font-family:ui-monospace,SFMono-Regular,monospace}
   .qbtn.risk .q{color:#d70015}.qbtn.egress .q{color:#b25e00}.qbtn.file .q{color:#0a7d52}.qbtn.proc .q{color:#3634a3}.qbtn.comp .q{color:#1d8c3e}
+  .profilebar{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;padding:14px 14px 0}
+  .pcard{border:1px solid var(--line);background:linear-gradient(180deg,#fff,#fbfbfd);border-radius:13px;padding:11px 12px;min-height:74px}
+  .pcard .k{font-size:10.5px;color:var(--mut);text-transform:uppercase;letter-spacing:.35px;font-weight:700;margin-bottom:5px}
+  .pcard .v{font-size:13px;font-weight:700;letter-spacing:-.015em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .pcard .d{font-size:11px;color:var(--mut);font-family:ui-monospace,SFMono-Regular,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:3px}
+  .pcard.k8s{border-color:rgba(94,92,230,.24);background:linear-gradient(180deg,rgba(94,92,230,.08),#fff)}
+  .pcard.kernel{border-color:rgba(52,199,89,.28);background:linear-gradient(180deg,rgba(52,199,89,.09),#fff)}
+  .pcard.partial{border-color:rgba(255,159,10,.25);background:linear-gradient(180deg,rgba(255,159,10,.09),#fff)}
   .scrub{display:flex;align-items:center;gap:12px;padding:9px 20px;border-bottom:1px solid var(--line);background:var(--panel2)}
   .scrub button{background:#fff;border:1px solid var(--line2);border-radius:8px;width:32px;height:26px;cursor:pointer;font-size:12px;transition:border-color .12s,color .12s}
   .scrub button:hover{border-color:var(--acc);color:var(--acc)}
@@ -248,6 +256,8 @@
   .cref.static{color:var(--mut)}
   .cmore{font-size:10.5px;color:var(--mut)}
   .compdisclaimer{padding:11px 20px;font-size:11px;color:var(--mut);border-top:1px solid var(--line);background:var(--panel2);font-style:italic}
+  @media(max-width:1100px){.profilebar{grid-template-columns:repeat(2,minmax(0,1fr))}}
+  @media(max-width:720px){.profilebar{grid-template-columns:1fr}}
   @media(max-width:1100px){.askgrid{grid-template-columns:repeat(3,minmax(0,1fr))}}
   @media(max-width:900px){main{grid-template-columns:1fr}.hero,.side,.full{grid-column:1}.askgrid{grid-template-columns:1fr 1fr}}
 </style>
@@ -264,6 +274,7 @@
 <main>
   <section class="card full">
     <h2>Run Overview <span class="sub">query first, graph second — raw events stay paged and drillable</span></h2>
+    <div id="profilebar" class="profilebar"></div>
     <div id="askgrid" class="askgrid"></div>
   </section>
   <section class="card hero" id="graphcard">
@@ -340,6 +351,7 @@ const KIND_COLOR={
   egress_group:'var(--egress)',
   run:'var(--acc)', overview_group:'var(--group)', process_group:'var(--process)', event_burst:'var(--event)', file_group:'var(--file)', risk_group:'var(--risk)',
   intent_group:'var(--intent)', intent_stage:'var(--intent)', trust_group:'var(--group)', boundary_group:'var(--snapshot)',
+  substrate_profile:'#5856d6', substrate_node_group:'#0a84ff', substrate_workload_group:'#34c759', substrate_pod:'#64d2ff', substrate_cgroup_group:'#ff9f0a', substrate_scope:'#30b0c7', substrate_event_group:'#5e5ce6',
   policy_decision:'var(--policy)', policy:'var(--policy)',
   risk_signal:'var(--risk)', risk:'var(--risk)',
   response_action:'var(--response)', response:'var(--response)',
@@ -365,7 +377,7 @@ const EDGE_LABEL={llm_call:'request→response',llm_intent_caused:'intent→acti
 const LENS_LABEL={'default':'Default · causality','security':'Security · risk/policy/response',
   'process':'Process · tree + runtime','file-artifact':'File / Artifact · lineage',
   'network-egress':'Network · egress','data-flow-taint':'Data-flow · taint (secret→sink)',
-  'agent-intent':'Agent intent · causal DAG (prompt→action)','orchestration':'Orchestration · agents (delegation/peer)','intent':'Conformance · declared vs actual (violations)','trust-origin':'Trust · origin','sandbox-boundary':'Sandbox · boundary'};
+  'agent-intent':'Agent intent · causal DAG (prompt→action)','orchestration':'Orchestration · agents (delegation/peer)','intent':'Conformance · declared vs actual (violations)','substrate':'Substrate · producer / cgroup / workload','trust-origin':'Trust · origin','sandbox-boundary':'Sandbox · boundary'};
 const $=s=>document.querySelector(s);
 
 async function j(u){const r=await fetch(u);return r.json();}
@@ -607,6 +619,7 @@ function renderQuestionEntries(m){
     {id:'overview/files', cls:'file', q:'What changed files?', lens:'file-artifact', sub:'diff / file groups'},
     {id:'overview/artifacts', cls:'file', q:'Where did artifacts come from?', lens:'file-artifact', sub:'artifact lineage'},
     {id:'overview/processes', cls:'proc', q:'Which processes mattered?', lens:'process', sub:'process groups'},
+    {id:'__substrate__', cls:'proc', q:'How was this run observed?', lens:'substrate', sub:'producer / cgroup / workload'},
     {id:'__trust__', cls:'proc', q:'What is trusted vs asserted?', lens:'trust-origin', sub:'trust origins'},
     {id:'__boundary__', cls:'proc', q:'Was the sandbox boundary crossed?', lens:'sandbox-boundary', sub:'boundary / tamper'},
     {id:'__compliance__', cls:'comp', q:'Which controls hold up?', lens:'', sub:'framework coverage'}
@@ -636,6 +649,31 @@ function renderQuestionEntries(m){
       loadRun(cur);
     };
   });
+}
+
+function renderProducerProfile(events){
+  const el=$('#profilebar'); if(!el)return;
+  const evs=events||[];
+  const sources=new Set(evs.map(e=>e.source).filter(Boolean));
+  const scopes=new Set(evs.map(e=>e.binding_source).filter(Boolean));
+  const kernel=evs.filter(e=>(e.correlation_class||'')==='kernel_correlated'||e.source==='agentprov_ebpf').length;
+  const record=evs.filter(e=>String(e.source||'').startsWith('record')).length;
+  const pods=evs.filter(e=>e.source==='k8s'&&e.event_type==='pod_metadata').map(e=>{try{return JSON.parse(e.payload||'{}')}catch(_){return null}}).filter(p=>p&&(p.pod_name||p.pod_uid));
+  const k8s=scopes.has('k8s_cgroup')||pods.length>0;
+  const tls=evs.filter(e=>/^tls_/.test(e.event_type||'') || String(e.source||'').includes('tls')).length;
+  const cgroups=[...new Set(evs.map(e=>e.cgroup_id).filter(Boolean))];
+  const pids=[...new Set(evs.map(e=>e.pid).filter(Boolean))];
+  const profile=k8s?'k8s-daemonset':(kernel?'local/VM sensor':(record?'local-record':'evidence import'));
+  const scope=k8s?'passive cgroup attribution':(scopes.has('record')?'record cgroup leaf':(record?'record logical scope':'imported evidence'));
+  const telemetry=kernel?`${kernel}/${evs.length} kernel-correlated`:(record?`${record}/${evs.length} self-observed`:'no runtime events in page');
+  const intent=tls?`TLS intent observed (${tls})`:'no model-intent TLS in page';
+  const cls=k8s?'k8s':(kernel?'kernel':'');
+  el.innerHTML=[
+    `<div class="pcard ${cls}"><div class="k">Producer profile</div><div class="v">${esc(profile)}</div><div class="d">${esc([...sources].slice(0,3).join(' · ')||'unknown source')}</div></div>`,
+    `<div class="pcard ${k8s?'k8s':''}"><div class="k">Scope source</div><div class="v">${esc(pods.length?`${pods[0].namespace||'?'}/${pods[0].pod_name||pods[0].pod_uid}${pods.length>1?' +'+(pods.length-1):''}`:scope)}</div><div class="d">${esc((pods.length?scope+' · ':'')+(cgroups.length?`cgroup ${cgroups[0]}${cgroups.length>1?' +'+(cgroups.length-1):''}`:'no cgroup id'))}</div></div>`,
+    `<div class="pcard ${kernel?'kernel':'partial'}"><div class="k">Runtime telemetry</div><div class="v">${esc(telemetry)}</div><div class="d">${esc(pids.length?`${pids.length} pids observed`:'no pid evidence')}</div></div>`,
+    `<div class="pcard ${tls?'kernel':'partial'}"><div class="k">Model intent</div><div class="v">${esc(intent)}</div><div class="d">${esc(tls?'TLS body parsed when observable':'app hooks / explicit events may still apply')}</div></div>`
+  ].join('');
 }
 
 // --- time-scrubber: replay the run forward over its real clock ---
@@ -1358,6 +1396,7 @@ async function loadTimeline(run, offset){
   const d=await j('/api/timeline?run='+encodeURIComponent(run)+'&limit='+TL_LIMIT+'&offset='+offset);
   tlOffset=d.offset;
   renderTimeline(d.events);
+  if(offset===0)renderProducerProfile(d.events);
   const from=d.total?d.offset+1:0, to=Math.min(d.offset+d.limit,d.total);
   const el=$('#tlpager');
   el.innerHTML=`<button id="tlprev" ${d.offset<=0?'disabled':''}>‹ prev</button>

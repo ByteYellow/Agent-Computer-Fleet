@@ -186,7 +186,7 @@ func sandboxCmd(dataDir *string) *cobra.Command {
 	// correlates to a run. Then `telemetry ingest-jsonl --run <id>` + `forensics
 	// export` + `graph verify` produce a verifiable bundle for an externally-
 	// scheduled pod (no `record` wrap).
-	var bcRun, bcCgroup, bcSession, bcStarted, bcPodName, bcNamespace, bcLabels string
+	var bcRun, bcCgroup, bcSession, bcStarted, bcPodName, bcNamespace, bcLabels, bcCluster, bcNode, bcImage, bcServiceAccount, bcContainer string
 	bindCgroup := &cobra.Command{
 		Use:   "bind-cgroup",
 		Short: "bind a pod's cgroup to a run scope for node-observed telemetry (k8s-daemonset)",
@@ -215,6 +215,8 @@ func sandboxCmd(dataDir *string) *cobra.Command {
 				payload, _ := json.Marshal(map[string]any{
 					"pod_name": bcPodName, "namespace": bcNamespace, "labels": bcLabels,
 					"cgroup_id": bcCgroup, "pod_uid": bcSession,
+					"cluster": bcCluster, "node": bcNode, "image": bcImage,
+					"service_account": bcServiceAccount, "container": bcContainer,
 				})
 				now := time.Now().UTC().Format(time.RFC3339Nano)
 				if _, eerr := db.Exec(`INSERT INTO events (id, run_id, session_id, tool_call_id, process_id, source, event_type, payload, created_at)
@@ -234,6 +236,11 @@ func sandboxCmd(dataDir *string) *cobra.Command {
 	bindCgroup.Flags().StringVar(&bcPodName, "pod-name", "", "pod name for metadata enrichment (from kubectl)")
 	bindCgroup.Flags().StringVar(&bcNamespace, "namespace", "", "pod namespace for metadata enrichment")
 	bindCgroup.Flags().StringVar(&bcLabels, "labels", "", "pod labels (free-form; e.g. app=x,team=y) for metadata enrichment")
+	bindCgroup.Flags().StringVar(&bcCluster, "cluster", "", "cluster name/context for metadata enrichment")
+	bindCgroup.Flags().StringVar(&bcNode, "node", "", "node name for metadata enrichment")
+	bindCgroup.Flags().StringVar(&bcContainer, "container", "", "container name for metadata enrichment")
+	bindCgroup.Flags().StringVar(&bcImage, "image", "", "container image for metadata enrichment")
+	bindCgroup.Flags().StringVar(&bcServiceAccount, "service-account", "", "service account for metadata enrichment")
 	cmd.AddCommand(bindCgroup)
 
 	run.Flags().SetInterspersed(false)

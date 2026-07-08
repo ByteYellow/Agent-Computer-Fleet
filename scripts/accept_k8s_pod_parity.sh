@@ -28,6 +28,7 @@ trap cleanup EXIT
 
 echo "== deploy a workload pod that execs in a loop"
 $KUBECTL run "$POD" --image="$IMAGE" --image-pull-policy=IfNotPresent --restart=Never \
+  --labels app=agentprov-accept,agentprov-run=POD1 \
   --command -- sh -c 'while true; do id; ls / >/dev/null; sleep 1; done' >/dev/null
 for i in $(seq 1 30); do
   [ "$($KUBECTL get pod "$POD" -o jsonpath='{.status.phase}' 2>/dev/null)" = "Running" ] && break
@@ -55,7 +56,15 @@ echo "  pod execve captured: $podExec ; container_id resolved: $withContainer ; 
   echo "FAIL: pod telemetry not captured/attributed from the node"; exit 1; }
 
 echo "== bind the pod cgroup -> run, ingest, export, verify"
-"$AGENTPROV" --data-dir "$DATA" sandbox bind-cgroup --run POD1 --cgroup-id "$CG" --session "$PODUID" --started-at "$START" >/dev/null
+PODNS="$($KUBECTL get pod "$POD" -o jsonpath='{.metadata.namespace}')"
+NODE="$($KUBECTL get pod "$POD" -o jsonpath='{.spec.nodeName}')"
+SA="$($KUBECTL get pod "$POD" -o jsonpath='{.spec.serviceAccountName}')"
+CONTAINER="$($KUBECTL get pod "$POD" -o jsonpath='{.spec.containers[0].name}')"
+PODIMAGE="$($KUBECTL get pod "$POD" -o jsonpath='{.spec.containers[0].image}')"
+CLUSTER="$($KUBECTL config current-context 2>/dev/null || echo k8s)"
+LABELS="app=agentprov-accept,agentprov-run=POD1"
+"$AGENTPROV" --data-dir "$DATA" sandbox bind-cgroup --run POD1 --cgroup-id "$CG" --session "$PODUID" --started-at "$START" \
+  --cluster "$CLUSTER" --namespace "$PODNS" --pod-name "$POD" --node "$NODE" --container "$CONTAINER" --image "$PODIMAGE" --service-account "$SA" --labels "$LABELS" >/dev/null
 grep -F "\"cgroup_id\":\"$CG\"" "$J" > "$OUT/pod.jsonl"
 "$AGENTPROV" --data-dir "$DATA" telemetry ingest-jsonl --run POD1 --file "$OUT/pod.jsonl" --format native >/dev/null 2>&1
 "$AGENTPROV" --data-dir "$DATA" forensics export POD1 >/dev/null 2>&1

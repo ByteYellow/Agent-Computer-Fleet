@@ -62,7 +62,7 @@ Producer Profile = {
 | Profile | Sensor placement | Scope source | Layers reachable | Net-new work |
 |---|---|---|---|---|
 | **local-record** (baseline, exists) | local host | `record` cgroup leaf | system + app-context full; model-intent partial (dynamic OpenSSL + Go request/write when configured) | — (parity reference) |
-| **k8s-daemonset** | node DaemonSet (privileged / hostPID / CAP_BPF) | passive cgroup→container→pod (+ optional record-wrap entrypoint) | system + app-context directly; model-intent only when workload TLS symbols are resolvable from the node/rootfs | DaemonSet manifest; cgroup→pod resolver; K8s informer for pod metadata |
+| **k8s-daemonset** | node DaemonSet (privileged / hostPID / CAP_BPF) | passive cgroup→container→pod (+ optional record-wrap entrypoint) | system + app-context directly; model-intent only when workload TLS symbols are resolvable from the node/rootfs | DaemonSet manifest; cgroup→pod resolver; pod metadata via `sandbox bind-cgroup` flags (caller resolves from the K8s API; a client-go informer is deferred until auto-discovery is needed) |
 | **microvm-guest-init** | inside the guest (init service) | `record` works natively in-guest | system + app-context full; model-intent partial (dynamic OpenSSL + Go request/write when configured) | guest-image integration; **design + minimal runner**; flush + bundle export on teardown |
 
 The sensor already parses `docker-<id>.scope`, `cri-containerd-<id>.scope`, and
@@ -110,6 +110,18 @@ them block shipping the environment profiles.
   path: Go `crypto/tls` response/read capture, BoringSSL, statically-linked TLS,
   stripped Go binary handling, and x86 live validation. This is the remaining
   attack that makes model-intent harness-agnostic across the whole ecosystem.
+- **Read-side capture rate (observed on the k8s-daemonset demo, 2026-07-08).**
+  Even for dynamic OpenSSL, node-side pod capture emits `tls_write` reliably but
+  `tls_read` only intermittently (write:read ≈ 13:1 per window). The `SSL_read`
+  enter+uretprobe attach is fine; the loss is in HTTP-response head reassembly —
+  chunked / HTTP-2 responses whose head does not land in the first `SSL_read`
+  return get dropped rather than emitted. Effect: request bodies (prompts) and
+  the substrate/process/egress lenses are complete, but response bodies and the
+  `agent-intent` llm_call DAG are sparse until a read arrives. Note: the
+  request↔response pairing itself is NOT the bottleneck — `recentScopedEvent`
+  correctly falls back to run scope when `process_id` is empty (passive capture),
+  so one captured `tls_read` yields one `llm_call`. Fix belongs here: reassemble
+  `SSL_read` segments before HTTP parsing.
 
 ## Capability matrix (target state)
 

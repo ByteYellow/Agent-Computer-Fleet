@@ -12,6 +12,7 @@ var availableGraphLenses = []string{
 	"agent-intent",
 	"orchestration",
 	"intent",
+	"substrate",
 	"trust-origin",
 	"sandbox-boundary",
 }
@@ -87,21 +88,26 @@ type GraphLensOverlay struct {
 }
 
 type lensEvent struct {
-	ID          string
-	NodeID      string
-	Type        string
-	ProcessID   string
-	ToolCallID  string
-	SessionID   string
-	SnapshotID  string
-	PID         int64
-	PPID        int64
-	Source      string
-	Payload     string
-	CreatedAt   string
-	Path        string
-	Destination string
-	TGID        int64
+	ID                    string
+	NodeID                string
+	Type                  string
+	ProcessID             string
+	ToolCallID            string
+	SessionID             string
+	SnapshotID            string
+	PID                   int64
+	PPID                  int64
+	Source                string
+	Payload               string
+	CreatedAt             string
+	Path                  string
+	Destination           string
+	TGID                  int64
+	ContainerID           string
+	CgroupID              string
+	BindingSource         string
+	CorrelationMethod     string
+	CorrelationConfidence float64
 }
 
 type processGroup struct {

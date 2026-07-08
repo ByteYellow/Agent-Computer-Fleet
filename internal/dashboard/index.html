@@ -163,6 +163,13 @@
   .conf.hi{color:#0a7d52}
   .conf.mid{color:#8a6d1f}
   .conf.lo{color:#c25a00}
+  /* evidence source (which producer) + scope source (how the event tied to a
+     run); the scope tag is coloured by its confidence tier to match .conf. */
+  .src{color:var(--muted,#888);font-size:10.5px}
+  .scope{display:inline-block;margin-left:4px;padding:0 4px;border-radius:4px;font-size:9.5px;font-weight:600;background:rgba(0,0,0,.06)}
+  .scope.hi{color:#0a7d52}
+  .scope.mid{color:#8a6d1f}
+  .scope.lo{color:#c25a00}
   /* --- Compliance card --- */
   .compsummary{display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:14px 20px;border-bottom:1px solid var(--line);background:var(--panel2)}
   .covbar{flex:1;min-width:200px;height:12px;border-radius:99px;overflow:hidden;display:flex;background:#ececf0}
@@ -299,7 +306,7 @@
   <section class="card full">
     <h2>Run Timeline <span class="sub">all events in chronological order</span><span id="tlprov" class="provchip"></span></h2>
     <div style="overflow:auto;max-height:420px"><table id="tl"><thead><tr>
-      <th>time</th><th>event</th><th>correlation</th><th>conf</th><th>detail</th>
+      <th>time</th><th>event</th><th title="evidence source (which producer) · scope source (how it tied to a run)">source</th><th>correlation</th><th>conf</th><th>detail</th>
     </tr></thead><tbody></tbody></table></div>
     <div id="tlpager" class="pager"></div>
   </section>
@@ -909,12 +916,13 @@ function focusSignal(id, refs, title){
 
 function renderTimeline(events){
   const tb=$('#tl tbody');
-  if(!events||!events.length){tb.innerHTML='<tr><td colspan="5" class="empty">no events</td></tr>';$('#tlprov').textContent='';return;}
+  if(!events||!events.length){tb.innerHTML='<tr><td colspan="6" class="empty">no events</td></tr>';$('#tlprov').textContent='';return;}
   renderProvChip(events);
   tb.innerHTML=events.map(e=>{
     const cls=(e.correlation_class||'').replace(/\s/g,'_');
     const t=(e.created_at||'').replace('T',' ').replace(/\.\d+Z?$/,'');
     return `<tr><td>${esc(t)}</td><td class="etype">${esc(e.event_type||'')}</td>
+      <td>${srcCell(e)}</td>
       <td class="cls ${cls}">${esc(e.correlation_class||e.correlation_method||'')}${provBadge(e)}</td>
       <td>${confCell(e.correlation_confidence)}</td>
       <td class="payload">${plCell(e.payload, e.id)}</td></tr>`;
@@ -943,6 +951,17 @@ function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','
 // reading like a 0.98 kernel match.
 function confClass(c){ c=+c; return c>=0.9?'hi':(c>=0.7?'mid':'lo'); }
 function confCell(c){ if(c==null||c==='')return''; return `<span class="conf ${confClass(c)}">${(+c).toFixed(2)}</span>`; }
+// Evidence source (which producer emitted the event) + scope source (how it was
+// tied to a run: record = kernel-verified, k8s_cgroup = passive pod attribution,
+// ai_asserted = app-claimed). The scope tag is coloured by its tier so a weak
+// join never reads like a strong one.
+function scopeConf(s){ return s==='ai_asserted'?0.5:(s==='k8s_cgroup'?0.8:1); }
+function srcCell(e){
+  const ev=e.source||'', sc=e.binding_source||'';
+  let h=ev?`<span class="src" title="evidence source">${esc(ev)}</span>`:'';
+  if(sc)h+=`<span class="scope ${confClass(scopeConf(sc))}" title="scope source — how this event tied to a run">${esc(sc)}</span>`;
+  return h;
+}
 // self-launched is orthogonal to correlation class: a kernel_correlated event
 // can also carry this badge when the process was started by us.
 // Badge only the EXCEPTION, not the norm: an independently-witnessed event that

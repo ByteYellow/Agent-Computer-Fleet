@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -83,6 +84,14 @@ func Open(paths Paths) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Bound the pool: the default (unlimited) lets bursty concurrent load open an
+	// unbounded number of SQLite connections. A modest cap >1 keeps the dashboard's
+	// concurrent /api reads parallel and does not deadlock the nested-cursor read
+	// loops the way SetMaxOpenConns(1) would; WAL + the DSN busy_timeout still
+	// serialize writers. Idle connections are reaped so a long-lived daemon does
+	// not hold the cap open forever.
+	db.SetMaxOpenConns(8)
+	db.SetConnMaxIdleTime(5 * time.Minute)
 	return db, nil
 }
 

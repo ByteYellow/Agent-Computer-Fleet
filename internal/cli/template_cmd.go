@@ -86,7 +86,7 @@ func templateCmd(dataDir *string) *cobra.Command {
 		},
 	}
 
-	cmd := &cobra.Command{Use: "template", Short: "environment template operations"}
+	cmd := &cobra.Command{Use: "template", Short: "hidden substrate template plumbing", Hidden: true}
 	cmd.AddCommand(build)
 	cmd.AddCommand(list)
 	cmd.AddCommand(inspect)

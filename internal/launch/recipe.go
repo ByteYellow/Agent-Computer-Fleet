@@ -98,7 +98,7 @@ func injectClaudeCode(command []string, selfExe, hookLogPath string, paths store
 
 // shQuote single-quotes a string for safe use in a POSIX shell command (Claude
 // Code runs hook commands through a shell). Handles embedded single quotes and
-// paths with spaces (e.g. "~/Documents/Sandbox Fleet").
+// paths with spaces (e.g. "~/Documents/Agent Provenance").
 func shQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

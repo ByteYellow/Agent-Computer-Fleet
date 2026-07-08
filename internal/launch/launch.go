@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -34,6 +35,7 @@ import (
 	"github.com/byteyellow/agentprovenance/internal/ids"
 	"github.com/byteyellow/agentprovenance/internal/intent"
 	"github.com/byteyellow/agentprovenance/internal/observability"
+	"github.com/byteyellow/agentprovenance/internal/producer"
 	"github.com/byteyellow/agentprovenance/internal/provenance"
 	"github.com/byteyellow/agentprovenance/internal/record"
 	"github.com/byteyellow/agentprovenance/internal/security"
@@ -172,7 +174,23 @@ func Run(opts Options) (Report, error) {
 	// --- System-side sensor: kernel telemetry when the host can provide it.
 	sensorProc := (*sensorProcess)(nil)
 	if opts.Sensor != "off" {
-		sp, tier, reason := startSensor(opts.SelfExe, opts.DataDir, opts.Stderr)
+		// Model-intent auto-discovery: point the sensor's TLS uprobes at the
+		// agent's own TLS stack (Go crypto/tls, static OpenSSL like node, or a
+		// dynamic libssl) resolved from its executable, so intent is captured
+		// without a hand-configured libssl path.
+		var tlsEnv []string
+		if exe, lerr := exec.LookPath(command[0]); lerr == nil {
+			if t := producer.DetectTLSTarget(exe); t.Stack != "" {
+				if t.SSLLib != "" {
+					tlsEnv = append(tlsEnv, "AGENTPROV_SSL_LIB="+t.SSLLib)
+				}
+				if t.GoTLSBin != "" {
+					tlsEnv = append(tlsEnv, "AGENTPROV_GO_TLS_BIN="+t.GoTLSBin)
+				}
+				fmt.Fprintf(opts.Stderr, "launch: model-intent tls stack=%s ssl_lib=%q go_tls_bin=%q\n", t.Stack, t.SSLLib, t.GoTLSBin)
+			}
+		}
+		sp, tier, reason := startSensor(opts.SelfExe, opts.DataDir, opts.Stderr, tlsEnv)
 		report.SysTier = tier
 		report.SysDegradeReason = reason
 		sensorProc = sp

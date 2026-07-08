@@ -45,9 +45,9 @@ func observeSummaryCmd(dataDir, daemonURL *string) *cobra.Command {
 				return enc.Encode(summary)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "run=%s schema=%s events=%d\n", summary.RunID, summary.SchemaVersion, summary.EventCount)
-			fmt.Fprintf(cmd.OutOrStdout(), "application sessions=%d attempts=%d tool_calls=%d processes=%d snapshots=%d\n",
+			fmt.Fprintf(cmd.OutOrStdout(), "application substrate_scopes=%d execution_scopes=%d tool_calls=%d processes=%d artifact_states=%d\n",
 				summary.Application.Sessions, summary.Application.Attempts, summary.Application.ToolCalls, summary.Application.Processes, summary.Application.Snapshots)
-			fmt.Fprintf(cmd.OutOrStdout(), "runtime events=%d with_session=%d with_tool_call=%d with_process=%d tool_call_coverage=%.2f process_coverage=%.2f\n",
+			fmt.Fprintf(cmd.OutOrStdout(), "runtime events=%d with_substrate_scope=%d with_tool_call=%d with_process=%d tool_call_coverage=%.2f process_coverage=%.2f\n",
 				summary.Runtime.Events, summary.Runtime.EventsWithSession, summary.Runtime.EventsWithToolCall, summary.Runtime.EventsWithProcess,
 				summary.Runtime.ToolCallCoverageRatio, summary.Runtime.ProcessCoverageRatio)
 			fmt.Fprintf(cmd.OutOrStdout(), "risk signals=%d policy_decisions=%d baseline_deviations=%d response_actions=%d\n",
@@ -224,7 +224,7 @@ func observeEventCmd(dataDir *string) *cobra.Command {
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "run=%s schema=%s event=%s type=%s source=%s time=%s\n",
 				report.RunID, report.SchemaVersion, report.Event.ID, report.Event.Type, report.Event.Source, report.Event.Time)
-			fmt.Fprintf(cmd.OutOrStdout(), "context session=%s attempt=%s tool_call=%s process=%s snapshot=%s\n",
+			fmt.Fprintf(cmd.OutOrStdout(), "context substrate_scope=%s execution_scope=%s tool_call=%s process=%s artifact_state=%s\n",
 				report.Context.SessionID, report.Context.AttemptID, report.Context.ToolCallID, report.Context.ProcessID, report.Context.SnapshotID)
 			fmt.Fprintf(cmd.OutOrStdout(), "correlation method=%s confidence=%.2f\n", report.Event.CorrelationMethod, report.Event.CorrelationConfidence)
 			fmt.Fprintf(cmd.OutOrStdout(), "summary=%q\n", report.Event.Summary)
@@ -276,7 +276,7 @@ func observeProcessCmd(dataDir *string) *cobra.Command {
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "run=%s schema=%s process=%s started_at=%s ended_at=%s\n",
 				report.RunID, report.SchemaVersion, report.Process.ID, report.Process.StartedAt, report.Process.EndedAt)
-			fmt.Fprintf(cmd.OutOrStdout(), "context session=%s attempt=%s tool_call=%s snapshot=%s\n",
+			fmt.Fprintf(cmd.OutOrStdout(), "context substrate_scope=%s execution_scope=%s tool_call=%s artifact_state=%s\n",
 				report.Context.SessionID, report.Context.AttemptID, report.Context.ToolCallID, report.Context.SnapshotID)
 			fmt.Fprintf(cmd.OutOrStdout(), "summary=%q\n", report.Process.Summary)
 			printEvidenceSummaries(cmd, "RUNTIME_EVENT", report.RuntimeEvents)

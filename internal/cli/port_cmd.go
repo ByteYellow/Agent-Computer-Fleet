@@ -99,7 +99,7 @@ func portCmd(dataDir *string) *cobra.Command {
 			return (ports.Service{DB: db, Paths: paths}).Serve(args[0])
 		},
 	}
-	cmd := &cobra.Command{Use: "port", Short: "port operations"}
+	cmd := &cobra.Command{Use: "port", Short: "port operations", Hidden: true}
 	cmd.AddCommand(expose)
 	cmd.AddCommand(list)
 	cmd.AddCommand(closeCmd)

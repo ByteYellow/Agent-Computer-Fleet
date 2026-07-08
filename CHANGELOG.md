@@ -1,5 +1,65 @@
 # Changelog
 
+## v0.7.0 - 2026-07-08
+
+Portable Producer Profiles. Evidence collection extends from local/VM to
+**Kubernetes pods** with the same guarantees — **without changing the core graph
+or the schema**. The core stays substrate-agnostic: it reads the normalized
+telemetry schema out of SQLite, and substrate never reaches it. Producers differ
+only in *where the sensor runs*, *how scope is attributed*, *how events ship*, and
+*which layers they can honestly collect*. One node sensor can now observe multiple
+pod cgroups and pin each to its own signed run. The microVM guest profile is
+declared as capability data and marked in progress.
+
+### Added
+
+- **Producer Profile abstraction (`internal/producer/profile.go`).** A profile
+  declares sensor placement, scope mode, and — as first-class *capability data* —
+  the coverage of each of the three collection layers (system telemetry / model
+  intent / app context), so a degraded layer is honest data, not a hidden gap.
+  Ships `local-record`, `k8s-daemonset`, and `microvm-guest-init` (the last a
+  capability declaration; runner/guest-image integration is in progress).
+- **k8s-daemonset scope attribution.** `agentprov sandbox bind-cgroup` binds a
+  pod's node-observed cgroup to a run as a passive `k8s_cgroup` scope
+  (confidence 0.8, vs record's kernel-verified 1.0), with optional pod-metadata
+  enrichment (cluster / node / namespace / pod / container / image /
+  service-account / pod-ip / labels) recorded as a context event — no schema
+  change, no client-go informer required.
+- **Substrate lens (dashboard + `graph lens --lens substrate`).** Renders the
+  producer topology: profile → node sensor → workload → per-pod cgroup → scope →
+  run, plus a `pod_influences_pod` edge when one pod's egress targets another
+  pod's IP (a real cross-pod A2A call as kernel ground truth). A run-overview
+  producer-profile bar surfaces evidence source / scope source / confidence.
+- **Node-side model intent for pods.** The libssl uprobe attaches by inode, so
+  pointing it at a pod's own `/proc/<pid>/root/.../libssl.so.3` captures the
+  pod's TLS request/response bodies from the node with no image change. Python's
+  module-loaded OpenSSL (`_ssl.so`) is auto-detected.
+- **Parity acceptance (`scripts/accept_k8s_pod_parity.sh`).** Asserts a
+  node-observed pod's telemetry attributes to a run and verifies clean
+  (`errors=0`) — the same evidence guarantee as local-record, for an
+  externally-scheduled pod never wrapped by `record`.
+
+### Changed
+
+- **File nodes for passive (absolute-path) writes.** Graph file nodes previously
+  came only from `record`'s workspace diff (workspace-relative paths). A passive,
+  node-side capture has no workspace diff, so its file writes — all absolute —
+  produced no file node. Ingest now links substantive absolute paths (filtering
+  `/dev/null`, `/proc`, `/sys`, sockets, pipes) to `workspace_file/<abspath>`
+  nodes, so passive file activity is first-class in the file, raw, and taint
+  lenses, joined to the writing process.
+
+### Demo
+
+- **`demo/k8s-substrate/`** — the k8s-daemonset profile end to end: a real LLM
+  agent pod captured node-side (system telemetry + model intent), attributed by
+  cgroup. Ships a signed, replayable bundle (`run-claude-demo`).
+- **`demo/k8s-cross-pod-a2a/`** — the multi-agent attacker arc across a pod
+  boundary: `alice` (pod A) influences `bob` (pod B) over a real A2A network
+  call; one node sensor pins `bob`'s secret-read → staged-file → metadata-IP
+  exfil to his cgroup while `alice` stays provably clean; both cgroups bind to
+  one signed run. Ships a signed, replayable bundle (`run-a2a-demo`).
+
 ## v0.6.0 - 2026-07-06
 
 One-command capture and an intent-conformance layer. `agentprov launch -- <agent>`

@@ -45,8 +45,6 @@ func (d *DockerDriver) CreateSession(ctx context.Context, req CreateSessionReque
 		MemoryMB:          req.MemoryMB,
 		CPURequest:        req.CPURequest,
 		NetworkMode:       req.NetworkMode,
-		ProxyURL:          req.ProxyURL,
-		NoProxy:           req.NoProxy,
 		DockerNetworkName: req.DockerNetworkName,
 	})
 }

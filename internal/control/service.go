@@ -12,9 +12,6 @@ import (
 	"time"
 
 	"github.com/byteyellow/agentprovenance/internal/correlation"
-	"github.com/byteyellow/agentprovenance/internal/egress"
-	"github.com/byteyellow/agentprovenance/internal/experimental/scheduler"
-	"github.com/byteyellow/agentprovenance/internal/experimental/warm"
 	"github.com/byteyellow/agentprovenance/internal/ids"
 	"github.com/byteyellow/agentprovenance/internal/store"
 	runtimeplane "github.com/byteyellow/agentprovenance/internal/substrate/runtime"
@@ -84,40 +81,8 @@ func (s Service) CreateSession(leaseID string) (string, error) {
 	}
 	sessionID := ids.New("sbx")
 	workspace := filepath.Join(s.Paths.Workspaces, sessionID)
-	templateName := templateNameFromTaskPath(taskPath)
-	warmHit := false
-	if item, ok, hitErr := (warm.Service{DB: s.DB, Paths: s.Paths}).Hit(templateName, sessionID, 250, task.MemoryMB); hitErr != nil {
-		return "", hitErr
-	} else if ok {
-		workspace = item.WorkspacePath
-		warmHit = true
-	}
-	if !warmHit {
-		if err := os.MkdirAll(workspace, 0o755); err != nil {
-			return "", err
-		}
-	}
-	decision, err := (scheduler.Scheduler{DB: s.DB}).Admit(scheduler.Request{
-		RunID:      runID,
-		SessionID:  sessionID,
-		Runtime:    "docker",
-		RiskTier:   task.RiskTier,
-		CPURequest: task.CPURequest,
-		MemoryMB:   task.MemoryMB,
-	})
-	if err != nil {
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
 		return "", err
-	}
-	if !decision.Admitted {
-		return "", fmt.Errorf("admission rejected: reject_reason=%s effective_cpu=%.3f debt=%.3f burst_risk=%s overcommit_ratio=%.2f queue_pressure=%s memory_pressure=%s memory_allocated_mb=%d memory_request_mb=%d memory_capacity_mb=%d",
-			decision.RejectReason, decision.EffectiveCPU, decision.ActiveCPUDebt, decision.BurstRisk, decision.OvercommitRatio, decision.QueuePressure, decision.MemoryPressure, decision.MemoryAllocatedMB, decision.MemoryRequestMB, decision.MemoryCapacityMB)
-	}
-	var egressProxy egress.ProxyInfo
-	if s.isDockerRuntime() {
-		egressProxy, err = (egress.Service{DB: s.DB, Paths: s.Paths}).EnsureSessionProxy(runID, sessionID)
-		if err != nil {
-			return "", err
-		}
 	}
 	start := time.Now()
 	containerID, err := s.createRuntimeSession(runtimeplane.CreateSessionRequest{
@@ -129,9 +94,6 @@ func (s Service) CreateSession(leaseID string) (string, error) {
 		MemoryMB:          task.MemoryMB,
 		CPURequest:        task.CPURequest,
 		NetworkMode:       task.NetworkMode,
-		ProxyURL:          egressProxy.ContainerProxyURL,
-		NoProxy:           "localhost,127.0.0.1,::1",
-		DockerNetworkName: egressProxy.NetworkName,
 	})
 	if err != nil {
 		return "", err
@@ -146,7 +108,7 @@ func (s Service) CreateSession(leaseID string) (string, error) {
 		return "", err
 	}
 	_, _ = s.DB.Exec(`INSERT INTO events (id, run_id, session_id, source, event_type, payload, created_at)
-		VALUES (?, ?, ?, 'control_plane', 'session_create', ?, ?)`, ids.New("evt"), runID, sessionID, fmt.Sprintf(`{"container_id":%q,"workspace":%q,"startup_cold_ms":%d,"runtime":%q,"scheduler_decision":%q,"node_id":%q,"warm_hit":%t}`, containerID, workspace, startupColdMS, runtimeName, decision.Reason, decision.NodeID, warmHit), now)
+		VALUES (?, ?, ?, 'control_plane', 'session_create', ?, ?)`, ids.New("evt"), runID, sessionID, fmt.Sprintf(`{"container_id":%q,"workspace":%q,"startup_cold_ms":%d,"runtime":%q}`, containerID, workspace, startupColdMS, runtimeName), now)
 	_, _ = s.DB.Exec(`UPDATE leases SET status = 'allocated', updated_at = ? WHERE id = ?`, now, leaseID)
 	_, _ = s.DB.Exec(`INSERT INTO cost_samples (id, run_id, session_id, wall_seconds, created_at)
 		VALUES (?, ?, ?, ?, ?)`, ids.New("cost"), runID, sessionID, float64(startupColdMS)/1000, now)
@@ -178,29 +140,6 @@ func (s Service) CreateSessionFromWorkspace(req WorkspaceSessionRequest) (string
 		VALUES (?, ?, ?, ?, 'allocated', ?, ?)`, leaseID, runID, req.TaskPath, string(raw), now, now); err != nil {
 		return "", err
 	}
-	decision, err := (scheduler.Scheduler{DB: s.DB}).Admit(scheduler.Request{
-		RunID:      runID,
-		SessionID:  sessionID,
-		Runtime:    s.runtimeName(),
-		RiskTier:   task.RiskTier,
-		CPURequest: task.CPURequest,
-		MemoryMB:   task.MemoryMB,
-		SnapshotID: req.ParentSnapshotID,
-	})
-	if err != nil {
-		return "", err
-	}
-	if !decision.Admitted {
-		return "", fmt.Errorf("admission rejected: reject_reason=%s effective_cpu=%.3f debt=%.3f burst_risk=%s overcommit_ratio=%.2f queue_pressure=%s memory_pressure=%s memory_allocated_mb=%d memory_request_mb=%d memory_capacity_mb=%d",
-			decision.RejectReason, decision.EffectiveCPU, decision.ActiveCPUDebt, decision.BurstRisk, decision.OvercommitRatio, decision.QueuePressure, decision.MemoryPressure, decision.MemoryAllocatedMB, decision.MemoryRequestMB, decision.MemoryCapacityMB)
-	}
-	var egressProxy egress.ProxyInfo
-	if s.isDockerRuntime() {
-		egressProxy, err = (egress.Service{DB: s.DB, Paths: s.Paths}).EnsureSessionProxy(runID, sessionID)
-		if err != nil {
-			return "", err
-		}
-	}
 	start := time.Now()
 	containerID, err := s.createRuntimeSession(runtimeplane.CreateSessionRequest{
 		SessionID:         sessionID,
@@ -211,9 +150,6 @@ func (s Service) CreateSessionFromWorkspace(req WorkspaceSessionRequest) (string
 		MemoryMB:          task.MemoryMB,
 		CPURequest:        task.CPURequest,
 		NetworkMode:       task.NetworkMode,
-		ProxyURL:          egressProxy.ContainerProxyURL,
-		NoProxy:           "localhost,127.0.0.1,::1",
-		DockerNetworkName: egressProxy.NetworkName,
 	})
 	if err != nil {
 		return "", err
@@ -229,7 +165,7 @@ func (s Service) CreateSessionFromWorkspace(req WorkspaceSessionRequest) (string
 	_, _ = s.DB.Exec(`INSERT INTO events (id, run_id, session_id, process_id, snapshot_id, source, event_type, payload, created_at)
 		VALUES (?, ?, ?, ?, ?, 'control_plane', 'rollout_attempt_session_create', ?, ?)`,
 		ids.New("evt"), runID, sessionID, req.AttemptID, req.ParentSnapshotID,
-		fmt.Sprintf(`{"container_id":%q,"workspace":%q,"startup_cold_ms":%d,"runtime":%q,"scheduler_decision":%q,"node_id":%q}`, containerID, req.WorkspacePath, startupColdMS, runtimeName, decision.Reason, decision.NodeID), now)
+		fmt.Sprintf(`{"container_id":%q,"workspace":%q,"startup_cold_ms":%d,"runtime":%q}`, containerID, req.WorkspacePath, startupColdMS, runtimeName), now)
 	_, _ = s.DB.Exec(`INSERT INTO cost_samples (id, run_id, session_id, node_id, wall_seconds, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)`, ids.New("cost"), runID, sessionID, "local", float64(startupColdMS)/1000, now)
 	return sessionID, nil
@@ -270,35 +206,14 @@ func (s Service) exec(sessionID string, command []string, stream bool, stdout, s
 	})
 	_, _ = s.DB.Exec(`INSERT INTO events (id, run_id, session_id, process_id, source, event_type, payload, created_at)
 		VALUES (?, ?, ?, ?, 'control_plane', 'exec_start', ?, ?)`, ids.New("evt"), runID, sessionID, processID, fmt.Sprintf(`{"command":%q,"stream":%t}`, strings.Join(command, " "), stream), now)
-	cpuRequest := s.sessionCPURequest(sessionID)
-	reservation, reserveErr := (scheduler.Scheduler{DB: s.DB}).ReserveBurst(runID, sessionID, processID, cpuRequest, 30*time.Second)
-	if reserveErr != nil {
-		ended := time.Now().UTC().Format(time.RFC3339Nano)
-		_, _ = s.DB.Exec(`UPDATE processes SET status = 'rejected', exit_code = 125, ended_at = ? WHERE id = ?`, ended, processID)
-		_, _ = s.DB.Exec(`INSERT INTO events (id, run_id, session_id, process_id, source, event_type, payload, created_at)
-			VALUES (?, ?, ?, ?, 'control_plane', 'burst_reject', ?, ?)`,
-			ids.New("evt"), runID, sessionID, processID, fmt.Sprintf(`{"reservation_id":%q,"reason":%q,"inflight":%d,"max_inflight":%d,"reserved_cpu":%.3f}`, reservation.ID, reservation.Reason, reservation.Inflight, reservation.MaxInflight, reservation.ReservedCPU), ended)
-		s.unlockWrites()
-		return processID, reserveErr
-	}
-	_, _ = s.DB.Exec(`INSERT INTO events (id, run_id, session_id, process_id, source, event_type, payload, created_at)
-		VALUES (?, ?, ?, ?, 'control_plane', 'burst_reserve', ?, ?)`,
-		ids.New("evt"), runID, sessionID, processID, fmt.Sprintf(`{"reservation_id":%q,"inflight_before":%d,"max_inflight":%d,"reserved_cpu_before":%.3f,"expires_at":%q}`, reservation.ID, reservation.Inflight, reservation.MaxInflight, reservation.ReservedCPU, reservation.ExpiresAt), time.Now().UTC().Format(time.RFC3339Nano))
 	s.unlockWrites()
 	start := time.Now()
 	if err := s.setContainerCPUProfile(runID, sessionID, containerID, CPUProfileTool); err != nil {
-		s.lockWrites()
-		_ = (scheduler.Scheduler{DB: s.DB}).ReleaseBurst(reservation.ID)
-		s.unlockWrites()
 		return processID, err
 	}
 	result, err := s.execRuntime(containerID, command, stream, stdout, stderr)
 	profileErr := s.setContainerCPUProfile(runID, sessionID, containerID, CPUProfileThink)
 	s.lockWrites()
-	releaseErr := (scheduler.Scheduler{DB: s.DB}).ReleaseBurst(reservation.ID)
-	_, _ = s.DB.Exec(`INSERT INTO events (id, run_id, session_id, process_id, source, event_type, payload, created_at)
-		VALUES (?, ?, ?, ?, 'control_plane', 'burst_release', ?, ?)`,
-		ids.New("evt"), runID, sessionID, processID, fmt.Sprintf(`{"reservation_id":%q}`, reservation.ID), time.Now().UTC().Format(time.RFC3339Nano))
 	wallSeconds := time.Since(start).Seconds()
 	status := "exited"
 	if err != nil {
@@ -318,7 +233,7 @@ func (s Service) exec(sessionID string, command []string, stream bool, stdout, s
 	if profileErr != nil {
 		return processID, profileErr
 	}
-	return processID, releaseErr
+	return processID, nil
 }
 
 func (s Service) SetSessionCPUProfile(sessionID, profile string) error {
@@ -353,19 +268,6 @@ func (s Service) ExposePort(sessionID string, port int) (string, error) {
 	_, _ = s.DB.Exec(`INSERT INTO events (id, run_id, session_id, source, event_type, payload, created_at)
 		VALUES (?, ?, ?, 'agentprov', 'port_expose', ?, ?)`, ids.New("evt"), runID, sessionID, fmt.Sprintf(`{"port":%d,"url":%q}`, port, url), now)
 	return url, nil
-}
-
-func (s Service) sessionCPURequest(sessionID string) float64 {
-	var raw string
-	err := s.DB.QueryRow(`SELECT l.task_yaml FROM sessions s JOIN leases l ON s.lease_id = l.id WHERE s.id = ?`, sessionID).Scan(&raw)
-	if err != nil {
-		return 1
-	}
-	task, err := ParseTask([]byte(raw))
-	if err != nil || task.CPURequest <= 0 {
-		return 1
-	}
-	return task.CPURequest
 }
 
 func (s Service) ListSessions() ([]SessionInfo, error) {
@@ -403,7 +305,6 @@ func (s Service) StopSession(sessionID string) error {
 			return err
 		}
 	}
-	_ = (egress.Service{DB: s.DB, Paths: s.Paths}).CloseForSession(sessionID)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err = s.DB.Exec(`UPDATE sessions SET status = 'stopped', updated_at = ? WHERE id = ?`, now, sessionID)
 	return err
@@ -419,7 +320,6 @@ func (s Service) RemoveSession(sessionID string) error {
 			return err
 		}
 	}
-	_ = (egress.Service{DB: s.DB, Paths: s.Paths}).CloseForSession(sessionID)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err = s.DB.Exec(`UPDATE sessions SET status = 'removed', container_id = '', updated_at = ? WHERE id = ?`, now, sessionID)
 	return err
@@ -459,29 +359,6 @@ func (s Service) ResumeSnapshot(snapshotNameOrID, leaseID string) (string, error
 		}
 	}
 	resumeCopyMS := time.Since(startCopy).Milliseconds()
-	decision, err := (scheduler.Scheduler{DB: s.DB}).Admit(scheduler.Request{
-		RunID:      runID,
-		SessionID:  sessionID,
-		Runtime:    "docker",
-		RiskTier:   task.RiskTier,
-		CPURequest: task.CPURequest,
-		MemoryMB:   task.MemoryMB,
-		SnapshotID: snapshot.ID,
-	})
-	if err != nil {
-		return "", err
-	}
-	if !decision.Admitted {
-		return "", fmt.Errorf("admission rejected: reject_reason=%s effective_cpu=%.3f debt=%.3f burst_risk=%s overcommit_ratio=%.2f queue_pressure=%s memory_pressure=%s memory_allocated_mb=%d memory_request_mb=%d memory_capacity_mb=%d",
-			decision.RejectReason, decision.EffectiveCPU, decision.ActiveCPUDebt, decision.BurstRisk, decision.OvercommitRatio, decision.QueuePressure, decision.MemoryPressure, decision.MemoryAllocatedMB, decision.MemoryRequestMB, decision.MemoryCapacityMB)
-	}
-	var egressProxy egress.ProxyInfo
-	if s.isDockerRuntime() {
-		egressProxy, err = (egress.Service{DB: s.DB, Paths: s.Paths}).EnsureSessionProxy(runID, sessionID)
-		if err != nil {
-			return "", err
-		}
-	}
 	start := time.Now()
 	containerID, err := s.createRuntimeSession(runtimeplane.CreateSessionRequest{
 		SessionID:         sessionID,
@@ -492,9 +369,6 @@ func (s Service) ResumeSnapshot(snapshotNameOrID, leaseID string) (string, error
 		MemoryMB:          task.MemoryMB,
 		CPURequest:        task.CPURequest,
 		NetworkMode:       task.NetworkMode,
-		ProxyURL:          egressProxy.ContainerProxyURL,
-		NoProxy:           "localhost,127.0.0.1,::1",
-		DockerNetworkName: egressProxy.NetworkName,
 	})
 	if err != nil {
 		return "", err
@@ -597,23 +471,4 @@ func (s Service) runtimeName() string {
 		return s.Driver.Name()
 	}
 	return ""
-}
-
-func (s Service) isDockerRuntime() bool {
-	if s.Driver != nil {
-		return s.Driver.Name() == "docker"
-	}
-	return false
-}
-
-func templateNameFromTaskPath(taskPath string) string {
-	base := filepath.Base(taskPath)
-	ext := filepath.Ext(base)
-	if ext != "" {
-		base = strings.TrimSuffix(base, ext)
-	}
-	if base == "" || base == "." {
-		return "default"
-	}
-	return base
 }

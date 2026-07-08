@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -83,6 +84,14 @@ func Open(paths Paths) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Bound the pool: the default (unlimited) lets bursty concurrent load open an
+	// unbounded number of SQLite connections. A modest cap >1 keeps the dashboard's
+	// concurrent /api reads parallel and does not deadlock the nested-cursor read
+	// loops the way SetMaxOpenConns(1) would; WAL + the DSN busy_timeout still
+	// serialize writers. Idle connections are reaped so a long-lived daemon does
+	// not hold the cap open forever.
+	db.SetMaxOpenConns(8)
+	db.SetConnMaxIdleTime(5 * time.Minute)
 	return db, nil
 }
 
@@ -571,19 +580,6 @@ func EnsureSchema(db *sql.DB) error {
 			updated_at TEXT NOT NULL,
 			PRIMARY KEY(node_id, window_seconds, window_start)
 		);`,
-		`CREATE TABLE IF NOT EXISTS burst_reservations (
-			id TEXT PRIMARY KEY,
-			run_id TEXT NOT NULL,
-			session_id TEXT NOT NULL,
-			process_id TEXT NOT NULL DEFAULT '',
-			node_id TEXT NOT NULL DEFAULT 'local',
-			cpu_request REAL NOT NULL DEFAULT 1,
-			status TEXT NOT NULL,
-			reason TEXT NOT NULL DEFAULT '',
-			expires_at TEXT NOT NULL,
-			created_at TEXT NOT NULL,
-			released_at TEXT NOT NULL DEFAULT ''
-		);`,
 		`CREATE TABLE IF NOT EXISTS ports (
 			id TEXT PRIMARY KEY,
 			session_id TEXT NOT NULL,
@@ -620,25 +616,6 @@ func EnsureSchema(db *sql.DB) error {
 			status TEXT NOT NULL,
 			created_at TEXT NOT NULL
 		);`,
-		`CREATE TABLE IF NOT EXISTS warm_pool_items (
-			id TEXT PRIMARY KEY,
-			template_name TEXT NOT NULL,
-			session_id TEXT,
-			workspace_path TEXT,
-			frequency INTEGER NOT NULL DEFAULT 0,
-			cold_start_p95_ms INTEGER NOT NULL DEFAULT 0,
-			size_score REAL NOT NULL DEFAULT 1,
-			priority REAL NOT NULL DEFAULT 0,
-			hit_count INTEGER NOT NULL DEFAULT 0,
-			last_hit_at TEXT NOT NULL DEFAULT '',
-			cold_start_saved_ms INTEGER NOT NULL DEFAULT 0,
-			memory_mb INTEGER NOT NULL DEFAULT 0,
-			disk_bytes INTEGER NOT NULL DEFAULT 0,
-			eviction_reason TEXT NOT NULL DEFAULT '',
-			status TEXT NOT NULL,
-			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL
-		);`,
 		`CREATE TABLE IF NOT EXISTS forensics_bundles (
 			id TEXT PRIMARY KEY,
 			run_id TEXT NOT NULL,
@@ -657,47 +634,6 @@ func EnsureSchema(db *sql.DB) error {
 			parent_hashes TEXT NOT NULL DEFAULT '',
 			path TEXT NOT NULL,
 			size_bytes INTEGER NOT NULL DEFAULT 0,
-			created_at TEXT NOT NULL
-		);`,
-		`CREATE TABLE IF NOT EXISTS nodes (
-			id TEXT PRIMARY KEY,
-			address TEXT NOT NULL,
-			runtime TEXT NOT NULL,
-			labels TEXT NOT NULL DEFAULT '',
-			cpu_capacity REAL NOT NULL DEFAULT 0,
-			memory_mb INTEGER NOT NULL DEFAULT 0,
-			active_cpu_debt REAL NOT NULL DEFAULT 0,
-			warm_hit_count INTEGER NOT NULL DEFAULT 0,
-			status TEXT NOT NULL,
-			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL
-		);`,
-		`CREATE TABLE IF NOT EXISTS egress_proxies (
-			id TEXT PRIMARY KEY,
-			run_id TEXT NOT NULL DEFAULT '',
-			session_id TEXT NOT NULL DEFAULT '',
-			host_port INTEGER NOT NULL,
-			proxy_url TEXT NOT NULL,
-			container_proxy_url TEXT NOT NULL,
-			mode TEXT NOT NULL DEFAULT 'host',
-			network_name TEXT NOT NULL DEFAULT '',
-			container_id TEXT NOT NULL DEFAULT '',
-			pid INTEGER NOT NULL DEFAULT 0,
-			status TEXT NOT NULL,
-			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL
-		);`,
-		`CREATE TABLE IF NOT EXISTS egress_allowlist (
-			host TEXT PRIMARY KEY,
-			created_at TEXT NOT NULL
-		);`,
-		`CREATE TABLE IF NOT EXISTS egress_credentials (
-			id TEXT PRIMARY KEY,
-			name TEXT NOT NULL,
-			host TEXT NOT NULL,
-			path_prefix TEXT NOT NULL DEFAULT '/',
-			header_name TEXT NOT NULL,
-			secret_ref TEXT NOT NULL,
 			created_at TEXT NOT NULL
 		);`,
 		// Unified graph-attached signal model (the infra contract).
@@ -723,7 +659,7 @@ func EnsureSchema(db *sql.DB) error {
 			reference TEXT NOT NULL DEFAULT '',       -- norm / baseline / budget that produced it
 			confidence REAL NOT NULL DEFAULT 1,
 			recommended_action TEXT NOT NULL DEFAULT '',
-			produced_by TEXT NOT NULL DEFAULT '',     -- security.policy | baseline | economics | evaluator:<name>
+			produced_by TEXT NOT NULL DEFAULT '',     -- security.policy | baseline | cost | evaluator:<name>
 			evidence_refs TEXT NOT NULL DEFAULT '[]', -- JSON array of content-addressed object refs
 			payload TEXT NOT NULL DEFAULT '{}',
 			source_table TEXT NOT NULL DEFAULT '',    -- legacy silo this row was projected from (provenance)
@@ -812,11 +748,6 @@ func EnsureSchema(db *sql.DB) error {
 		`ALTER TABLE events ADD COLUMN tgid INTEGER NOT NULL DEFAULT 0;`,
 		`ALTER TABLE events ADD COLUMN ppid INTEGER NOT NULL DEFAULT 0;`,
 		`ALTER TABLE events ADD COLUMN binding_source TEXT NOT NULL DEFAULT '';`,
-		`ALTER TABLE egress_proxies ADD COLUMN run_id TEXT NOT NULL DEFAULT '';`,
-		`ALTER TABLE egress_proxies ADD COLUMN session_id TEXT NOT NULL DEFAULT '';`,
-		`ALTER TABLE egress_proxies ADD COLUMN mode TEXT NOT NULL DEFAULT 'host';`,
-		`ALTER TABLE egress_proxies ADD COLUMN network_name TEXT NOT NULL DEFAULT '';`,
-		`ALTER TABLE egress_proxies ADD COLUMN container_id TEXT NOT NULL DEFAULT '';`,
 		`ALTER TABLE forensics_bundles ADD COLUMN sha256 TEXT NOT NULL DEFAULT '';`,
 		`ALTER TABLE forensics_bundles ADD COLUMN size_bytes INTEGER NOT NULL DEFAULT 0;`,
 		`ALTER TABLE policy_decisions ADD COLUMN rule_id TEXT NOT NULL DEFAULT '';`,
@@ -858,12 +789,6 @@ func EnsureSchema(db *sql.DB) error {
 		`ALTER TABLE fork_attempts ADD COLUMN tool_call_id TEXT NOT NULL DEFAULT '';`,
 		`ALTER TABLE fork_attempts ADD COLUMN risk_status TEXT NOT NULL DEFAULT 'unknown';`,
 		`ALTER TABLE fork_attempts ADD COLUMN budget_exceeded INTEGER NOT NULL DEFAULT 0;`,
-		`ALTER TABLE warm_pool_items ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0;`,
-		`ALTER TABLE warm_pool_items ADD COLUMN last_hit_at TEXT NOT NULL DEFAULT '';`,
-		`ALTER TABLE warm_pool_items ADD COLUMN cold_start_saved_ms INTEGER NOT NULL DEFAULT 0;`,
-		`ALTER TABLE warm_pool_items ADD COLUMN memory_mb INTEGER NOT NULL DEFAULT 0;`,
-		`ALTER TABLE warm_pool_items ADD COLUMN disk_bytes INTEGER NOT NULL DEFAULT 0;`,
-		`ALTER TABLE warm_pool_items ADD COLUMN eviction_reason TEXT NOT NULL DEFAULT '';`,
 		`ALTER TABLE baseline_profiles ADD COLUMN payload TEXT NOT NULL DEFAULT '{}';`,
 		`ALTER TABLE telemetry_spool_batches ADD COLUMN dropped_at TEXT NOT NULL DEFAULT '';`,
 		`ALTER TABLE telemetry_spool_batches ADD COLUMN drop_reason TEXT NOT NULL DEFAULT '';`,

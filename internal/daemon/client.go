@@ -13,7 +13,6 @@ import (
 	"github.com/byteyellow/agentprovenance/internal/baseline"
 	"github.com/byteyellow/agentprovenance/internal/control"
 	"github.com/byteyellow/agentprovenance/internal/evidence"
-	"github.com/byteyellow/agentprovenance/internal/experimental/scheduler"
 	"github.com/byteyellow/agentprovenance/internal/forensics"
 	"github.com/byteyellow/agentprovenance/internal/observability"
 	"github.com/byteyellow/agentprovenance/internal/provenance"
@@ -120,18 +119,6 @@ func (c Client) ResumeSnapshot(snapshotNameOrID, leaseID string) (string, error)
 	}
 	err := c.postJSON("/v1/snapshots/"+snapshotNameOrID+"/resume", map[string]any{"lease_id": leaseID}, &resp)
 	return resp.SessionID, err
-}
-
-func (c Client) SchedulerStatus(snapshot string) (scheduler.NodeState, error) {
-	path := "/v1/scheduler/status"
-	if snapshot != "" {
-		path += "?snapshot=" + url.QueryEscape(snapshot)
-	}
-	var resp struct {
-		Node scheduler.NodeState `json:"node"`
-	}
-	err := c.getJSON(path, &resp)
-	return resp.Node, err
 }
 
 func (c Client) ObserveSummary(runID string, topN int) (observability.Summary, error) {

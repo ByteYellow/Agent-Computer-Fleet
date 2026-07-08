@@ -44,12 +44,17 @@ const (
 
 // Options configures optional sensor probes beyond the always-on syscall set.
 type Options struct {
-	// SSLLib, when set, attaches the PoC SSL_write uprobe to this libssl path to
-	// capture TLS plaintext (the agent's LLM request body) zero-instrumentation.
+	// SSLLib, when set, attaches SSL_write/read and SSL_write_ex/read_ex uprobes
+	// to this libssl path to capture TLS plaintext zero-instrumentation.
 	SSLLib string
 	// LibcLib overrides the libc path for the getaddrinfo DNS uprobe; empty =
 	// auto-detect the common system libc paths.
 	LibcLib string
+	// GoTLSBin, when set, attaches a uprobe to crypto/tls.(*Conn).Write in this Go
+	// binary to capture the request/prompt plaintext for Go agents, which use Go's
+	// own TLS (no libssl for the SSLLib uprobes to hook). Best-effort: a stripped
+	// binary (-ldflags "-s -w") has no symbol to attach.
+	GoTLSBin string
 	// OnReady, when set, is called exactly once after every probe has attached
 	// and the ring buffer reader is open -- i.e. the sensor is genuinely capturing
 	// and the caller may safely start the workload it wants observed. Supervisors
@@ -128,21 +133,70 @@ func RunWithOptions(out io.Writer, opts Options) error {
 		if err != nil {
 			return fmt.Errorf("open ssl lib %s: %w", opts.SSLLib, err)
 		}
-		upSSL, err := ex.Uprobe("SSL_write", objs.HandleSslWrite, nil)
-		if err != nil {
-			return fmt.Errorf("attach SSL_write uprobe on %s: %w", opts.SSLLib, err)
+
+		var attachErrs []string
+		attachedWrite := false
+		if up, err := ex.Uprobe("SSL_write", objs.HandleSslWrite, nil); err == nil {
+			defer up.Close()
+			attachedWrite = true
+		} else {
+			attachErrs = append(attachErrs, "SSL_write: "+err.Error())
 		}
-		defer upSSL.Close()
-		upReadEnter, err := ex.Uprobe("SSL_read", objs.HandleSslReadEnter, nil)
-		if err != nil {
-			return fmt.Errorf("attach SSL_read uprobe on %s: %w", opts.SSLLib, err)
+		if up, err := ex.Uprobe("SSL_write_ex", objs.HandleSslWriteEx, nil); err == nil {
+			defer up.Close()
+			attachedWrite = true
+		} else {
+			attachErrs = append(attachErrs, "SSL_write_ex: "+err.Error())
 		}
-		defer upReadEnter.Close()
-		upReadExit, err := ex.Uretprobe("SSL_read", objs.HandleSslReadExit, nil)
-		if err != nil {
-			return fmt.Errorf("attach SSL_read uretprobe on %s: %w", opts.SSLLib, err)
+
+		attachedRead := false
+		if upEnter, err := ex.Uprobe("SSL_read", objs.HandleSslReadEnter, nil); err == nil {
+			if upExit, err := ex.Uretprobe("SSL_read", objs.HandleSslReadExit, nil); err == nil {
+				defer upEnter.Close()
+				defer upExit.Close()
+				attachedRead = true
+			} else {
+				upEnter.Close()
+				attachErrs = append(attachErrs, "SSL_read return: "+err.Error())
+			}
+		} else {
+			attachErrs = append(attachErrs, "SSL_read: "+err.Error())
 		}
-		defer upReadExit.Close()
+
+		if upEnter, err := ex.Uprobe("SSL_read_ex", objs.HandleSslReadExEnter, nil); err == nil {
+			if upExit, err := ex.Uretprobe("SSL_read_ex", objs.HandleSslReadExExit, nil); err == nil {
+				defer upEnter.Close()
+				defer upExit.Close()
+				attachedRead = true
+			} else {
+				upEnter.Close()
+				attachErrs = append(attachErrs, "SSL_read_ex return: "+err.Error())
+			}
+		} else {
+			attachErrs = append(attachErrs, "SSL_read_ex: "+err.Error())
+		}
+
+		if !attachedWrite || !attachedRead {
+			return fmt.Errorf("attach OpenSSL TLS uprobes on %s: write=%v read=%v (%s)", opts.SSLLib, attachedWrite, attachedRead, strings.Join(attachErrs, "; "))
+		}
+	}
+
+	// Go crypto/tls: Go agents use Go's own TLS stack (no libssl), so the SSLLib
+	// uprobes never fire for them. crypto/tls.(*Conn).Write(b []byte) holds the
+	// request/prompt plaintext in b at entry; on the arm64 ABIInternal the
+	// receiver is x0 and the slice ptr/len land in x1/x2 -- exactly the registers
+	// handle_ssl_write reads as (ssl, buf, num), so we reuse that program. Entry
+	// uprobe only (the request path); no uretprobe, since Go's moving goroutine
+	// stacks make return probes unsafe. Best-effort and non-fatal: a stripped
+	// binary exposes no symbol to attach.
+	if opts.GoTLSBin != "" {
+		if ex, err := link.OpenExecutable(opts.GoTLSBin); err != nil {
+			fmt.Fprintf(os.Stderr, "agentprov-sensor: open go-tls bin %s: %v\n", opts.GoTLSBin, err)
+		} else if up, err := ex.Uprobe("crypto/tls.(*Conn).Write", objs.HandleSslWrite, nil); err != nil {
+			fmt.Fprintf(os.Stderr, "agentprov-sensor: go-tls uprobe not attached (%v; stripped binary?)\n", err)
+		} else {
+			defer up.Close()
+		}
 	}
 
 	// DNS uprobe on the system libc's getaddrinfo (best-effort, non-fatal): gives
@@ -193,8 +247,9 @@ func RunWithOptions(out io.Writer, opts Options) error {
 	defer close(done)
 	go watchDrops(objs.Drops, emit, done)
 
-	// The SSL_write/SSL_read probes emit ordered TLS-plaintext chunks; reassemble
-	// them into complete HTTP/1.1 request/response messages before emitting.
+	// The SSL_write/read probes emit ordered TLS-plaintext chunks; reassemble them
+	// into complete HTTP/1.1 or HTTP/2/HPACK request/response messages before
+	// emitting.
 	reasm := tlsintent.NewReassembler()
 	for {
 		rec, err := rd.Read()

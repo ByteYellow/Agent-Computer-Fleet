@@ -339,21 +339,23 @@ func (r Rule) Matches(event Event) bool {
 	if r.Match.PrivateCIDR && !isPrivateIP(event.DstIP) {
 		return false
 	}
-	for _, pattern := range r.Match.PathContains {
-		if pattern != "" && strings.Contains(event.Path, pattern) {
-			return true
+	// Content matchers: path_contains and args_contains. When either is set, at
+	// least one specified pattern (across BOTH dimensions) must match. Evaluate
+	// both before deciding, so a rule that sets both can still match on args when
+	// the path does not -- previously PathContains short-circuited to false and
+	// ArgsContains was never consulted for such a rule.
+	if len(r.Match.PathContains) > 0 || len(r.Match.ArgsContains) > 0 {
+		for _, pattern := range r.Match.PathContains {
+			if pattern != "" && strings.Contains(event.Path, pattern) {
+				return true
+			}
 		}
-	}
-	if len(r.Match.PathContains) > 0 {
-		return false
-	}
-	joinedArgs := strings.Join(event.Args, " ")
-	for _, pattern := range r.Match.ArgsContains {
-		if pattern != "" && strings.Contains(joinedArgs, pattern) {
-			return true
+		joinedArgs := strings.Join(event.Args, " ")
+		for _, pattern := range r.Match.ArgsContains {
+			if pattern != "" && strings.Contains(joinedArgs, pattern) {
+				return true
+			}
 		}
-	}
-	if len(r.Match.ArgsContains) > 0 {
 		return false
 	}
 	return r.Match.Source != "" || r.Match.EventType != "" || r.Match.DstIP != "" || r.Match.PrivateCIDR

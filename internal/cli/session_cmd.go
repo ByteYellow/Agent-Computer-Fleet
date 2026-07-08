@@ -142,7 +142,7 @@ func sessionCmd(dataDir, daemonURL *string) *cobra.Command {
 			return nil
 		},
 	}
-	cmd := &cobra.Command{Use: "session", Short: "session operations"}
+	cmd := &cobra.Command{Use: "session", Short: "hidden substrate session plumbing", Hidden: true}
 	cmd.AddCommand(create)
 	cmd.AddCommand(list)
 	cmd.AddCommand(inspect)

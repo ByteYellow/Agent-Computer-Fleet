@@ -3,6 +3,7 @@ package launch
 import (
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -27,7 +28,7 @@ type sensorProcess struct {
 // honest reason when it degrades. The reason is what the operator sees, so it
 // names the actual blocker (wrong OS, missing CAP_BPF) rather than a generic
 // failure.
-func startSensor(selfExe, dataDir string, stderr io.Writer) (*sensorProcess, string, string) {
+func startSensor(selfExe, dataDir string, stderr io.Writer, tlsEnv []string) (*sensorProcess, string, string) {
 	if runtime.GOOS != "linux" {
 		return nil, "none", fmt.Sprintf("kernel telemetry requires Linux (this host is %s)", runtime.GOOS)
 	}
@@ -40,6 +41,11 @@ func startSensor(selfExe, dataDir string, stderr io.Writer) (*sensorProcess, str
 	// New process group so a Ctrl-C on the launch group does not race our own
 	// SIGTERM; we own this child's lifecycle explicitly.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// tlsEnv carries auto-detected AGENTPROV_SSL_LIB / AGENTPROV_GO_TLS_BIN so the
+	// sensor points its TLS uprobes at this agent's stack without hand config.
+	if len(tlsEnv) > 0 {
+		cmd.Env = append(os.Environ(), tlsEnv...)
+	}
 
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {

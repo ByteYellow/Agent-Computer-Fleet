@@ -49,9 +49,9 @@ tamper-evident against a malicious host root.
 | 4 | Child/async/delayed -> original scope | DONE | time-window open bindings + root_pid + container/cgroup co-membership (not ppid lineage); supervised `record` can launch into a real cgroup-per-scope |
 | 5 | Observability: timeline app+runtime | DONE | `provenance/timeline.go` BuildTimeline, lanes + correlation_status |
 | 5 | observe summary/coverage/scopes/event/process/flow | DONE | `cli/observe_cmd.go` (6/6) |
-| 5 | graph explain event/process/tool_call/file/risk/artifact | DONE | `provenance/explain.go` (+attempt,+run) |
+| 5 | graph explain event/process/tool_call/file/risk/artifact | DONE | `provenance/explain.go` (+execution scope,+run; `attempt` remains a storage compatibility alias) |
 | 5 | core queries JSON + schema_version | DONE | all commands `--json` |
-| 6 | record base snapshot / changed files / process obs | DONE | `record/service.go` (self-recursion bug fixed 2026-06-27) |
+| 6 | record base state / changed files / process obs | DONE | `record/service.go` (self-recursion bug fixed 2026-06-27; physical table still uses snapshot compatibility names) |
 | 6 | diff / blame(4-state) / artifact(hash,source,parent) / replay | DONE | `provenance/diff.go`, `objects.go`, `replay.go` |
 | 7 | metadata_ip / private_cidr / secret_path -> risk -> response | DONE | `security/policy.go` DefaultRules, EvaluateRuntimeEvent |
 | 7 | verify policy->risk->response->unified security signal | DONE | `verify.go` verifyRiskAndResponses (requires unified signal) |

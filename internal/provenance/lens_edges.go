@@ -124,6 +124,10 @@ func edgeMatchesLens(lens, detail string, edge GraphLensEdge, nodes map[string]G
 		return strings.HasPrefix(edge.EdgeType, "intent_") ||
 			from.Kind == "intent_diff" || to.Kind == "intent_diff" ||
 			edge.EdgeType == "agent_spawn" || edge.EdgeType == "agent_message" || edge.EdgeType == "agent_tool_call"
+	case "substrate":
+		return strings.HasPrefix(edge.EdgeType, "producer_") || strings.Contains(edge.EdgeType, "cgroup") ||
+			strings.Contains(edge.EdgeType, "workload") || strings.Contains(edge.EdgeType, "scope_") ||
+			strings.HasPrefix(from.Kind, "substrate_") || strings.HasPrefix(to.Kind, "substrate_")
 	case "trust-origin":
 		return from.TrustOrigin != "" || to.TrustOrigin != "" || from.Kind == "artifact" || to.Kind == "artifact" || from.Kind == "tool_call" || to.Kind == "tool_call"
 	case "sandbox-boundary":
@@ -350,6 +354,8 @@ func graphLensRules(lens string) []string {
 		return []string{"agent_spawn (delegation)", "agent_message (peer, body objectified)", "each agent's tool calls incl. refused proposals"}
 	case "intent":
 		return []string{"contract scope → diff verdict → observed effects", "declared_vs_effect_mismatch / refused_bypass / coverage_gap", "conditional on each action's declared contract, not a global rule"}
+	case "substrate":
+		return []string{"producer profile → node sensor → workload group → cgroup binding → run", "aggregated by source/scope/cgroup/event type", "pod nodes from bind-cgroup metadata enrichment (k8s api asserted)"}
 	case "trust-origin":
 		return []string{"trust_origin annotations", "agent/tool/artifact nodes"}
 	case "sandbox-boundary":
@@ -377,6 +383,8 @@ func graphLensLayout(lens string) string {
 		return "agent_topology"
 	case "intent":
 		return "contract_vs_effect"
+	case "substrate":
+		return "substrate_topology"
 	case "trust-origin":
 		return "origin_overlay"
 	case "sandbox-boundary":

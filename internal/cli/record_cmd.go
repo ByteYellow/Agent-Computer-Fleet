@@ -56,7 +56,7 @@ func recordCmd(dataDir *string) *cobra.Command {
 			if withJSON {
 				return printRecordJSON(cmd, result)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "run_id=%s rollout_id=%s base_snapshot=%s attempt=%s session=%s tool_call=%s process=%s status=%s exit=%d wall_ms=%d changed_files=%d workdir=%s\n",
+			fmt.Fprintf(cmd.OutOrStdout(), "run_id=%s trajectory_id=%s base_state=%s execution_scope=%s substrate_scope=%s tool_call=%s process=%s status=%s exit=%d wall_ms=%d changed_files=%d workdir=%s\n",
 				result.RunID, result.RolloutID, result.BaseSnapshotID, result.AttemptID, result.SessionID, result.ToolCallID, result.ProcessID, result.Status, result.ExitCode, result.WallMS, len(result.ChangedFiles), result.Workdir)
 			for _, file := range result.ChangedFiles {
 				fmt.Fprintf(cmd.OutOrStdout(), "changed_file=%s\n", file)
@@ -106,9 +106,9 @@ func recordBatchCmd(dataDir *string) *cobra.Command {
 			runIDs := make([]string, 0, len(jobs))
 			shards := map[string]int{}
 			if concurrency > 1 {
-				// Parallel recording for RL/benchmark throughput. Jobs run in a
+				// Parallel recording for evaluator/benchmark throughput. Jobs run in a
 				// bounded worker pool; results are reassembled in input order.
-				// continue-on-error is implied here (one failed rollout must not
+				// continue-on-error is implied here (one failed execution must not
 				// abort the batch); the SQLite store serializes writes via WAL +
 				// busy_timeout (see store.Open).
 				items = runRecordBatchParallel(service, jobs, concurrency, sampleIntervalMS, postRootGraceMS)
@@ -456,6 +456,10 @@ func printRecordJSON(cmd *cobra.Command, result record.Result) error {
 	manifest := map[string]any{
 		"schema_version":     "agentprovenance.record/v1",
 		"run_id":             result.RunID,
+		"trajectory_id":      result.RolloutID,
+		"base_state_id":      result.BaseSnapshotID,
+		"execution_scope_id": result.AttemptID,
+		"substrate_scope_id": result.SessionID,
 		"rollout_id":         result.RolloutID,
 		"base_snapshot_id":   result.BaseSnapshotID,
 		"attempt_id":         result.AttemptID,

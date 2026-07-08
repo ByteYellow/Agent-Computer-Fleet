@@ -652,6 +652,15 @@ func verifyExecutionContextBindings(db *sql.DB, runID string, add issueAdder) er
 }
 
 func verifyRuntimeCausality(db *sql.DB, runID string, add issueAdder) error {
+	// Buffer the run's events, then resolve edge and attempt membership from
+	// in-memory maps. Previously each event issued up to ~12 single-row edge and
+	// attempt-id queries inside the open events cursor - an O(events x lookups)
+	// N+1 that also required store.Open to keep a multi-connection pool.
+	// Preloading first removes both.
+	type runtimeEvent struct {
+		id, toolCallID, processID, eventType, payload, correlationMethod, source string
+		pid, tgid, ppid                                                          int64
+	}
 	rows, err := db.Query(`SELECT id, COALESCE(tool_call_id, ''), COALESCE(process_id, ''), event_type, payload,
 		COALESCE(correlation_method, ''),
 		COALESCE(source, ''),
@@ -660,13 +669,41 @@ func verifyRuntimeCausality(db *sql.DB, runID string, add issueAdder) error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	var events []runtimeEvent
+	toolCallIDs := map[string]struct{}{}
 	for rows.Next() {
-		var id, toolCallID, processID, eventType, payload, correlationMethod, source string
-		var pid, tgid, ppid int64
-		if err := rows.Scan(&id, &toolCallID, &processID, &eventType, &payload, &correlationMethod, &source, &pid, &tgid, &ppid); err != nil {
+		var e runtimeEvent
+		if err := rows.Scan(&e.id, &e.toolCallID, &e.processID, &e.eventType, &e.payload, &e.correlationMethod, &e.source, &e.pid, &e.tgid, &e.ppid); err != nil {
+			rows.Close()
 			return err
 		}
+		if e.toolCallID != "" {
+			toolCallIDs[e.toolCallID] = struct{}{}
+		}
+		events = append(events, e)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	edges, err := loadRunEdgeSet(db, runID)
+	if err != nil {
+		return err
+	}
+	attemptByToolCall, err := loadAttemptIDsForToolCalls(db, toolCallIDs)
+	if err != nil {
+		return err
+	}
+	hasEdge := func(fromID, toID, edgeType string) bool {
+		_, ok := edges[edgeKey{fromID, toID, edgeType}]
+		return ok
+	}
+
+	for _, e := range events {
+		id, toolCallID, processID, eventType, payload, correlationMethod, source := e.id, e.toolCallID, e.processID, e.eventType, e.payload, e.correlationMethod, e.source
+		pid, tgid, ppid := e.pid, e.tgid, e.ppid
 		if telemetry.TelemetrySource(source, correlationMethod) {
 			if err := telemetry.ValidateStoredPayload(eventType, payload); err != nil {
 				add("error", "invalid_telemetry_payload_schema", id, "event %s type=%s has invalid telemetry payload: %v", id, eventType, err)
@@ -677,64 +714,64 @@ func verifyRuntimeCausality(db *sql.DB, runID string, add issueAdder) error {
 		if !isRuntimeTelemetry && !isFileTelemetry {
 			continue
 		}
-		attemptID := attemptIDForToolCall(db, toolCallID)
+		attemptID := attemptByToolCall[toolCallID]
 		eventNode := "runtime_event/" + id
-		if isRuntimeTelemetry && attemptID != "" && !edgeExists(db, runID, attemptID, eventNode, "runtime_attempt_event") {
+		if isRuntimeTelemetry && attemptID != "" && !hasEdge(attemptID, eventNode, "runtime_attempt_event") {
 			add("error", "missing_runtime_attempt_event_edge", id, "attempt %s is not linked to runtime event %s", attemptID, id)
 		}
 		if isRuntimeTelemetry && toolCallID != "" {
-			if !edgeExists(db, runID, toolCallID, eventNode, "runtime_tool_call_event") {
+			if !hasEdge(toolCallID, eventNode, "runtime_tool_call_event") {
 				add("error", "missing_runtime_tool_call_event_edge", id, "tool_call %s is not linked to runtime event %s", toolCallID, id)
 			}
-			if processID != "" && !edgeExists(db, runID, toolCallID, processID, "runtime_tool_call_process") {
+			if processID != "" && !hasEdge(toolCallID, processID, "runtime_tool_call_process") {
 				add("error", "missing_runtime_tool_call_process_edge", id, "tool_call %s is not linked to process %s", toolCallID, processID)
 			}
 		}
-		if isRuntimeTelemetry && processID != "" && !edgeExists(db, runID, processID, eventNode, "runtime_process_event") {
+		if isRuntimeTelemetry && processID != "" && !hasEdge(processID, eventNode, "runtime_process_event") {
 			add("error", "missing_runtime_process_event_edge", id, "process %s is not linked to runtime event %s", processID, id)
 		}
 		if isRuntimeTelemetry && pid != 0 && processID != "" {
 			processNode := fmt.Sprintf("runtime_process/pid/%d", pid)
-			if !edgeExists(db, runID, processID, processNode, "runtime_process_observed") {
+			if !hasEdge(processID, processNode, "runtime_process_observed") {
 				add("error", "missing_runtime_process_observed_edge", id, "process %s is not linked to observed pid %d", processID, pid)
 			}
 		}
 		if isRuntimeTelemetry && pid != 0 && ppid != 0 {
 			parentNode := fmt.Sprintf("runtime_process/pid/%d", ppid)
 			childNode := fmt.Sprintf("runtime_process/pid/%d", pid)
-			if !edgeExists(db, runID, parentNode, childNode, "runtime_process_parent") {
+			if !hasEdge(parentNode, childNode, "runtime_process_parent") {
 				add("error", "missing_runtime_process_parent_edge", id, "pid %d is not linked as parent of pid %d", ppid, pid)
 			}
-			if !edgeExists(db, runID, childNode, parentNode, "runtime_process_child_of") {
+			if !hasEdge(childNode, parentNode, "runtime_process_child_of") {
 				add("error", "missing_runtime_process_child_edge", id, "pid %d is not linked back to parent pid %d", pid, ppid)
 			}
 		}
 		if isRuntimeTelemetry && pid != 0 && tgid != 0 && pid != tgid {
 			threadGroupNode := fmt.Sprintf("runtime_process/tgid/%d", tgid)
 			processNode := fmt.Sprintf("runtime_process/pid/%d", pid)
-			if !edgeExists(db, runID, threadGroupNode, processNode, "runtime_process_thread") {
+			if !hasEdge(threadGroupNode, processNode, "runtime_process_thread") {
 				add("error", "missing_runtime_process_thread_edge", id, "tgid %d is not linked to pid %d", tgid, pid)
 			}
 		}
 		if eventType == "file_write" || eventType == "file_open" {
 			if path := verifyPayloadPath(payload); path != "" {
 				fileNode := "workspace_file/" + path
-				if !edgeExists(db, runID, eventNode, fileNode, "runtime_event_file") {
+				if !hasEdge(eventNode, fileNode, "runtime_event_file") {
 					add("error", "missing_runtime_event_file_edge", id, "runtime event %s is not linked to file %s", id, path)
 				}
-				if processID != "" && !edgeExists(db, runID, processID, fileNode, "runtime_process_file") {
+				if processID != "" && !hasEdge(processID, fileNode, "runtime_process_file") {
 					add("error", "missing_runtime_process_file_edge", id, "process %s is not linked to file %s", processID, path)
 				}
-				if toolCallID != "" && !edgeExists(db, runID, toolCallID, fileNode, "runtime_tool_call_file") {
+				if toolCallID != "" && !hasEdge(toolCallID, fileNode, "runtime_tool_call_file") {
 					add("error", "missing_runtime_tool_call_file_edge", id, "tool_call %s is not linked to file %s", toolCallID, path)
 				}
-				if attemptID != "" && !edgeExists(db, runID, attemptID, fileNode, "runtime_attempt_file") {
+				if attemptID != "" && !hasEdge(attemptID, fileNode, "runtime_attempt_file") {
 					add("error", "missing_runtime_attempt_file_edge", id, "attempt %s is not linked to file %s", attemptID, path)
 				}
 			}
 		}
 	}
-	return rows.Err()
+	return nil
 }
 
 func verifyTelemetryBatches(db *sql.DB, runID string, add issueAdder) error {
@@ -971,13 +1008,77 @@ func edgeExists(db *sql.DB, runID, fromID, toID, edgeType string) bool {
 	return exists(db, `SELECT 1 FROM graph_edges WHERE run_id = ? AND from_id = ? AND to_id = ? AND edge_type = ?`, runID, fromID, toID, edgeType)
 }
 
-func attemptIDForToolCall(db *sql.DB, toolCallID string) string {
-	if toolCallID == "" {
-		return ""
+type edgeKey struct {
+	fromID   string
+	toID     string
+	edgeType string
+}
+
+// loadRunEdgeSet loads every graph edge for a run into a membership set so edge
+// existence can be checked in memory instead of one query per lookup. All
+// edgeExists calls in verifyRuntimeCausality share the same run_id, so this set
+// is an exact substitute for that query.
+func loadRunEdgeSet(db *sql.DB, runID string) (map[edgeKey]struct{}, error) {
+	rows, err := db.Query(`SELECT from_id, to_id, edge_type FROM graph_edges WHERE run_id = ?`, runID)
+	if err != nil {
+		return nil, err
 	}
-	var attemptID string
-	_ = db.QueryRow(`SELECT COALESCE(attempt_id, '') FROM tool_calls WHERE id = ?`, toolCallID).Scan(&attemptID)
-	return attemptID
+	defer rows.Close()
+	set := map[edgeKey]struct{}{}
+	for rows.Next() {
+		var k edgeKey
+		if err := rows.Scan(&k.fromID, &k.toID, &k.edgeType); err != nil {
+			return nil, err
+		}
+		set[k] = struct{}{}
+	}
+	return set, rows.Err()
+}
+
+// loadAttemptIDsForToolCalls resolves tool_call_id -> attempt_id for the given
+// ids. It looks tool calls up by id (no run_id filter) so verification cannot
+// become more lenient for tool calls with an unset run_id; a missing id maps to
+// "" just as a per-row lookup would return "".
+func loadAttemptIDsForToolCalls(db *sql.DB, ids map[string]struct{}) (map[string]string, error) {
+	out := make(map[string]string, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	list := make([]string, 0, len(ids))
+	for id := range ids {
+		list = append(list, id)
+	}
+	const chunk = 900
+	for start := 0; start < len(list); start += chunk {
+		end := start + chunk
+		if end > len(list) {
+			end = len(list)
+		}
+		batch := list[start:end]
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")
+		args := make([]any, len(batch))
+		for i, id := range batch {
+			args[i] = id
+		}
+		rows, err := db.Query(`SELECT id, COALESCE(attempt_id, '') FROM tool_calls WHERE id IN (`+placeholders+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var id, attemptID string
+			if err := rows.Scan(&id, &attemptID); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[id] = attemptID
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return out, nil
 }
 
 func verifyPayloadPath(payload string) string {

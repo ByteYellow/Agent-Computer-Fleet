@@ -51,8 +51,6 @@ type CreateSessionRequest struct {
 	MemoryMB          int64
 	CPURequest        float64
 	NetworkMode       string
-	ProxyURL          string
-	NoProxy           string
 	DockerNetworkName string
 }
 
@@ -80,7 +78,7 @@ func NewDriver(name string, paths store.Paths) (Driver, error) {
 	case "gvisor", "firecracker", "bubblewrap":
 		return StubDriver{NameValue: name}, nil
 	default:
-		return nil, fmt.Errorf("runtime backend %q is not registered", name)
+		return nil, fmt.Errorf("substrate driver %q is not registered", name)
 	}
 }
 
@@ -103,7 +101,7 @@ func List(paths store.Paths) []Backend {
 			Capabilities: dockerCapabilities(),
 			Exec:         "docker exec",
 			Snapshot:     "directory snapshot/fork/resume",
-			Network:      "session internal bridge + egress sidecar",
+			Network:      "session internal bridge; egress policy is observed as telemetry",
 			Isolation:    "container namespace/cgroup/seccomp baseline",
 			Telemetry:    "labels, exec metadata, wrapper events, docker stats",
 			Notes:        dockerNotes,
@@ -120,7 +118,7 @@ func Inspect(paths store.Paths, name string) (Backend, error) {
 			return backend, nil
 		}
 	}
-	return Backend{}, fmt.Errorf("runtime backend %q is not registered", name)
+	return Backend{}, fmt.Errorf("substrate driver %q is not registered", name)
 }
 
 func dockerCapabilities() Capabilities {
@@ -138,7 +136,7 @@ func dockerCapabilities() Capabilities {
 		ResumeLatencyClass: "cold",
 		IsolationLevel:     "container",
 		QuotaSupport:       "cgroup",
-		NetworkPolicy:      "proxy",
+		NetworkPolicy:      "observed",
 		TelemetryBinding:   []string{"label", "container_id"},
 	}
 }
@@ -185,32 +183,32 @@ func (d StubDriver) Capabilities() Capabilities {
 	return Capabilities{}
 }
 func (d StubDriver) CreateSession(context.Context, CreateSessionRequest) (string, error) {
-	return "", fmt.Errorf("runtime backend %q is not implemented", d.NameValue)
+	return "", fmt.Errorf("substrate driver %q is not implemented", d.NameValue)
 }
 func (d StubDriver) Exec(context.Context, string, []string, bool) (ExecResult, error) {
-	return ExecResult{}, fmt.Errorf("runtime backend %q is not implemented", d.NameValue)
+	return ExecResult{}, fmt.Errorf("substrate driver %q is not implemented", d.NameValue)
 }
 func (d StubDriver) ExecStream(context.Context, string, []string, io.Writer, io.Writer) (ExecResult, error) {
-	return ExecResult{}, fmt.Errorf("runtime backend %q is not implemented", d.NameValue)
+	return ExecResult{}, fmt.Errorf("substrate driver %q is not implemented", d.NameValue)
 }
 func (d StubDriver) Interrupt(context.Context, string) error {
-	return fmt.Errorf("runtime backend %q is not implemented", d.NameValue)
+	return fmt.Errorf("substrate driver %q is not implemented", d.NameValue)
 }
 func (d StubDriver) Stop(context.Context, string) error {
-	return fmt.Errorf("runtime backend %q is not implemented", d.NameValue)
+	return fmt.Errorf("substrate driver %q is not implemented", d.NameValue)
 }
 func (d StubDriver) Remove(context.Context, string) error {
-	return fmt.Errorf("runtime backend %q is not implemented", d.NameValue)
+	return fmt.Errorf("substrate driver %q is not implemented", d.NameValue)
 }
 func (d StubDriver) CreateDirectorySnapshot(context.Context, string, string) (state.Manifest, error) {
-	return state.Manifest{}, fmt.Errorf("runtime backend %q does not support directory snapshots", d.NameValue)
+	return state.Manifest{}, fmt.Errorf("substrate driver %q does not support directory snapshots", d.NameValue)
 }
 func (d StubDriver) ForkDirectorySnapshot(context.Context, string, string) (state.Manifest, error) {
-	return state.Manifest{}, fmt.Errorf("runtime backend %q does not support fork", d.NameValue)
+	return state.Manifest{}, fmt.Errorf("substrate driver %q does not support fork", d.NameValue)
 }
 func (d StubDriver) ResumeDirectorySnapshot(context.Context, string, string) (state.Manifest, error) {
-	return state.Manifest{}, fmt.Errorf("runtime backend %q does not support resume", d.NameValue)
+	return state.Manifest{}, fmt.Errorf("substrate driver %q does not support resume", d.NameValue)
 }
 func (d StubDriver) SetCPUWeight(context.Context, string, int64) error {
-	return fmt.Errorf("runtime backend %q does not support CPU weight control", d.NameValue)
+	return fmt.Errorf("substrate driver %q does not support CPU weight control", d.NameValue)
 }

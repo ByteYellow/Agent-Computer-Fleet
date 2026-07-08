@@ -17,9 +17,8 @@ import (
 	"github.com/byteyellow/agentprovenance/internal/baseline"
 	"github.com/byteyellow/agentprovenance/internal/control"
 	"github.com/byteyellow/agentprovenance/internal/correlation"
+	"github.com/byteyellow/agentprovenance/internal/cost"
 	"github.com/byteyellow/agentprovenance/internal/evidence"
-	"github.com/byteyellow/agentprovenance/internal/experimental/economics"
-	"github.com/byteyellow/agentprovenance/internal/experimental/scheduler"
 	"github.com/byteyellow/agentprovenance/internal/forensics"
 	"github.com/byteyellow/agentprovenance/internal/observability"
 	"github.com/byteyellow/agentprovenance/internal/provenance"
@@ -76,7 +75,6 @@ func NewServer(dataDir string) (Server, func(), error) {
 func (s Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", s.health)
-	mux.HandleFunc("GET /v1/scheduler/status", s.schedulerStatus)
 	mux.HandleFunc("POST /v1/leases", s.createLease)
 	mux.HandleFunc("POST /v1/sessions", s.createSession)
 	mux.HandleFunc("GET /v1/sessions", s.listSessions)
@@ -175,11 +173,6 @@ func (s Server) health(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s Server) schedulerStatus(w http.ResponseWriter, r *http.Request) {
-	state, err := (scheduler.Scheduler{DB: s.DB}).NodeState(r.URL.Query().Get("snapshot"))
-	writeResult(w, map[string]any{"node": state}, err)
-}
-
 func (s Server) StartSampler(ctx context.Context) {
 	if s.SampleInterval <= 0 {
 		return
@@ -198,7 +191,7 @@ func (s Server) StartSampler(ctx context.Context) {
 }
 
 func (s Server) sampleOnce() {
-	result, err := economics.SampleRunningDockerSessionsWithOptions(s.DB, economics.SamplerOptions{Limit: s.SampleLimit, Timeout: s.SampleTimeout, RawRetention: s.RawRetention, MaxRawPerSession: s.MaxRawSamples})
+	result, err := cost.SampleRunningDockerSessionsWithOptions(s.DB, cost.SamplerOptions{Limit: s.SampleLimit, Timeout: s.SampleTimeout, RawRetention: s.RawRetention, MaxRawPerSession: s.MaxRawSamples})
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	payload := fmt.Sprintf(`{"sampled":%d,"failed":%d,"skipped":%d,"errors":%q}`, result.Sampled, result.Failed, result.Skipped, strings.Join(result.Errors, "; "))
 	if err != nil {

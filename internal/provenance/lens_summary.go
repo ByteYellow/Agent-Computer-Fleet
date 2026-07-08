@@ -1,6 +1,7 @@
 package provenance
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -25,6 +26,8 @@ func summaryLensEdges(runID, lens, focus, detail string, nodes map[string]GraphL
 		return buildDataFlowSummaryEdges(events), true
 	case "agent-intent":
 		return buildIntentDAGEdges(runID, nodes, events, edges), true
+	case "substrate":
+		return buildSubstrateEdges(runID, nodes, events), true
 	case "trust-origin":
 		return buildTrustOriginGroupEdges(runID, nodes), true
 	case "sandbox-boundary":
@@ -65,6 +68,297 @@ func buildRunOverviewEdges(runID string, nodes map[string]GraphLensNode, events 
 			CreatedAt: "",
 			Data:      group.Data,
 		})
+	}
+	return out
+}
+
+func buildSubstrateEdges(runID string, nodes map[string]GraphLensNode, events map[string]lensEvent) []GraphLensEdge {
+	rootID := "run/" + runID
+	nodes[rootID] = GraphLensNode{ID: rootID, Kind: "run", Label: runID, Data: map[string]any{"run_id": runID}}
+	stats := substrateStats{
+		sources: map[string]int{}, scopes: map[string]int{}, cgroups: map[string]int{},
+		allCgroups: map[string]int{}, containers: map[string]int{}, allContainers: map[string]int{},
+		events: map[string]int{}, pids: map[int64]bool{},
+	}
+	seenPods := map[string]bool{}
+	for _, ev := range lensEventsInOrder(events) {
+		if ev.Source == "k8s" && ev.Type == "pod_metadata" {
+			// Context event from `sandbox bind-cgroup` enrichment, not runtime
+			// telemetry: surfaced as pod nodes, excluded from event counts.
+			var pod substratePod
+			if err := json.Unmarshal([]byte(ev.Payload), &pod); err == nil && (pod.Name != "" || pod.UID != "") {
+				key := pod.Namespace + "/" + pod.Name + "/" + pod.UID
+				if !seenPods[key] {
+					seenPods[key] = true
+					stats.pods = append(stats.pods, pod)
+				}
+			}
+			continue
+		}
+		if ev.Source != "" {
+			stats.sources[ev.Source]++
+		}
+		if ev.BindingSource != "" {
+			stats.scopes[ev.BindingSource]++
+		}
+		if ev.CgroupID != "" {
+			stats.allCgroups[ev.CgroupID]++
+			if ev.BindingSource != "" {
+				stats.cgroups[ev.CgroupID]++
+			}
+		}
+		if ev.ContainerID != "" {
+			stats.allContainers[ev.ContainerID]++
+			if ev.BindingSource != "" && !strings.HasPrefix(ev.ContainerID, "agentprov-record-") {
+				stats.containers[ev.ContainerID]++
+			}
+		}
+		if ev.Type != "" {
+			stats.events[ev.Type]++
+		}
+		if ev.PID > 0 {
+			stats.pids[ev.PID] = true
+		}
+	}
+	profile, profileLabel := substrateProfile(stats)
+	if len(stats.cgroups) == 0 {
+		stats.cgroups = stats.allCgroups
+	}
+	if len(stats.containers) == 0 && profile != "k8s-daemonset" {
+		stats.containers = stats.allContainers
+	}
+	scope := topStringKey(stats.scopes)
+	if scope == "" {
+		scope = "unbound"
+	}
+	cgroupSample := topStringKey(stats.cgroups)
+	if cgroupSample == "" {
+		cgroupSample = "none"
+	}
+	profileID := "substrate/profile/" + safeGraphID(profile)
+	nodeID := "substrate/node_group"
+	workloadID := "substrate/workload_group"
+	cgroupID := "substrate/cgroup_group"
+	scopeID := "substrate/scope/" + safeGraphID(scope)
+	eventID := "substrate/runtime_event_group"
+	nodes[profileID] = GraphLensNode{ID: profileID, Kind: "substrate_profile", Subtype: profile, Label: profileLabel, TrustOrigin: "producer_profile", Data: map[string]any{
+		"profile": profile, "sources": summarizeStringCounts(stats.sources, 3), "source_counts": stats.sources,
+	}}
+	nodes[nodeID] = GraphLensNode{ID: nodeID, Kind: "substrate_node_group", Subtype: "node_sensor", Label: substrateNodeLabel(profile), TrustOrigin: "runtime_observed", Data: map[string]any{
+		"producer_profile": profile, "sources": stats.sources,
+	}}
+	nodes[workloadID] = GraphLensNode{ID: workloadID, Kind: "substrate_workload_group", Subtype: workloadSubtype(profile), Label: substrateWorkloadLabel(profile, len(stats.containers), stats.pods), TrustOrigin: "runtime_observed", Data: map[string]any{
+		"containers": len(stats.containers), "known_container_ids": sortedStringKeys(stats.containers), "pods": len(stats.pods), "metadata": workloadMetadataNote(stats.pods),
+	}}
+	nodes[cgroupID] = GraphLensNode{ID: cgroupID, Kind: "substrate_cgroup_group", Subtype: "cgroup", Label: fmt.Sprintf("cgroups: %d", len(stats.cgroups)), TrustOrigin: "kernel_observed", Data: map[string]any{
+		"count": len(stats.cgroups), "sample": cgroupSample, "cgroups": sortedStringKeys(stats.cgroups),
+	}}
+	nodes[scopeID] = GraphLensNode{ID: scopeID, Kind: "substrate_scope", Subtype: scope, Label: substrateScopeLabel(scope), TrustOrigin: "correlation", Data: map[string]any{
+		"binding_source": scope, "confidence": substrateScopeConfidence(scope), "scope_counts": stats.scopes,
+	}}
+	nodes[eventID] = GraphLensNode{ID: eventID, Kind: "substrate_event_group", Subtype: "runtime_events", Label: fmt.Sprintf("runtime events: %d", sumIntMap(stats.events)), TrustOrigin: "runtime_observed", Data: map[string]any{
+		"event_count": sumIntMap(stats.events), "pid_count": len(stats.pids), "top_event_types": topEventTypes(stats.events, 6), "event_counts": stats.events,
+		"drilldown_lens": "process", "drilldown_detail": "summary",
+	}}
+	out := []GraphLensEdge{
+		{ID: "substrate-profile-node", FromID: profileID, ToID: nodeID, EdgeType: "producer_runs_on"},
+		{ID: "substrate-node-workload", FromID: nodeID, ToID: workloadID, EdgeType: "sensor_observes_workload"},
+		{ID: "substrate-workload-cgroup", FromID: workloadID, ToID: cgroupID, EdgeType: "workload_has_cgroup", Data: map[string]any{"cgroup_count": len(stats.cgroups)}},
+		{ID: "substrate-cgroup-scope", FromID: cgroupID, ToID: scopeID, EdgeType: "cgroup_binds_scope", Confidence: substrateScopeConfidence(scope)},
+		{ID: "substrate-scope-run", FromID: scopeID, ToID: rootID, EdgeType: "scope_binds_run", Confidence: substrateScopeConfidence(scope)},
+		{ID: "substrate-cgroup-events", FromID: cgroupID, ToID: eventID, EdgeType: "cgroup_observed_events", Data: map[string]any{"event_count": sumIntMap(stats.events), "pid_count": len(stats.pids)}},
+		{ID: "substrate-events-run", FromID: eventID, ToID: rootID, EdgeType: "events_materialize_run"},
+	}
+	// Per-pod cgroup nodes (so N pods don't collapse onto the single aggregate
+	// cgroup node) + indexes for the cross-pod influence pass.
+	podByCgroup := map[string]string{} // cgroup_id -> podID
+	podByIP := map[string]string{}     // pod_ip    -> podID
+	for i, pod := range stats.pods {
+		podID := "substrate/pod/" + safeGraphID(podDisplayName(pod))
+		nodes[podID] = GraphLensNode{ID: podID, Kind: "substrate_pod", Subtype: "pod", Label: "pod " + podDisplayName(pod), TrustOrigin: "k8s_api_asserted", Data: map[string]any{
+			"cluster": pod.Cluster, "node": pod.Node, "pod_name": pod.Name, "namespace": pod.Namespace,
+			"container": pod.Container, "image": pod.Image, "service_account": pod.ServiceAccount,
+			"labels": pod.Labels, "pod_uid": pod.UID, "cgroup_id": pod.CgroupID, "pod_ip": pod.PodIP,
+		}}
+		out = append(out, GraphLensEdge{ID: fmt.Sprintf("substrate-workload-pod-%d", i), FromID: workloadID, ToID: podID, EdgeType: "workload_has_pod"})
+		if pod.PodIP != "" {
+			podByIP[pod.PodIP] = podID
+		}
+		if pod.CgroupID != "" {
+			podByCgroup[pod.CgroupID] = podID
+			pcg := "substrate/cgroup/" + safeGraphID(pod.CgroupID)
+			nodes[pcg] = GraphLensNode{ID: pcg, Kind: "substrate_cgroup_group", Subtype: "cgroup", Label: "cgroup " + pod.CgroupID, TrustOrigin: "kernel_observed", Data: map[string]any{"cgroup_id": pod.CgroupID, "pod": podDisplayName(pod)}}
+			out = append(out,
+				GraphLensEdge{ID: fmt.Sprintf("substrate-pod-cgroup-%d", i), FromID: podID, ToID: pcg, EdgeType: "pod_bound_cgroup", Data: map[string]any{"cgroup_id": pod.CgroupID}},
+				GraphLensEdge{ID: fmt.Sprintf("substrate-podcgroup-scope-%d", i), FromID: pcg, ToID: scopeID, EdgeType: "cgroup_binds_scope", Confidence: substrateScopeConfidence(scope)},
+			)
+		}
+	}
+	// Cross-pod influence: an egress from pod X's cgroup to pod Y's pod IP is a
+	// real A2A network call between two pods on this node — kernel ground truth.
+	seen := map[string]bool{}
+	for _, ev := range lensEventsInOrder(events) {
+		if ev.CgroupID == "" || ev.Destination == "" || !isSubstrateEgress(ev.Type) {
+			continue
+		}
+		src, dst := podByCgroup[ev.CgroupID], podByIP[ev.Destination]
+		if src == "" || dst == "" || src == dst || seen[src+"->"+dst] {
+			continue
+		}
+		seen[src+"->"+dst] = true
+		out = append(out, GraphLensEdge{ID: "substrate-influence-" + safeGraphID(src+"-"+dst), FromID: src, ToID: dst, EdgeType: "pod_influences_pod", Data: map[string]any{"via": ev.Type, "dst_ip": ev.Destination}})
+	}
+	return out
+}
+
+func isSubstrateEgress(t string) bool {
+	switch t {
+	case "network_connect", "net_connect", "private_cidr", "metadata_ip":
+		return true
+	}
+	return false
+}
+
+type substratePod struct {
+	Name           string `json:"pod_name"`
+	Namespace      string `json:"namespace"`
+	Labels         string `json:"labels"`
+	UID            string `json:"pod_uid"`
+	CgroupID       string `json:"cgroup_id"`
+	Cluster        string `json:"cluster"`
+	Node           string `json:"node"`
+	Container      string `json:"container"`
+	Image          string `json:"image"`
+	ServiceAccount string `json:"service_account"`
+	PodIP          string `json:"pod_ip"`
+}
+
+func podDisplayName(pod substratePod) string {
+	name := pod.Name
+	if name == "" {
+		name = pod.UID
+	}
+	if pod.Namespace != "" {
+		name = pod.Namespace + "/" + name
+	}
+	if pod.Cluster != "" {
+		return pod.Cluster + "/" + name
+	}
+	return name
+}
+
+func workloadMetadataNote(pods []substratePod) string {
+	if len(pods) > 0 {
+		return "pod metadata from bind-cgroup enrichment (k8s api asserted)"
+	}
+	return "pod/container metadata pending informer enrichment"
+}
+
+type substrateStats struct {
+	sources       map[string]int
+	scopes        map[string]int
+	cgroups       map[string]int
+	allCgroups    map[string]int
+	containers    map[string]int
+	allContainers map[string]int
+	events        map[string]int
+	pids          map[int64]bool
+	pods          []substratePod
+}
+
+func substrateProfile(stats substrateStats) (profile, label string) {
+	if stats.scopes["k8s_cgroup"] > 0 || len(stats.pods) > 0 {
+		return "k8s-daemonset", "k8s-daemonset"
+	}
+	if stats.sources["agentprov_ebpf"] > 0 {
+		return "local-vm-sensor", "local/VM sensor"
+	}
+	if stats.sources["record"] > 0 || stats.sources["record_file_diff"] > 0 {
+		return "local-record", "local-record"
+	}
+	return "evidence-import", "evidence import"
+}
+
+func substrateNodeLabel(profile string) string {
+	if profile == "k8s-daemonset" {
+		return "node sensor group"
+	}
+	if profile == "local-vm-sensor" {
+		return "host sensor"
+	}
+	return "producer"
+}
+
+func workloadSubtype(profile string) string {
+	if profile == "k8s-daemonset" {
+		return "pod_group"
+	}
+	return "process_group"
+}
+
+func substrateWorkloadLabel(profile string, containers int, pods []substratePod) string {
+	if profile == "k8s-daemonset" {
+		if len(pods) == 1 {
+			return "pod " + podDisplayName(pods[0])
+		}
+		if len(pods) > 1 {
+			return fmt.Sprintf("pod group: %d pods", len(pods))
+		}
+		if containers > 0 {
+			return fmt.Sprintf("pod/container group: %d containers", containers)
+		}
+		return "pod/container group: metadata pending"
+	}
+	return "local process workload"
+}
+
+func substrateScopeLabel(scope string) string {
+	switch scope {
+	case "k8s_cgroup":
+		return "passive cgroup attribution"
+	case "record":
+		return "record cgroup leaf"
+	case "ai_asserted":
+		return "app asserted scope"
+	case "unbound":
+		return "no explicit scope"
+	default:
+		return scope
+	}
+}
+
+func substrateScopeConfidence(scope string) float64 {
+	switch scope {
+	case "record":
+		return 1.0
+	case "k8s_cgroup":
+		return 0.8
+	case "ai_asserted":
+		return 0.5
+	default:
+		return 0
+	}
+}
+
+func topStringKey(values map[string]int) string {
+	best := ""
+	bestN := -1
+	for _, key := range sortedStringKeys(values) {
+		if values[key] > bestN {
+			best, bestN = key, values[key]
+		}
+	}
+	return best
+}
+
+func summarizeStringCounts(values map[string]int, limit int) []string {
+	keys := sortedStringKeys(values)
+	if limit > 0 && len(keys) > limit {
+		keys = keys[:limit]
+	}
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, fmt.Sprintf("%s:%d", key, values[key]))
 	}
 	return out
 }

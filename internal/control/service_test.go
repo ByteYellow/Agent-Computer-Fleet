@@ -31,7 +31,7 @@ func (fakeDriver) Capabilities() runtimeplane.Capabilities {
 		ResumeLatencyClass: "cold",
 		IsolationLevel:     "container",
 		QuotaSupport:       "cgroup",
-		NetworkPolicy:      "proxy",
+		NetworkPolicy:      "observed",
 		TelemetryBinding:   []string{"label"},
 	}
 }

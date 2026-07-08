@@ -95,9 +95,9 @@ func TestInjectRefusesExistingSettings(t *testing.T) {
 
 func TestShQuote(t *testing.T) {
 	cases := map[string]string{
-		"/opt/agentprov":            `'/opt/agentprov'`,
-		"/Users/me/Sandbox Fleet/x": `'/Users/me/Sandbox Fleet/x'`,
-		"it's":                      `'it'\''s'`,
+		"/opt/agentprov":               `'/opt/agentprov'`,
+		"/Users/me/Agent Provenance/x": `'/Users/me/Agent Provenance/x'`,
+		"it's":                         `'it'\''s'`,
 	}
 	for in, want := range cases {
 		if got := shQuote(in); got != want {

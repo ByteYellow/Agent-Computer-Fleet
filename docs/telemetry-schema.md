@@ -8,7 +8,7 @@ can be ingested without pretending the kernel knows agent-level identifiers.
 
 | Layer | Examples | Source |
 | --- | --- | --- |
-| Application context | `run_id`, `rollout_id`, `attempt_id`, `session_id`, `tool_call_id`, `process_id`, `snapshot_id` | AgentProvenance control plane or white-box tool router |
+| Application context | `run_id`, `trajectory_id`, `execution_scope_id`, `substrate_scope_id`, `tool_call_id`, `process_id`, `artifact_state_id` | AgentProvenance control plane or white-box tool router |
 | Runtime identity | `raw_event_id`, `container_id`, `cgroup_id`, `pid`, `tgid`, `ppid`, `timestamp` | Runtime or telemetry substrate |
 | Raw payload | syscall arguments, path, destination address, argv, event-specific fields | Runtime or telemetry substrate |
 | Correlation result | `correlation.method`, `correlation.confidence`, `correlation.binding_id` | AgentProvenance correlator |
@@ -23,17 +23,23 @@ The raw payload must not contain application context or correlation result
 fields:
 
 - `run_id`
-- `rollout_id`
-- `attempt_id`
-- `session_id`
+- `trajectory_id`
+- `execution_scope_id`
+- `substrate_scope_id`
 - `tool_call_id`
 - `process_id`
-- `snapshot_id`
+- `artifact_state_id`
 - `correlation`
 
 Those fields belong to structured ingest parameters or to the correlator output.
 This keeps zero-SDK and eBPF-style events honest: raw runtime telemetry can be
-linked to a ToolCallScope, but it is not required to carry a ToolCallID.
+linked to an execution scope, but it is not required to carry a ToolCallID.
+
+Storage compatibility note: older bundle schemas and SQLite tables still use
+`rollout_id`, `attempt_id`, `session_id`, and `snapshot_id`. They map to
+`trajectory_id`, `execution_scope_id`, `substrate_scope_id`, and
+`artifact_state_id` at API and documentation boundaries; raw telemetry should
+prefer the new terms.
 
 `graph verify` also validates stored telemetry-source events after unwrapping
 AgentProvenance correlation metadata. This catches malformed data loaded

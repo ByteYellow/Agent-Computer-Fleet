@@ -29,9 +29,12 @@ func effectCmd(dataDir *string) *cobra.Command {
 		},
 	}
 	record.Flags().StringVar(&input.RunID, "run", "", "run id")
-	record.Flags().StringVar(&input.RolloutID, "rollout", "", "rollout id")
-	record.Flags().StringVar(&input.AttemptID, "attempt", "", "attempt id")
-	record.Flags().StringVar(&input.SessionID, "session", "", "session id")
+	record.Flags().StringVar(&input.RolloutID, "trajectory", "", "trajectory id")
+	record.Flags().StringVar(&input.RolloutID, "rollout", "", "legacy alias for --trajectory")
+	record.Flags().StringVar(&input.AttemptID, "execution-scope", "", "execution scope id")
+	record.Flags().StringVar(&input.AttemptID, "attempt", "", "legacy alias for --execution-scope")
+	record.Flags().StringVar(&input.SessionID, "substrate-scope", "", "substrate scope id")
+	record.Flags().StringVar(&input.SessionID, "session", "", "legacy alias for --substrate-scope")
 	record.Flags().StringVar(&input.ToolCallID, "tool-call", "", "tool call id")
 	record.Flags().StringVar(&input.ProcessID, "process", "", "process id")
 	record.Flags().StringVar(&input.EffectType, "type", "", "external effect type, for example api_call, db_write, message_send")
@@ -40,6 +43,9 @@ func effectCmd(dataDir *string) *cobra.Command {
 	record.Flags().StringVar(&input.Decision, "decision", "audit", "allow, deny, or audit")
 	record.Flags().StringVar(&input.CompensationRef, "compensation", "", "optional compensation hook or ticket reference")
 	record.Flags().StringVar(&input.Payload, "payload", "{}", "redacted structured payload")
+	_ = record.Flags().MarkHidden("rollout")
+	_ = record.Flags().MarkHidden("attempt")
+	_ = record.Flags().MarkHidden("session")
 
 	var filter effects.Filter
 	list := &cobra.Command{
@@ -52,7 +58,7 @@ func effectCmd(dataDir *string) *cobra.Command {
 			}
 			defer cleanup()
 			if filter.RunID == "" && filter.AttemptID == "" && filter.ToolCallID == "" {
-				return fmt.Errorf("one of --run, --attempt, or --tool-call is required")
+				return fmt.Errorf("one of --run, --execution-scope/--attempt, or --tool-call is required")
 			}
 			records, err := effects.List(db, filter)
 			if err != nil {
@@ -63,8 +69,10 @@ func effectCmd(dataDir *string) *cobra.Command {
 		},
 	}
 	list.Flags().StringVar(&filter.RunID, "run", "", "run id")
-	list.Flags().StringVar(&filter.AttemptID, "attempt", "", "attempt id")
+	list.Flags().StringVar(&filter.AttemptID, "execution-scope", "", "execution scope id")
+	list.Flags().StringVar(&filter.AttemptID, "attempt", "", "legacy alias for --execution-scope")
 	list.Flags().StringVar(&filter.ToolCallID, "tool-call", "", "tool call id")
+	_ = list.Flags().MarkHidden("attempt")
 
 	cmd := &cobra.Command{Use: "effect", Short: "external effect provenance records"}
 	cmd.AddCommand(record)

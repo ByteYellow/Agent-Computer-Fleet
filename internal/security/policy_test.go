@@ -41,6 +41,23 @@ func TestEvaluateLoopbackDoesNotDenyAsPrivateCIDR(t *testing.T) {
 	}
 }
 
+func TestRuleMatchesEitherPathOrArgsWhenBothSet(t *testing.T) {
+	r := Rule{Match: RuleMatch{PathContains: []string{"id_rsa"}, ArgsContains: []string{"curl"}}}
+	// args matches, path does not: must still match (regression - PathContains
+	// used to short-circuit to false before ArgsContains was consulted).
+	if !r.Matches(Event{Path: "/tmp/harmless.txt", Args: []string{"curl", "https://x"}}) {
+		t.Error("path+args rule should match on args when path does not")
+	}
+	// path matches, args does not: match.
+	if !r.Matches(Event{Path: "/home/u/.ssh/id_rsa"}) {
+		t.Error("path+args rule should match on path")
+	}
+	// neither matches: no match.
+	if r.Matches(Event{Path: "/tmp/x", Args: []string{"ls"}}) {
+		t.Error("path+args rule should not match when neither matches")
+	}
+}
+
 func TestEvaluateSecretPathKills(t *testing.T) {
 	decision := DefaultEngine().Evaluate(Event{
 		EventType: "file_open",
@@ -171,7 +188,7 @@ func TestEvaluateJSONLWithStatePersistsAndQuarantines(t *testing.T) {
 	insertPolicySession(t, db)
 
 	eventsPath := filepath.Join(root, "events.jsonl")
-	if err := os.WriteFile(eventsPath, []byte(`{"source":"egress_proxy","event_type":"network_connect","run_id":"run-test","session_id":"sbx-test","dst_ip":"169.254.169.254"}`+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(eventsPath, []byte(`{"source":"telemetry_fixture","event_type":"network_connect","run_id":"run-test","session_id":"sbx-test","dst_ip":"169.254.169.254"}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := EvaluateJSONLWithState(db, eventsPath, os.Stdout); err != nil {
@@ -309,7 +326,7 @@ func TestPolicyViolationEmitsUnifiedSignal(t *testing.T) {
 	insertPolicySession(t, db)
 
 	eventsPath := filepath.Join(root, "events.jsonl")
-	if err := os.WriteFile(eventsPath, []byte(`{"source":"egress_proxy","event_type":"network_connect","run_id":"run-test","session_id":"sbx-test","process_id":"proc-1","dst_ip":"169.254.169.254"}`+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(eventsPath, []byte(`{"source":"telemetry_fixture","event_type":"network_connect","run_id":"run-test","session_id":"sbx-test","process_id":"proc-1","dst_ip":"169.254.169.254"}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := EvaluateJSONLWithState(db, eventsPath, os.Stdout); err != nil {
@@ -376,7 +393,7 @@ func TestPolicyWritebackFailureIsObservable(t *testing.T) {
 	}
 
 	eventsPath := filepath.Join(root, "events.jsonl")
-	if err := os.WriteFile(eventsPath, []byte(`{"source":"egress_proxy","event_type":"network_connect","run_id":"run-test","session_id":"sbx-test","process_id":"proc-1","dst_ip":"169.254.169.254"}`+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(eventsPath, []byte(`{"source":"telemetry_fixture","event_type":"network_connect","run_id":"run-test","session_id":"sbx-test","process_id":"proc-1","dst_ip":"169.254.169.254"}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := EvaluateJSONLWithState(db, eventsPath, os.Stdout); err != nil {

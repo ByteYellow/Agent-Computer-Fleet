@@ -95,8 +95,8 @@ func TestReplayRunIncludesCommandArtifactAndExternalEffect(t *testing.T) {
 	got := out.String()
 	for _, want := range []string{
 		"replay_run=run-1 mode=plan_only",
-		"rollout=rollout-1",
-		"attempt=attempt-1",
+		"trajectory=rollout-1",
+		"execution_scope=attempt-1",
 		"command=\"pytest -q\"",
 		"artifact=" + artifact,
 		"external_effect=",

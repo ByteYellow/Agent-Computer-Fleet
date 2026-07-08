@@ -120,16 +120,18 @@ func TestChunkedSSEStreamingResponse(t *testing.T) {
 	}
 }
 
-func TestH2PrefaceDetectedNotParsed(t *testing.T) {
+func TestH2IncompleteFrameYieldsNothing(t *testing.T) {
 	r := NewReassembler()
+	// preface + a frame header claiming 18 payload bytes with only a few present:
+	// h2 is parsed (not mis-read as HTTP/1.1), and an incomplete frame emits
+	// nothing rather than a raw dump. Full h2 parsing is covered in http2_test.go.
 	full := "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x12\x04\x00binaryframes"
 	msgs := feed(r, 1, 4, Request, full, 6)
 	if len(msgs) != 0 {
-		t.Fatalf("h2 should not parse as HTTP/1.1, got %d messages", len(msgs))
+		t.Fatalf("incomplete h2 frame should emit nothing, got %d", len(msgs))
 	}
-	flushed := r.Flush(1, 4)
-	if len(flushed) != 1 || flushed[0].Protocol != ProtoH2 {
-		t.Fatalf("flush should yield 1 h2 raw message, got %+v", flushed)
+	if flushed := r.Flush(1, 4); len(flushed) != 0 {
+		t.Fatalf("no complete h2 headers -> flush should emit nothing, got %+v", flushed)
 	}
 }
 

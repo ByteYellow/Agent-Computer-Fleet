@@ -158,7 +158,7 @@ func apiCmd(dataDir *string) *cobra.Command {
 	call.Flags().BoolVar(&callStream, "stream", false, "stream command output")
 	_ = call.MarkFlagRequired("command")
 
-	cmd := &cobra.Command{Use: "api", Short: "structured sandbox API commands"}
+	cmd := &cobra.Command{Use: "api", Short: "hidden compatibility API commands", Hidden: true}
 	cmd.AddCommand(fileRead)
 	cmd.AddCommand(fileWrite)
 	cmd.AddCommand(search)

@@ -1,0 +1,57 @@
+# AgentProvenance node sensor — k8s-daemonset Producer Profile.
+#
+# Collection model: NODE-AGENT (DaemonSet), not sidecar. One privileged sensor
+# per node observes EVERY pod on that node from the shared node kernel via eBPF
+# (tracepoints are kernel-wide), so workload pods are never modified and no
+# per-pod injection is needed. Pod attribution is by cgroup: the sensor derives
+# the container id from the kubepods cgroup, and `agentprov sandbox bind-cgroup`
+# ties a pod's cgroup to a run so its telemetry correlates and exports as a
+# verifiable bundle. (microVMs use the separate microvm-guest-init in-guest
+# profile, since a guest kernel is opaque to the node.)
+#
+# This is the deploy shape only; wiring the sensor's JSONL into a central
+# collector (POST /v1/telemetry/*) and enriching pod metadata via a K8s informer
+# are the remaining k8s-daemonset pieces (see docs/roadmap-v0.7.md).
+#
+# Prereqs: nodes must expose kernel BTF (/sys/kernel/btf/vmlinux) and tracefs.
+# The image must contain agentprov-sensor at /usr/local/bin/agentprov-sensor.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentprov
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: agentprov-sensor
+  namespace: agentprov
+  labels: { app: agentprov-sensor }
+spec:
+  selector:
+    matchLabels: { app: agentprov-sensor }
+  template:
+    metadata:
+      labels: { app: agentprov-sensor }
+    spec:
+      hostPID: true            # see host process ids for node-wide attribution
+      containers:
+        - name: sensor
+          image: agentprov-sensor:latest
+          command: ["/usr/local/bin/agentprov-sensor"]
+          securityContext:
+            privileged: true    # CAP_BPF/CAP_PERFMON + attach uprobes/tracepoints
+          volumeMounts:
+            - { name: btf, mountPath: /sys/kernel/btf, readOnly: true }
+            - { name: tracing, mountPath: /sys/kernel/tracing }
+            - { name: debug, mountPath: /sys/kernel/debug }
+            - { name: cgroup, mountPath: /sys/fs/cgroup, readOnly: true }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+      volumes:
+        - { name: btf, hostPath: { path: /sys/kernel/btf } }
+        - { name: tracing, hostPath: { path: /sys/kernel/tracing } }
+        - { name: debug, hostPath: { path: /sys/kernel/debug } }
+        - { name: cgroup, hostPath: { path: /sys/fs/cgroup } }
+      tolerations:
+        - { operator: Exists }  # run on every node, including control-plane

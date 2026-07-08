@@ -496,7 +496,14 @@ func recordRuntimeCausalityEdges(db *sql.DB, event IngestEvent, eventID, now str
 		insert(threadGroupNode, processNode, "runtime_process_thread")
 	}
 	if event.EventType == "file_write" || event.EventType == "file_open" {
-		if path := payloadPath(event.Payload); path != "" {
+		path := payloadPath(event.Payload)
+		if path == "" {
+			// Passive node-side capture (no workspace) writes absolute host paths,
+			// which payloadPath rejects; keep substantive ones as file nodes so the
+			// file lens works without a record workspace diff.
+			path = substantiveAbsFilePath(event.Payload)
+		}
+		if path != "" {
 			fileNode := "workspace_file/" + path
 			insert(eventNode, fileNode, "runtime_event_file")
 			if event.ProcessID != "" {
@@ -589,6 +596,27 @@ func recentScopedEvent(db *sql.DB, eventType, runID, processID, now string) stri
 	var id string
 	_ = db.QueryRow(query, args...).Scan(&id)
 	return id
+}
+
+// substantiveAbsFilePath returns the absolute file path from a raw file event's
+// payload when it is a real file worth a graph node, or "" for the pseudo-file
+// noise a passive sensor sees a lot of (/dev/null, /proc, /sys, sockets, pipes).
+// Relative paths return "" here — those are payloadPath's (workspace) job.
+func substantiveAbsFilePath(payload string) string {
+	var decoded any
+	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+		return ""
+	}
+	p := strings.TrimSpace(findPayloadPath(decoded))
+	if !strings.HasPrefix(p, "/") || p == "/dev/null" {
+		return ""
+	}
+	for _, pre := range []string{"/dev/", "/proc/", "/sys/", "/run/", "pipe:", "socket:", "anon_inode:"} {
+		if strings.HasPrefix(p, pre) {
+			return ""
+		}
+	}
+	return p
 }
 
 func payloadPath(payload string) string {

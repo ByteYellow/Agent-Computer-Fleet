@@ -13,7 +13,7 @@ import (
 func runtimeCmd(dataDir *string) *cobra.Command {
 	list := &cobra.Command{
 		Use:   "list",
-		Short: "list registered sandbox runtime backends",
+		Short: "list registered substrate drivers",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			paths := store.ResolvePaths(*dataDir)
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
@@ -31,7 +31,7 @@ func runtimeCmd(dataDir *string) *cobra.Command {
 	}
 	inspect := &cobra.Command{
 		Use:   "inspect <backend>",
-		Short: "inspect a sandbox runtime backend",
+		Short: "inspect a substrate driver",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			paths := store.ResolvePaths(*dataDir)
@@ -45,7 +45,7 @@ func runtimeCmd(dataDir *string) *cobra.Command {
 			return nil
 		},
 	}
-	cmd := &cobra.Command{Use: "runtime", Short: "runtime backend registry"}
+	cmd := &cobra.Command{Use: "runtime", Short: "substrate driver registry", Hidden: true}
 	cmd.AddCommand(list)
 	cmd.AddCommand(inspect)
 	return cmd

@@ -102,7 +102,7 @@ no syscall stream can express:
   (`agent_spawn`) and peer-message (`agent_message`) edges, per-agent tool
   calls, and refused intents from an orchestrating harness such as Claude Code.
 - **MCP context-write** (`bind_scope` / `record_tool_call` via `ai call` /
-  `ai mcp`): explicit `run_id / session_id / attempt_id / tool_call_id /
+  `ai mcp`): explicit `run_id / trajectory_id / execution_scope_id / tool_call_id /
   tool_name / args_hash` context, asserted by the application at tool-call
   time.
 
@@ -143,15 +143,12 @@ The repository layout follows the product boundary:
 ```text
 core path:
   record / telemetry / correlation / provenance / evidence / security /
-  baseline / forensics
+  signals / cost / baseline / forensics
 
 substrate path:
   substrate/runtime / substrate/node / substrate/state / control /
   computerapi / ports
 
-non-product paths:
-  stressdemo/*       branch-heavy fanout scenarios for load and DAG tests
-  experimental/*     resource, scheduler, node metadata, and warm-pool experiments
 ```
 
 This separation is intentional. Substrate code can be replaced by Docker,
@@ -166,7 +163,7 @@ The product has three deployment shapes:
 
 | Mode | Shape | Primary users |
 |---|---|---|
-| Library / CLI-only recorder | one Go binary, optional Python helper, local SQLite/object store | RL rollout, evaluator jobs, benchmarks, CI, red-team harnesses |
+| Library / CLI-only recorder | one Go binary, optional Python helper, local SQLite/object store | evaluator jobs, benchmarks, CI, RL pipelines, red-team harnesses |
 | Sidecar / local daemon | local daemon owns store, spool, correlation, graph query, risk, and forensics API | sandbox workers, CI workers, local security harnesses |
 | Central evidence service | shared ingest/query service, object storage, retention, auth, UI/API | enterprise security, audit, SRE, compliance, incident review |
 
@@ -197,7 +194,7 @@ system-side telemetry + application-side agent context
 The HIDS analogy is useful: AI agents in sandboxes still create host-like
 monitoring needs around process, file, network, resource, and policy activity.
 The difference is that AgentProvenance treats the agent context as first-class:
-run, session, attempt, tool call, task, snapshot, artifact, risk signal,
+run, trajectory, execution scope, tool call, task, base state, artifact, risk signal,
 baseline deviation, response action, and quarantine state.
 
 OpenTelemetry and LLM tracing tools remain useful inputs or exports. They are
@@ -208,7 +205,7 @@ manifests.
 ## What The Graph Must Answer
 
 - What produced this artifact?
-- Which snapshot did this attempt start from?
+- Which base state did this execution scope start from?
 - Which tool call started this process?
 - Which child process produced this runtime event?
 - What is the time-ordered execution story across tool calls, processes,
@@ -246,10 +243,10 @@ The finished system should make a sandboxed agent execution feel like Git for
 runtime state and evidence:
 
 ```text
-branch: attempt
+scope: execution scope
 commit-like object: content-addressed evidence object
 diff: file state delta from base
-blame: state attribution to attempt/tool/process
+blame: state attribution to execution scope/tool/process
 tag: candidate/promoted/quarantined/tainted
 log: execution history
 replay: reconstruction plan and audit manifest

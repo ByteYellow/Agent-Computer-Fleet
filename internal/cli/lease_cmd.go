@@ -40,7 +40,7 @@ func leaseCmd(dataDir, daemonURL *string) *cobra.Command {
 	}
 	create.Flags().StringVar(&taskPath, "task", "", "task yaml path")
 	_ = create.MarkFlagRequired("task")
-	cmd := &cobra.Command{Use: "lease", Short: "lease operations"}
+	cmd := &cobra.Command{Use: "lease", Short: "hidden substrate lease plumbing", Hidden: true}
 	cmd.AddCommand(create)
 	return cmd
 }

@@ -95,7 +95,7 @@ func processCmd(dataDir *string) *cobra.Command {
 			return nil
 		},
 	}
-	cmd := &cobra.Command{Use: "process", Short: "process operations"}
+	cmd := &cobra.Command{Use: "process", Short: "process operations", Hidden: true}
 	cmd.AddCommand(list)
 	cmd.AddCommand(inspect)
 	cmd.AddCommand(interrupt)

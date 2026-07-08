@@ -37,6 +37,7 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(templateCmd(&dataDir))
 	root.AddCommand(apiCmd(&dataDir))
 	root.AddCommand(recordCmd(&dataDir))
+	root.AddCommand(sandboxCmd(&dataDir))
 	root.AddCommand(sensorCmd(&dataDir))
 	root.AddCommand(observeCmd(&dataDir, &daemonURL))
 	root.AddCommand(telemetryCmd(&dataDir, &daemonURL))
@@ -54,16 +55,10 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(complianceCmd(&dataDir))
 	root.AddCommand(gcCmd(&dataDir))
 	root.AddCommand(baselineCmd(&dataDir))
-	root.AddCommand(poolCmd(&dataDir))
-	root.AddCommand(egressCmd(&dataDir))
-	root.AddCommand(credentialCmd(&dataDir))
-	root.AddCommand(nodeCmd(&dataDir))
-	root.AddCommand(schedulerCmd(&dataDir, &daemonURL))
 	root.AddCommand(snapshotCmd(&dataDir, &daemonURL))
 	root.AddCommand(forkCmd(&dataDir))
 	root.AddCommand(policyCmd(&dataDir))
 	root.AddCommand(costCmd(&dataDir))
-	root.AddCommand(benchCmd())
 	return root
 }
 

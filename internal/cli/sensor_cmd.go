@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/byteyellow/agentprovenance/internal/daemon"
+	"github.com/byteyellow/agentprovenance/internal/producer"
 	"github.com/byteyellow/agentprovenance/internal/sensor"
 	"github.com/byteyellow/agentprovenance/internal/store"
 	"github.com/byteyellow/agentprovenance/internal/telemetry"
@@ -58,7 +59,7 @@ func sensorStreamCmd(dataDir *string) *cobra.Command {
 			if abs, err := filepath.Abs(*dataDir); err == nil {
 				ingOpts.ExcludePathPrefixes = []string{abs}
 			}
-			if own := ownCgroupID(); own != "" {
+			if own := producer.SelfCgroupID(); own != "" {
 				ingOpts.ExcludeCgroupIDs = []string{own}
 			}
 

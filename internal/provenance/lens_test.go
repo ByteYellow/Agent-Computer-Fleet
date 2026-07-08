@@ -344,24 +344,28 @@ func TestGraphLensSubstrateDrawsCrossPodInfluence(t *testing.T) {
 	}
 }
 
-func TestGraphLensFileArtifactMaterializesRawFileWrites(t *testing.T) {
+func TestGraphLensFileArtifactRendersAbsolutePathFileNode(t *testing.T) {
 	db := newLensTestDB(t)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	insertLensFixture(t, db, now)
-	// A passive node-side capture has no record workspace diff; the file lens must
-	// still surface a real file_write path, and filter pseudo-file noise.
+	// A passive node-side capture has no record workspace diff; ingest instead
+	// links a file_write to an absolute-path workspace_file node (see the telemetry
+	// service test). The file lens must surface it as a categorized file node.
 	insertLensEvent(t, db, "evt-realfile", "file_write", `{"path":"/work/workspace/harvested_creds.bin"}`, addSeconds(t, now, 2))
-	insertLensEvent(t, db, "evt-devnull", "file_write", `{"path":"/dev/null"}`, addSeconds(t, now, 3))
+	if _, err := db.Exec(`INSERT INTO graph_edges (id, run_id, from_id, to_id, edge_type, source_event_id, created_at)
+		VALUES ('edge-harvest', 'run-lens', 'runtime_event/evt-realfile', 'workspace_file//work/workspace/harvested_creds.bin', 'runtime_event_file', 'evt-realfile', ?)`, addSeconds(t, now, 2)); err != nil {
+		t.Fatal(err)
+	}
 
 	manifest, err := BuildGraphLens(db, GraphLensOptions{RunID: "run-lens", Lens: "file-artifact", Limit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !lensHasNode(manifest, "file_group/other", "file_group") {
-		t.Fatalf("file_group/other missing: raw file_write not materialized: %+v", manifest.Nodes)
+		t.Fatalf("file_group/other missing: absolute-path file node not surfaced: %+v", manifest.Nodes)
 	}
 	if got := lensNodeDataInt(manifest, "file_group/other", "count"); got != 1 {
-		t.Fatalf("file_group other count=%d, want 1 (/dev/null must be filtered): %+v", got, manifest.Nodes)
+		t.Fatalf("file_group other count=%d, want 1: %+v", got, manifest.Nodes)
 	}
 }
 

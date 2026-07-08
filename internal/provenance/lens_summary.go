@@ -17,7 +17,7 @@ func summaryLensEdges(runID, lens, focus, detail string, nodes map[string]GraphL
 	case "process":
 		return buildProcessGroupEdges(nodes, events), true
 	case "file-artifact":
-		return buildFileGroupEdges(runID, nodes, events, edges), true
+		return buildFileGroupEdges(runID, nodes, edges), true
 	case "security":
 		return buildSecurityRuleEdges(runID, nodes, events), true
 	case "network-egress":
@@ -508,22 +508,20 @@ func buildProcessGroupEdges(nodes map[string]GraphLensNode, events map[string]le
 	return out
 }
 
-func buildFileGroupEdges(runID string, nodes map[string]GraphLensNode, events map[string]lensEvent, edges []GraphLensEdge) []GraphLensEdge {
+func buildFileGroupEdges(runID string, nodes map[string]GraphLensNode, edges []GraphLensEdge) []GraphLensEdge {
 	rootID := "run/" + runID
 	nodes[rootID] = GraphLensNode{ID: rootID, Kind: "run", Label: runID, Data: map[string]any{"run_id": runID}}
 	filesByCategory := map[string]map[string]bool{}
-	addPath := func(path string) {
+	addFile := func(id string) {
+		if !strings.HasPrefix(id, "workspace_file/") {
+			return
+		}
+		path := strings.TrimPrefix(id, "workspace_file/")
 		category := filePathCategory(path)
 		if filesByCategory[category] == nil {
 			filesByCategory[category] = map[string]bool{}
 		}
 		filesByCategory[category][path] = true
-	}
-	addFile := func(id string) {
-		if !strings.HasPrefix(id, "workspace_file/") {
-			return
-		}
-		addPath(strings.TrimPrefix(id, "workspace_file/"))
 	}
 	for id, node := range nodes {
 		if node.Kind != "file" {
@@ -534,18 +532,6 @@ func buildFileGroupEdges(runID string, nodes map[string]GraphLensNode, events ma
 	for _, edge := range edges {
 		for _, id := range []string{edge.FromID, edge.ToID} {
 			addFile(id)
-		}
-	}
-	// Passive node-side capture has no `record` workspace diff, so file writes
-	// arrive only as raw file_write/openat events. Materialize their real paths
-	// here so file activity is visible without a record wrap (record still
-	// contributes workspace_file/ nodes above; the two sources merge).
-	for _, ev := range lensEventsInOrder(events) {
-		if ev.Type != "file_write" && ev.Type != "file_open" {
-			continue
-		}
-		if path := ev.Path; substantiveFilePath(path) {
-			addPath(path)
 		}
 	}
 	keys := []string{"source", "build_artifact", "dependency_cache", "secret_or_config", "other"}

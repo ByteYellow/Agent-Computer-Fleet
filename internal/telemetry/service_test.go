@@ -214,6 +214,49 @@ func TestIngestFilteredAcceptsFileRuntimeEvents(t *testing.T) {
 	}
 }
 
+func TestIngestFilteredLinksAbsolutePathFileWrites(t *testing.T) {
+	root := t.TempDir()
+	paths, err := store.Init(filepath.Join(root, ".agentprov"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Passive node-side capture: absolute host path -> file node (with slash kept).
+	if _, err := IngestFiltered(db, IngestEvent{
+		RunID: "run-1", EventType: "file_write", Source: "agentprov_ebpf",
+		Payload: `{"path":"/work/workspace/harvested_creds.bin","mode":"write"}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Pseudo-file noise must NOT create a file node.
+	if _, err := IngestFiltered(db, IngestEvent{
+		RunID: "run-1", EventType: "file_write", Source: "agentprov_ebpf",
+		Payload: `{"path":"/dev/null","mode":"write"}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var real int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM graph_edges WHERE edge_type = 'runtime_event_file' AND to_id = 'workspace_file//work/workspace/harvested_creds.bin'`).Scan(&real); err != nil {
+		t.Fatal(err)
+	}
+	if real != 1 {
+		t.Fatalf("absolute-path file edge=%d, want 1", real)
+	}
+	var noise int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM graph_edges WHERE edge_type = 'runtime_event_file' AND to_id LIKE '%dev/null%'`).Scan(&noise); err != nil {
+		t.Fatal(err)
+	}
+	if noise != 0 {
+		t.Fatalf("/dev/null must not create a file node, got %d edges", noise)
+	}
+}
+
 func TestIngestFilteredRejectsContextInRawPayload(t *testing.T) {
 	root := t.TempDir()
 	paths, err := store.Init(filepath.Join(root, ".agentprov"))

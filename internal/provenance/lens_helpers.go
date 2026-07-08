@@ -217,26 +217,6 @@ func sumIntMap(values map[string]int) int {
 	return total
 }
 
-// substantiveFilePath reports whether a raw file event's path is a real file
-// worth showing in the file lens, filtering the kernel/pseudo noise that a
-// passive sensor sees a lot of (/dev/null redirects, /proc, /sys, sockets,
-// pipes, anon inodes, and bare non-path names).
-func substantiveFilePath(path string) bool {
-	p := strings.TrimSpace(path)
-	if p == "" || !strings.Contains(p, "/") {
-		return false
-	}
-	if p == "/dev/null" {
-		return false
-	}
-	for _, pre := range []string{"/dev/", "/proc/", "/sys/", "/run/", "pipe:", "socket:", "anon_inode:", "/tmp/tmp"} {
-		if strings.HasPrefix(p, pre) {
-			return false
-		}
-	}
-	return true
-}
-
 func filePathCategory(path string) string {
 	p := strings.ToLower(path)
 	switch {

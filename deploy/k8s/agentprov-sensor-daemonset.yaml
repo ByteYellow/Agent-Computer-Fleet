@@ -1,11 +1,13 @@
 # AgentProvenance node sensor — k8s-daemonset Producer Profile.
 #
-# Runs the eBPF sensor on every node. It shares the node kernel, so it observes
-# every pod's syscalls (system telemetry) and, where a pod's TLS stack is
-# resolvable, its LLM request/response (model intent). Pod attribution is by
-# cgroup: the sensor derives container id from the kubepods cgroup, and
-# `agentprov sandbox bind-cgroup` ties a pod's cgroup to a run so its telemetry
-# correlates and exports as a verifiable bundle.
+# Collection model: NODE-AGENT (DaemonSet), not sidecar. One privileged sensor
+# per node observes EVERY pod on that node from the shared node kernel via eBPF
+# (tracepoints are kernel-wide), so workload pods are never modified and no
+# per-pod injection is needed. Pod attribution is by cgroup: the sensor derives
+# the container id from the kubepods cgroup, and `agentprov sandbox bind-cgroup`
+# ties a pod's cgroup to a run so its telemetry correlates and exports as a
+# verifiable bundle. (microVMs use the separate microvm-guest-init in-guest
+# profile, since a guest kernel is opaque to the node.)
 #
 # This is the deploy shape only; wiring the sensor's JSONL into a central
 # collector (POST /v1/telemetry/*) and enriching pod metadata via a K8s informer
@@ -13,6 +15,11 @@
 #
 # Prereqs: nodes must expose kernel BTF (/sys/kernel/btf/vmlinux) and tracefs.
 # The image must contain agentprov-sensor at /usr/local/bin/agentprov-sensor.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentprov
+---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -185,7 +186,7 @@ func sandboxCmd(dataDir *string) *cobra.Command {
 	// correlates to a run. Then `telemetry ingest-jsonl --run <id>` + `forensics
 	// export` + `graph verify` produce a verifiable bundle for an externally-
 	// scheduled pod (no `record` wrap).
-	var bcRun, bcCgroup, bcSession, bcStarted string
+	var bcRun, bcCgroup, bcSession, bcStarted, bcPodName, bcNamespace, bcLabels string
 	bindCgroup := &cobra.Command{
 		Use:   "bind-cgroup",
 		Short: "bind a pod's cgroup to a run scope for node-observed telemetry (k8s-daemonset)",
@@ -206,6 +207,22 @@ func sandboxCmd(dataDir *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Optional pod metadata enrichment (lightweight alternative to a
+			// client-go informer): record what the caller resolved from the K8s
+			// API as a pod_metadata context event on the run. source=k8s and no
+			// correlation_method, so it is not treated as runtime telemetry by verify.
+			if bcPodName != "" || bcNamespace != "" || bcLabels != "" {
+				payload, _ := json.Marshal(map[string]any{
+					"pod_name": bcPodName, "namespace": bcNamespace, "labels": bcLabels,
+					"cgroup_id": bcCgroup, "pod_uid": bcSession,
+				})
+				now := time.Now().UTC().Format(time.RFC3339Nano)
+				if _, eerr := db.Exec(`INSERT INTO events (id, run_id, session_id, tool_call_id, process_id, source, event_type, payload, created_at)
+					VALUES (?, ?, ?, '', '', 'k8s', 'pod_metadata', ?, ?)`,
+					ids.New("evt"), bcRun, bcSession, string(payload), now); eerr != nil {
+					fmt.Fprintf(c.ErrOrStderr(), "sandbox: pod metadata event: %v\n", eerr)
+				}
+			}
 			fmt.Fprintf(c.OutOrStdout(), "bound cgroup=%s run=%s session=%s binding=%s source=k8s_cgroup confidence=0.8\n", bcCgroup, bcRun, bcSession, id)
 			return nil
 		},
@@ -214,6 +231,9 @@ func sandboxCmd(dataDir *string) *cobra.Command {
 	bindCgroup.Flags().StringVar(&bcCgroup, "cgroup-id", "", "the pod's cgroup id as the sensor stamps it (kernel cgroup inode)")
 	bindCgroup.Flags().StringVar(&bcSession, "session", "", "session id (e.g. the pod UID)")
 	bindCgroup.Flags().StringVar(&bcStarted, "started-at", "", "binding window start (RFC3339); empty = now")
+	bindCgroup.Flags().StringVar(&bcPodName, "pod-name", "", "pod name for metadata enrichment (from kubectl)")
+	bindCgroup.Flags().StringVar(&bcNamespace, "namespace", "", "pod namespace for metadata enrichment")
+	bindCgroup.Flags().StringVar(&bcLabels, "labels", "", "pod labels (free-form; e.g. app=x,team=y) for metadata enrichment")
 	cmd.AddCommand(bindCgroup)
 
 	run.Flags().SetInterspersed(false)

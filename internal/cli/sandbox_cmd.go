@@ -180,6 +180,42 @@ func sandboxCmd(dataDir *string) *cobra.Command {
 			return nil
 		},
 	}
+	// bind-cgroup: register a passive k8s_cgroup scope binding for a pod's cgroup
+	// observed from the node, so the node sensor's telemetry for that pod
+	// correlates to a run. Then `telemetry ingest-jsonl --run <id>` + `forensics
+	// export` + `graph verify` produce a verifiable bundle for an externally-
+	// scheduled pod (no `record` wrap).
+	var bcRun, bcCgroup, bcSession, bcStarted string
+	bindCgroup := &cobra.Command{
+		Use:   "bind-cgroup",
+		Short: "bind a pod's cgroup to a run scope for node-observed telemetry (k8s-daemonset)",
+		RunE: func(c *cobra.Command, _ []string) error {
+			if bcRun == "" || bcCgroup == "" {
+				return fmt.Errorf("--run and --cgroup-id are required")
+			}
+			paths, err := store.Init(*dataDir)
+			if err != nil {
+				return err
+			}
+			db, err := store.Open(paths)
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+			id, err := producer.BindCgroupScope(db, bcCgroup, producer.RunScope{RunID: bcRun, SessionID: bcSession, StartedAt: bcStarted})
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(c.OutOrStdout(), "bound cgroup=%s run=%s session=%s binding=%s source=k8s_cgroup confidence=0.8\n", bcCgroup, bcRun, bcSession, id)
+			return nil
+		},
+	}
+	bindCgroup.Flags().StringVar(&bcRun, "run", "", "run id to attribute the pod's telemetry to")
+	bindCgroup.Flags().StringVar(&bcCgroup, "cgroup-id", "", "the pod's cgroup id as the sensor stamps it (kernel cgroup inode)")
+	bindCgroup.Flags().StringVar(&bcSession, "session", "", "session id (e.g. the pod UID)")
+	bindCgroup.Flags().StringVar(&bcStarted, "started-at", "", "binding window start (RFC3339); empty = now")
+	cmd.AddCommand(bindCgroup)
+
 	run.Flags().SetInterspersed(false)
 	run.Flags().StringVar(&out, "out", "", "directory to copy the exported bundle into (mounted volume for teardown durability)")
 	run.Flags().StringVar(&runID, "run", "", "run id (default generated)")

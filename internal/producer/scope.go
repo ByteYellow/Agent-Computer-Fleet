@@ -111,6 +111,13 @@ func recordCgroupScopeBinding(db *sql.DB, cgroupID string, scope RunScope) (stri
 	})
 }
 
+// BindCgroupScope records a passive k8s_cgroup binding for an explicit cgroup id
+// (e.g. a pod's cgroup observed from the node, not the caller's own). Used by the
+// node/DaemonSet path where the sensor watches externally-scheduled pods.
+func BindCgroupScope(db *sql.DB, cgroupID string, scope RunScope) (string, error) {
+	return recordCgroupScopeBinding(db, cgroupID, scope)
+}
+
 // BindSelfCgroup resolves this sandbox's own cgroup and, when available, records
 // a passive k8s_cgroup scope binding so kernel telemetry from the sandbox
 // correlates to the run even when record could not establish a kernel-verified

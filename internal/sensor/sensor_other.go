@@ -15,6 +15,7 @@ import (
 type Options struct {
 	SSLLib   string
 	GoTLSBin string
+	LibcLib  string
 	OnReady  func()
 }
 

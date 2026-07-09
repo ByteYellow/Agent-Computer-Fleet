@@ -99,6 +99,11 @@ func (s Server) egress(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 	out := []map[string]any{}
+	// A getaddrinfo(hostname) immediately precedes the connect(resolved-IP) in the
+	// same process, so the most recent dns_query hostname per comm resolves the IP
+	// egress that follows it — giving egress a NAME, not just an IP, node-side.
+	lastHost := map[string]string{}
+	lastHostAny := ""
 	for rows.Next() {
 		var et, payload, created string
 		if err := rows.Scan(&et, &payload, &created); err != nil {
@@ -106,13 +111,26 @@ func (s Server) egress(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		raw := rawBody(payload)
+		comm := firstStr(raw, "comm")
+		if et == "dns_query" {
+			if h := firstStr(raw, "host"); h != "" {
+				lastHost[comm] = h
+				lastHostAny = h
+			}
+			continue // the resolution, not an egress row
+		}
+		domain := lastHost[comm]
+		if domain == "" {
+			domain = lastHostAny
+		}
 		out = append(out, map[string]any{
-			"type": et,
-			"dst":  firstStr(raw, "host", "dst_ip", "dst"),
-			"port": firstStr(raw, "port", "dst_port"),
-			"comm": firstStr(raw, "comm"),
-			"risk": et == "metadata_ip" || et == "private_cidr",
-			"time": created,
+			"type":   et,
+			"dst":    firstStr(raw, "host", "dst_ip", "dst"),
+			"domain": domain,
+			"port":   firstStr(raw, "port", "dst_port"),
+			"comm":   comm,
+			"risk":   et == "metadata_ip" || et == "private_cidr",
+			"time":   created,
 		})
 	}
 	writeJSON(w, out)

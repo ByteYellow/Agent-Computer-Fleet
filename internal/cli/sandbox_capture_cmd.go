@@ -246,6 +246,20 @@ func runSensorWindow(sensorBin, out, sslLib string, pid, seconds int, stderr io.
 	if sslLib != "" {
 		proc.Env = append(proc.Env, "AGENTPROV_SSL_LIB="+sslLib)
 	}
+	if pid > 0 {
+		// Point the getaddrinfo DNS uprobe at the pod's own libc so egress gets
+		// resolved by NAME (not just IP) node-side, mirroring the libssl trick.
+		for _, cand := range []string{
+			fmt.Sprintf("/proc/%d/root/usr/lib/aarch64-linux-gnu/libc.so.6", pid),
+			fmt.Sprintf("/proc/%d/root/usr/lib/x86_64-linux-gnu/libc.so.6", pid),
+			fmt.Sprintf("/proc/%d/root/lib/aarch64-linux-gnu/libc.so.6", pid),
+		} {
+			if _, e := os.Stat(cand); e == nil {
+				proc.Env = append(proc.Env, "AGENTPROV_LIBC_LIB="+cand)
+				break
+			}
+		}
+	}
 	if err := proc.Start(); err != nil {
 		return err
 	}

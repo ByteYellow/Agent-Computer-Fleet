@@ -109,12 +109,28 @@ func AdaptKimiSession(sessionDir string) (io.Reader, error) {
 		}
 	}
 	for _, s := range subs {
-		out = append(out, normalizedEvent{Event: "SubagentStart", AgentID: s, AgentType: kimiAgentType(filepath.Join(agentsDir, s, "wire.jsonl"))})
-		if err := appendAgent(s); err != nil {
+		f, err := os.Open(filepath.Join(agentsDir, s, "wire.jsonl"))
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, normalizedEvent{Event: "SubagentStop", AgentID: s})
+		evs, err := kimiWireEvents(f, s)
+		f.Close()
+		if err != nil {
+			return nil, err
+		}
+		// Bracket the sub-agent's events with a Start/Stop stamped from its own
+		// timeline so the merged, time-sorted stream keeps them in causal order.
+		start, stop := "", ""
+		if len(evs) > 0 {
+			start, stop = evs[0].TS, evs[len(evs)-1].TS
+		}
+		out = append(out, normalizedEvent{Event: "SubagentStart", AgentID: s, AgentType: kimiAgentType(filepath.Join(agentsDir, s, "wire.jsonl")), TS: start})
+		out = append(out, evs...)
+		out = append(out, normalizedEvent{Event: "SubagentStop", AgentID: s, TS: stop})
 	}
+	// Merge every agent's events into one wall-clock timeline (stable, so events
+	// sharing a timestamp keep their per-agent emission order).
+	sort.SliceStable(out, func(i, j int) bool { return out[i].TS < out[j].TS })
 	return encodeEvents(out)
 }
 

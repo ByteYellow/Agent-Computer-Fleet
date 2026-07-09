@@ -26,7 +26,7 @@ import (
 // from the K8s API, run the node sensor for a window, bind the pod's cgroup to a
 // run, and ingest its telemetry. No manual bind-cgroup / kubectl glue.
 func sandboxCaptureCmd(dataDir *string) *cobra.Command {
-	var runID, pod, namespace, kubectl, sensorBin, sslLib string
+	var runID, pod, namespace, kubectl, sensorBin, sslLib, container string
 	var seconds, pid int
 	cmd := &cobra.Command{
 		Use:   "capture",
@@ -49,7 +49,14 @@ func sandboxCaptureCmd(dataDir *string) *cobra.Command {
 				return fmt.Errorf("resolve pod metadata: %w", err)
 			}
 			if pid == 0 {
-				pid, err = findPodPID(meta.UID)
+				cid := ""
+				if container != "" {
+					// Pin to a named container in a multi-container pod.
+					cid, _ = runKubectl(kc, "get", "pod", pod, "-n", namespace,
+						"-o", "jsonpath={.status.containerStatuses[?(@.name==\""+container+"\")].containerID}")
+					meta.Container = container
+				}
+				pid, err = findPodPID(meta.UID, cid)
 				if err != nil {
 					return fmt.Errorf("resolve pod pid (pass --pid): %w", err)
 				}
@@ -98,6 +105,7 @@ func sandboxCaptureCmd(dataDir *string) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&runID, "run", "", "run id to attribute the pod to (default: generated)")
 	cmd.Flags().StringVar(&pod, "pod", "", "pod name (required)")
+	cmd.Flags().StringVar(&container, "container", "", "container name to pin to (multi-container pods); default: the pod's first non-pause process")
 	cmd.Flags().StringVar(&namespace, "namespace", "", "pod namespace (required)")
 	cmd.Flags().StringVar(&kubectl, "kubectl", "kubectl", "kubectl command (e.g. \"k3s kubectl\")")
 	cmd.Flags().StringVar(&sensorBin, "sensor", "", "path to agentprov-sensor (required)")
@@ -144,16 +152,22 @@ func runKubectl(kc []string, args ...string) (string, error) {
 // this pod UID (kubepods…/pod<uid>, dashes underscore-normalized by the kubelet)
 // but is NOT the `pause` sandbox container, whose cgroup leaf differs from the
 // app container's and carries none of the workload's syscalls.
-func findPodPID(uid string) (int, error) {
+func findPodPID(uid, containerID string) (int, error) {
 	if uid == "" {
 		return 0, fmt.Errorf("empty pod uid")
 	}
 	needles := []string{"pod" + strings.ReplaceAll(uid, "-", "_"), "pod" + uid}
+	// A multi-container pod has one cgroup leaf per container; when a specific
+	// container is requested, pin to the process whose cgroup names its id, not
+	// merely the first non-pause process in the pod.
+	containerID = strings.TrimSpace(containerID)
+	if i := strings.LastIndex(containerID, "/"); i >= 0 {
+		containerID = containerID[i+1:] // strip a containerd://<id> scheme
+	}
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return 0, err
 	}
-	fallback := 0 // a matching pid even if we can't rule out pause
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -176,14 +190,17 @@ func findPodPID(uid string) (int, error) {
 		if !matched {
 			continue
 		}
+		if containerID != "" && !strings.Contains(string(cg), containerID) {
+			continue // not the requested container's cgroup leaf
+		}
 		comm, _ := os.ReadFile(filepath.Join("/proc", e.Name(), "comm"))
 		if strings.TrimSpace(string(comm)) == "pause" {
 			continue // the sandbox container — not where the workload runs
 		}
 		return p, nil
 	}
-	if fallback != 0 {
-		return fallback, nil
+	if containerID != "" {
+		return 0, fmt.Errorf("no process found in container %s of pod uid %s on this node", containerID, uid)
 	}
 	return 0, fmt.Errorf("no app process found in cgroup for pod uid %s (is the pod running on this node?)", uid)
 }

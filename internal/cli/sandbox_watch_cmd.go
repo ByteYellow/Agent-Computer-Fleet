@@ -25,7 +25,12 @@ func sandboxWatchCmd(dataDir *string) *cobra.Command {
 	var window, rounds int
 	cmd := &cobra.Command{
 		Use:   "watch",
-		Short: "auto-attribute every pod on this node to a run (zero-touch k8s-daemonset)",
+		Short: "auto-attribute every pod on this node to a run (k8s-daemonset, phase-2 preview)",
+		Long: "Phase-2 PREVIEW of zero-touch attribution: a kubectl-polling control loop, " +
+			"NOT yet a client-go informer/operator. One sensor window per round covers all " +
+			"bound cgroups, so — unlike `sandbox capture` — it does NOT set a per-pod " +
+			"AGENTPROV_SSL_LIB/AGENTPROV_LIBC_LIB, so model-intent (TLS) and DNS-domain " +
+			"coverage are weaker here; use `sandbox capture` for full per-pod model intent.",
 		RunE: func(c *cobra.Command, _ []string) error {
 			if sensorBin == "" {
 				return fmt.Errorf("--sensor (path to agentprov-sensor) is required")
@@ -58,7 +63,7 @@ func sandboxWatchCmd(dataDir *string) *cobra.Command {
 					if err != nil {
 						continue
 					}
-					pid, err := findPodPID(meta.UID)
+					pid, err := findPodPID(meta.UID, "")
 					if err != nil {
 						continue // not on this node (or not running)
 					}
@@ -85,7 +90,10 @@ func sandboxWatchCmd(dataDir *string) *cobra.Command {
 					time.Sleep(time.Duration(window) * time.Second)
 					continue
 				}
-				// One sensor window covers every bound cgroup; ingest per pod.
+				// One sensor window covers every bound cgroup. NOTE: because a single
+				// sensor serves all pods this round, it can't target one pod's libssl/
+				// libc (pid=0, sslLib=""), so model-intent/DNS coverage is weaker than
+				// `sandbox capture` — system telemetry + cgroup scope are the focus here.
 				raw := filepath.Join(paths.Logs, fmt.Sprintf("watch-r%d-sensor.jsonl", round))
 				if err := runSensorWindow(sensorBin, raw, "", 0, window, stderr); err != nil {
 					fmt.Fprintf(stderr, "watch: sensor: %v\n", err)

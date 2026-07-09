@@ -1,5 +1,42 @@
 # Changelog
 
+## v0.7.1 - 2026-07-09
+
+Zero-touch k8s attribution and multi-harness app-context. Capturing a pod is now
+one command (or auto), egress resolves to domains, node-side response capture is
+reliable, and the app-context layer — previously Claude Code only — reads the
+session transcripts of Kimi Code and Codex too, all validated end-to-end.
+
+### Added
+
+- **`agentprov sandbox capture` — one-shot k8s pod attribution.** Collapses the
+  manual node-side flow (resolve pid/cgroup, pull pod metadata, bind-cgroup, run
+  the sensor, ingest) into a single command; `--container` pins to a named
+  container in a multi-container pod. Points the sensor's libssl/libc uprobes at
+  the pod's own `/proc/<pid>/root`, so model intent and DNS are captured node-side.
+- **`agentprov sandbox watch` — auto-attribution (phase-2 preview).** A node-side
+  control loop that discovers pods and binds each to a run with no per-pod command
+  (`agentprov.io/run` annotation opts into a named run, else an auto-run per UID).
+  Honestly a kubectl poll, not yet a client-go informer; a single per-round sensor
+  means model-intent coverage is weaker than `capture` (use `capture` for that).
+- **Egress resolves to domains.** Pointing the getaddrinfo uprobe at a pod's own
+  libc captures its DNS lookups; the dashboard correlates each `dns_query` hostname
+  to the connect that follows, so egress shows `api.deepseek.com`, not just the IP.
+- **Multi-harness app-context (`hooks bridge --harness kimi|codex|claude`).** The
+  major coding CLIs aren't black boxes — they write rich session transcripts, and
+  some reuse Claude Code's hook vocabulary. A thin per-harness adapter normalizes
+  each transcript into the existing bridge: Kimi Code's `wire.jsonl` (single- and
+  multi-agent delegation, merged into one wall-clock timeline) and Codex's
+  `rollout-*.jsonl` (its `exec_command` shell tool normalized to Bash for
+  command-match). All three harnesses validated end-to-end against a live run.
+
+### Fixed
+
+- **Node-side `tls_read` reliability.** Close-framed HTTP responses had no in-band
+  terminator, so on a reused SSL* connection they stayed buffered and were lost on
+  a long-lived workload; a new request now flushes the pending response. Node-side
+  tls_read went 0 → 1:1 with tls_write. Partial TLS-uprobe attach is surfaced.
+
 ## v0.7.0 - 2026-07-08
 
 Portable Producer Profiles. Evidence collection extends from local/VM to

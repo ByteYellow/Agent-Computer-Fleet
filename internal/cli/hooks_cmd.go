@@ -24,7 +24,7 @@ func hooksCmd(dataDir *string) *cobra.Command {
 }
 
 func hooksBridgeCmd(dataDir *string) *cobra.Command {
-	var runID, file string
+	var runID, file, harness string
 	var correlate bool
 	cmd := &cobra.Command{
 		Use:   "bridge",
@@ -45,13 +45,32 @@ func hooksBridgeCmd(dataDir *string) *cobra.Command {
 			defer db.Close()
 
 			r := cmd.InOrStdin()
-			if file != "" && file != "-" {
-				f, err := os.Open(file)
+			kimiSession := ""
+			// A Kimi session directory carries a per-agent wire.jsonl each; walk
+			// them all so sub-agent delegation is captured, not just the main agent.
+			if harness == "kimi" && file != "" && file != "-" {
+				if info, statErr := os.Stat(file); statErr == nil && info.IsDir() {
+					kimiSession = file
+				}
+			}
+			if kimiSession != "" {
+				r, err = hooksbridge.AdaptKimiSession(kimiSession)
 				if err != nil {
 					return err
 				}
-				defer f.Close()
-				r = f
+			} else {
+				if file != "" && file != "-" {
+					f, err := os.Open(file)
+					if err != nil {
+						return err
+					}
+					defer f.Close()
+					r = f
+				}
+				r, err = hooksbridge.AdaptHarness(harness, r)
+				if err != nil {
+					return err
+				}
 			}
 			sum, err := hooksbridge.Ingest(db, r, hooksbridge.Options{
 				RunID:   runID,
@@ -80,5 +99,6 @@ func hooksBridgeCmd(dataDir *string) *cobra.Command {
 	cmd.Flags().StringVar(&runID, "run", "", "run id to attach the orchestration graph to")
 	cmd.Flags().StringVar(&file, "file", "-", "hook JSONL file (default stdin)")
 	cmd.Flags().BoolVar(&correlate, "correlate", true, "attribute sensor syscall events to the acting agent by command-match")
+	cmd.Flags().StringVar(&harness, "harness", "claude", "harness whose session transcript this is: claude | kimi | codex")
 	return cmd
 }

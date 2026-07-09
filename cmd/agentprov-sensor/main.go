@@ -17,6 +17,7 @@ func main() {
 	opts := sensor.Options{
 		SSLLib:   os.Getenv("AGENTPROV_SSL_LIB"),
 		GoTLSBin: os.Getenv("AGENTPROV_GO_TLS_BIN"),
+		LibcLib:  os.Getenv("AGENTPROV_LIBC_LIB"),
 	}
 	if err := sensor.RunWithOptions(os.Stdout, opts); err != nil {
 		fmt.Fprintln(os.Stderr, "agentprov-sensor:", err)

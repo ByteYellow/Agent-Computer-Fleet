@@ -179,6 +179,12 @@ func RunWithOptions(out io.Writer, opts Options) error {
 		if !attachedWrite || !attachedRead {
 			return fmt.Errorf("attach OpenSSL TLS uprobes on %s: write=%v read=%v (%s)", opts.SSLLib, attachedWrite, attachedRead, strings.Join(attachErrs, "; "))
 		}
+		// A partial attach is non-fatal but silently loses a direction (e.g. a
+		// client that only calls SSL_read_ex would go dark if its return probe
+		// failed while SSL_read's succeeded). Surface it so it isn't a mystery.
+		if len(attachErrs) > 0 {
+			fmt.Fprintf(os.Stderr, "agentprov-sensor: partial TLS uprobe attach on %s: %s\n", opts.SSLLib, strings.Join(attachErrs, "; "))
+		}
 	}
 
 	// Go crypto/tls: Go agents use Go's own TLS stack (no libssl), so the SSLLib

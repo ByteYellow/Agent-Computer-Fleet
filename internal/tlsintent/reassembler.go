@@ -112,6 +112,18 @@ func (r *Reassembler) Add(c Chunk) []Message {
 	if len(c.Data) == 0 && !c.Truncated {
 		return nil
 	}
+	// A new request on this connection means any buffered response for it has
+	// completed: HTTP/1.1 is strictly request→response→request, so the client only
+	// sends again after fully reading the prior response — and the SSL* pointer is
+	// commonly freed+reused for the next connection. This is the ONLY in-band
+	// completion signal for a close-framed response (no Content-Length, no chunked
+	// terminator), which otherwise sits buffered until process-exit Flush and is
+	// lost on a long-lived workload. Flush it here so the response isn't dropped.
+	var flushed []Message
+	if c.Direction == Request {
+		flushed = r.flushDir(c.PID, c.Conn, Response)
+	}
+
 	k := streamKey{c.PID, c.Conn, c.Direction}
 	s := r.streams[k]
 	if s == nil {
@@ -146,9 +158,9 @@ func (r *Reassembler) Add(c Chunk) []Message {
 			pre := append([]byte(nil), s.buf.Bytes()...)
 			s.buf.Reset()
 			out := s.h2.consume(pre, c.PID, c.Conn)
-			return append(out, s.h2.consume(c.Data, c.PID, c.Conn)...)
+			return append(flushed, append(out, s.h2.consume(c.Data, c.PID, c.Conn)...)...)
 		}
-		return s.h2.consume(c.Data, c.PID, c.Conn)
+		return append(flushed, s.h2.consume(c.Data, c.PID, c.Conn)...)
 	}
 
 	max := r.MaxBytes
@@ -174,7 +186,7 @@ func (r *Reassembler) Add(c Chunk) []Message {
 		s.buf.Write(rest)
 		s.truncated = false
 	}
-	return out
+	return append(flushed, out...)
 }
 
 // Flush emits whatever is buffered for a connection as a best-effort (possibly
@@ -184,26 +196,34 @@ func (r *Reassembler) Add(c Chunk) []Message {
 func (r *Reassembler) Flush(pid uint32, conn uint64) []Message {
 	var out []Message
 	for _, dir := range []string{Request, Response} {
-		k := streamKey{pid, conn, dir}
-		s := r.streams[k]
-		if s == nil {
-			continue
-		}
-		if s.h2 != nil {
-			out = append(out, s.h2.flush(pid, conn)...)
-			delete(r.streams, k)
-			continue
-		}
-		if s.buf.Len() == 0 {
-			continue
-		}
-		if msg, ok := parseBestEffort(pid, conn, dir, s.buf.Bytes(), s.isH2); ok {
-			msg.Truncated = true
-			out = append(out, msg)
-		}
-		delete(r.streams, k)
+		out = append(out, r.flushDir(pid, conn, dir)...)
 	}
 	delete(r.h2Conns, connKey{pid, conn})
+	return out
+}
+
+// flushDir emits whatever is buffered for one connection-direction as a
+// best-effort (possibly truncated) message and forgets that stream.
+func (r *Reassembler) flushDir(pid uint32, conn uint64, dir string) []Message {
+	k := streamKey{pid, conn, dir}
+	s := r.streams[k]
+	if s == nil {
+		return nil
+	}
+	var out []Message
+	if s.h2 != nil {
+		out = s.h2.flush(pid, conn)
+		delete(r.streams, k)
+		return out
+	}
+	if s.buf.Len() == 0 {
+		return nil
+	}
+	if msg, ok := parseBestEffort(pid, conn, dir, s.buf.Bytes(), s.isH2); ok {
+		msg.Truncated = true
+		out = append(out, msg)
+	}
+	delete(r.streams, k)
 	return out
 }
 

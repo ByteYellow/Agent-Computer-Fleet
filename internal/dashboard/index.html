@@ -1060,7 +1060,8 @@ function renderEgress(rows){
   tb.innerHTML=rows.map(e=>{
     const t=(e.time||'').replace('T',' ').replace(/\.\d+Z?$/,'');
     const cls=e.risk?'eg-risk':'eg-ok';
-    return `<tr><td>${esc(t)}</td><td class="${cls}">${esc(e.type)}</td><td class="${cls}">${esc(e.dst)}</td><td>${esc(e.port)}</td><td>${esc(e.comm)}</td></tr>`;
+    const dst=e.domain?`${esc(e.domain)} <span style="color:var(--mut);font-size:11px">${esc(e.dst)}</span>`:esc(e.dst);
+    return `<tr><td>${esc(t)}</td><td class="${cls}">${esc(e.type)}</td><td class="${cls}">${dst}</td><td>${esc(e.port)}</td><td>${esc(e.comm)}</td></tr>`;
   }).join('');
 }
 

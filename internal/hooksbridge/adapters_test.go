@@ -60,7 +60,9 @@ func TestAdaptCodexRolloutMapsFunctionCalls(t *testing.T) {
 		`{"timestamp":"2026-07-09T05:49:40Z","type":"session_meta","payload":{"session_id":"s1"}}`,
 		`{"timestamp":"2026-07-09T05:49:41Z","type":"response_item","payload":{"type":"function_call","name":"read_file","arguments":"{\"path\":\"/etc/hosts\"}","call_id":"f1"}}`,
 		`{"timestamp":"2026-07-09T05:49:42Z","type":"response_item","payload":{"type":"local_shell_call","command":["python3","setup.py","install"],"call_id":"s2"}}`,
-		`{"timestamp":"2026-07-09T05:49:43Z","type":"response_item","payload":{"type":"function_call_output","call_id":"f1"}}`,
+		// The real codex shell tool: exec_command with a `cmd` string -> Bash.
+		`{"timestamp":"2026-07-09T05:49:43Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"echo banana > hello.txt\"}","call_id":"e3"}}`,
+		`{"timestamp":"2026-07-09T05:49:44Z","type":"response_item","payload":{"type":"function_call_output","call_id":"f1"}}`,
 	}, "\n")
 
 	r, err := AdaptHarness("codex", strings.NewReader(rollout))
@@ -68,8 +70,8 @@ func TestAdaptCodexRolloutMapsFunctionCalls(t *testing.T) {
 		t.Fatal(err)
 	}
 	evs := decodeAdapted(t, r)
-	if len(evs) != 3 {
-		t.Fatalf("got %d events, want 3: %+v", len(evs), evs)
+	if len(evs) != 4 {
+		t.Fatalf("got %d events, want 4: %+v", len(evs), evs)
 	}
 	if evs[0].ToolName != "read_file" || evs[0].ToolInput["path"] != "/etc/hosts" {
 		t.Fatalf("function_call args not decoded: %+v", evs[0])
@@ -77,8 +79,11 @@ func TestAdaptCodexRolloutMapsFunctionCalls(t *testing.T) {
 	if evs[1].ToolName != "Bash" || evs[1].ToolInput["command"] != "python3 setup.py install" {
 		t.Fatalf("shell argv not joined to a command: %+v", evs[1])
 	}
-	if evs[2].Event != "PostToolUse" || evs[2].ToolUseID != "f1" {
-		t.Fatalf("output not mapped: %+v", evs[2])
+	if evs[2].ToolName != "Bash" || evs[2].ToolInput["command"] != "echo banana > hello.txt" {
+		t.Fatalf("exec_command not normalized to Bash+command: %+v", evs[2])
+	}
+	if evs[3].Event != "PostToolUse" || evs[3].ToolUseID != "f1" {
+		t.Fatalf("output not mapped: %+v", evs[3])
 	}
 }
 

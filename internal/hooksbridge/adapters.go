@@ -211,6 +211,12 @@ func adaptCodexRollout(r io.Reader) (io.Reader, error) {
 				name = "Bash"
 			}
 			ti := codexArgs(payload)
+			// Codex's shell tool (exec_command / local_shell) is where syscalls
+			// come from; normalize it to Bash with a `command` so command-match to
+			// the kernel works, exactly like Claude Code / Kimi.
+			if cmd := firstStr(ti, "command", "cmd"); cmd != "" && isCodexShellTool(name) {
+				name, ti = "Bash", map[string]any{"command": cmd}
+			}
 			out = append(out, normalizedEvent{Event: "PreToolUse", ToolName: name, ToolInput: ti, ToolUseID: firstStr(payload, "call_id", "id"), TS: ts})
 		case "function_call_output", "local_shell_call_output", "custom_tool_call_output":
 			out = append(out, normalizedEvent{Event: "PostToolUse", ToolUseID: firstStr(payload, "call_id", "id"), TS: ts})
@@ -220,6 +226,16 @@ func adaptCodexRollout(r io.Reader) (io.Reader, error) {
 		return nil, err
 	}
 	return encodeEvents(out)
+}
+
+// isCodexShellTool reports whether a codex tool name runs a shell command (so it
+// should be normalized to Bash for command-match).
+func isCodexShellTool(name string) bool {
+	switch name {
+	case "exec_command", "local_shell", "shell", "bash", "run", "container.exec":
+		return true
+	}
+	return name == "" // an unnamed local_shell_call
 }
 
 // codexArgs turns a codex tool item into a tool_input map, decoding the JSON

@@ -24,7 +24,7 @@ func hooksCmd(dataDir *string) *cobra.Command {
 }
 
 func hooksBridgeCmd(dataDir *string) *cobra.Command {
-	var runID, file string
+	var runID, file, harness string
 	var correlate bool
 	cmd := &cobra.Command{
 		Use:   "bridge",
@@ -53,6 +53,10 @@ func hooksBridgeCmd(dataDir *string) *cobra.Command {
 				defer f.Close()
 				r = f
 			}
+			r, err = hooksbridge.AdaptHarness(harness, r)
+			if err != nil {
+				return err
+			}
 			sum, err := hooksbridge.Ingest(db, r, hooksbridge.Options{
 				RunID:   runID,
 				Objects: provenance.ObjectStore{DB: db, Paths: paths},
@@ -80,5 +84,6 @@ func hooksBridgeCmd(dataDir *string) *cobra.Command {
 	cmd.Flags().StringVar(&runID, "run", "", "run id to attach the orchestration graph to")
 	cmd.Flags().StringVar(&file, "file", "-", "hook JSONL file (default stdin)")
 	cmd.Flags().BoolVar(&correlate, "correlate", true, "attribute sensor syscall events to the acting agent by command-match")
+	cmd.Flags().StringVar(&harness, "harness", "claude", "harness whose session transcript this is: claude | kimi | codex")
 	return cmd
 }

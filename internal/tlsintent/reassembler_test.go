@@ -81,6 +81,30 @@ func TestContentLengthResponse(t *testing.T) {
 	}
 }
 
+func TestCloseFramedResponseFlushedOnNextRequestSameConn(t *testing.T) {
+	// A close-framed response (no Content-Length, no chunked) has no in-band
+	// terminator, so parseOne can't complete it. On a reused SSL* connection the
+	// next request is the completion signal — the response must not be lost.
+	r := NewReassembler()
+	resp := "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n" +
+		`{"model":"deepseek-v4-flash","choices":[{"message":{"content":"hi"}}]}`
+	if msgs := r.Add(Chunk{PID: 1, Conn: 9, Direction: Response, Data: []byte(resp)}); len(msgs) != 0 {
+		t.Fatalf("close-framed response should buffer, not emit yet: got %d", len(msgs))
+	}
+	// A new request on the same conn (SSL* reused) flushes the pending response.
+	req := "POST /v2 HTTP/1.1\r\nHost: api.deepseek.com\r\nContent-Length: 0\r\n\r\n"
+	msgs := r.Add(Chunk{PID: 1, Conn: 9, Direction: Request, Data: []byte(req)})
+	var gotResp bool
+	for _, m := range msgs {
+		if m.Direction == Response && m.Status == 200 && m.Model == "deepseek-v4-flash" {
+			gotResp = true
+		}
+	}
+	if !gotResp {
+		t.Fatalf("pending close-framed response not flushed on next request: %+v", msgs)
+	}
+}
+
 func TestChunkedResponse(t *testing.T) {
 	r := NewReassembler()
 	body := chunkedBody(`{"model":"claude-opus-4-8",`, `"content":"hello"}`)

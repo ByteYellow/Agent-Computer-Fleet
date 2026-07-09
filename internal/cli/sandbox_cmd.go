@@ -244,6 +244,7 @@ func sandboxCmd(dataDir *string) *cobra.Command {
 	bindCgroup.Flags().StringVar(&bcPodIP, "pod-ip", "", "pod IP for cross-pod influence edges (substrate lens)")
 	cmd.AddCommand(bindCgroup)
 	cmd.AddCommand(sandboxCaptureCmd(dataDir))
+	cmd.AddCommand(sandboxWatchCmd(dataDir))
 
 	run.Flags().SetInterspersed(false)
 	run.Flags().StringVar(&out, "out", "", "directory to copy the exported bundle into (mounted volume for teardown durability)")

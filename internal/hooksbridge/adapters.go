@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"sort"
 	"time"
 )
 
@@ -33,6 +36,7 @@ type normalizedEvent struct {
 	ToolInput map[string]any `json:"tool_input,omitempty"`
 	ToolUseID string         `json:"tool_use_id,omitempty"`
 	AgentID   string         `json:"agent_id,omitempty"`
+	AgentType string         `json:"agent_type,omitempty"`
 	TS        string         `json:"timestamp,omitempty"`
 	LastMsg   string         `json:"last_assistant_message,omitempty"`
 }
@@ -54,8 +58,73 @@ func encodeEvents(evs []normalizedEvent) (io.Reader, error) {
 // kernel syscalls works unchanged. tool.call -> PreToolUse, tool.result ->
 // PostToolUse.
 func adaptKimiWire(r io.Reader) (io.Reader, error) {
+	evs, err := kimiWireEvents(r, "")
+	if err != nil {
+		return nil, err
+	}
+	return encodeEvents(evs)
+}
+
+// AdaptKimiSession walks a Kimi session directory (…/session_<id>/) and its
+// per-agent wire.jsonl files into one normalized hook stream. The main agent's
+// `Agent` tool call is the delegation dispatch (Kimi reuses Claude Code's tool
+// name), and each agents/<sub>/ becomes a SubagentStart + its own tool calls —
+// so the existing bridge draws the same delegation graph as Claude Code.
+func AdaptKimiSession(sessionDir string) (io.Reader, error) {
+	agentsDir := filepath.Join(sessionDir, "agents")
+	entries, err := os.ReadDir(agentsDir)
+	if err != nil {
+		return nil, err
+	}
+	var subs []string
+	hasMain := false
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if e.Name() == "main" {
+			hasMain = true
+		} else {
+			subs = append(subs, e.Name())
+		}
+	}
+	sort.Strings(subs)
 	var out []normalizedEvent
-	callTool := map[string]string{} // toolCallId -> tool name (to label the result)
+	appendAgent := func(id string) error {
+		f, err := os.Open(filepath.Join(agentsDir, id, "wire.jsonl"))
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		evs, err := kimiWireEvents(f, id)
+		if err != nil {
+			return err
+		}
+		out = append(out, evs...)
+		return nil
+	}
+	if hasMain {
+		if err := appendAgent("main"); err != nil {
+			return nil, err
+		}
+	}
+	for _, s := range subs {
+		out = append(out, normalizedEvent{Event: "SubagentStart", AgentID: s, AgentType: kimiAgentType(filepath.Join(agentsDir, s, "wire.jsonl"))})
+		if err := appendAgent(s); err != nil {
+			return nil, err
+		}
+		out = append(out, normalizedEvent{Event: "SubagentStop", AgentID: s})
+	}
+	return encodeEvents(out)
+}
+
+// kimiWireEvents parses one wire.jsonl into normalized events tagged with
+// agentID (empty = main). A tool.call named "Agent" is emitted as a delegation
+// dispatch (PreToolUse/Agent) with a resolvable teammate name; other tool.calls
+// map to PreToolUse and their results to PostToolUse.
+func kimiWireEvents(r io.Reader, agentID string) ([]normalizedEvent, error) {
+	var out []normalizedEvent
+	callTool := map[string]string{}
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 1024*1024), 8*1024*1024)
 	for sc.Scan() {
@@ -76,16 +145,44 @@ func adaptKimiWire(r io.Reader) (io.Reader, error) {
 			name := str(ev["name"])
 			callTool[id] = name
 			args, _ := ev["args"].(map[string]any)
-			out = append(out, normalizedEvent{Event: "PreToolUse", ToolName: name, ToolInput: args, ToolUseID: id, TS: ts})
+			if name == "Agent" {
+				// Delegation dispatch: give the roster a teammate name to bind the
+				// sub-agent to (subagent_type, else the task description).
+				ti := map[string]any{"name": firstStr(args, "subagent_type", "description")}
+				out = append(out, normalizedEvent{Event: "PreToolUse", ToolName: "Agent", ToolInput: ti, ToolUseID: id, AgentID: agentID, TS: ts})
+				break
+			}
+			out = append(out, normalizedEvent{Event: "PreToolUse", ToolName: name, ToolInput: args, ToolUseID: id, AgentID: agentID, TS: ts})
 		case "tool.result":
 			id := str(ev["toolCallId"])
-			out = append(out, normalizedEvent{Event: "PostToolUse", ToolName: callTool[id], ToolUseID: id, TS: ts})
+			out = append(out, normalizedEvent{Event: "PostToolUse", ToolName: callTool[id], ToolUseID: id, AgentID: agentID, TS: ts})
 		}
 	}
-	if err := sc.Err(); err != nil {
-		return nil, err
+	return out, sc.Err()
+}
+
+// kimiAgentType reads a sub-agent's profile (its type) from its first
+// config.update event.
+func kimiAgentType(wirePath string) string {
+	f, err := os.Open(wirePath)
+	if err != nil {
+		return ""
 	}
-	return encodeEvents(out)
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 1024*1024), 8*1024*1024)
+	for sc.Scan() {
+		var o map[string]any
+		if json.Unmarshal(sc.Bytes(), &o) != nil {
+			continue
+		}
+		if o["type"] == "config.update" {
+			if p := str(o["profileName"]); p != "" && p != "agent" {
+				return p
+			}
+		}
+	}
+	return ""
 }
 
 // adaptCodexRollout maps OpenAI Codex CLI's session rollout-*.jsonl onto

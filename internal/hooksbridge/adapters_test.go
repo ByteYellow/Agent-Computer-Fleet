@@ -3,6 +3,8 @@ package hooksbridge
 import (
 	"encoding/json"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -77,6 +79,53 @@ func TestAdaptCodexRolloutMapsFunctionCalls(t *testing.T) {
 	}
 	if evs[2].Event != "PostToolUse" || evs[2].ToolUseID != "f1" {
 		t.Fatalf("output not mapped: %+v", evs[2])
+	}
+}
+
+func TestAdaptKimiSessionCapturesDelegation(t *testing.T) {
+	// A Kimi multi-agent session: main dispatches an `Agent` (subagent_type=coder),
+	// and agents/agent-0/ is that sub-agent doing the work. The adapter must yield
+	// the same delegation shape Claude Code does: an Agent dispatch + a SubagentStart.
+	dir := t.TempDir()
+	main := filepath.Join(dir, "agents", "main")
+	sub := filepath.Join(dir, "agents", "agent-0")
+	if err := os.MkdirAll(main, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mainWire := `{"type":"context.append_loop_event","event":{"type":"tool.call","toolCallId":"a1","name":"Agent","args":{"subagent_type":"coder","description":"read calc.py"}}}`
+	subWire := strings.Join([]string{
+		`{"type":"config.update","profileName":"coder"}`,
+		`{"type":"context.append_loop_event","event":{"type":"tool.call","toolCallId":"r1","name":"Read","args":{"path":"/tmp/calc.py"}}}`,
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(main, "wire.jsonl"), []byte(mainWire), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "wire.jsonl"), []byte(subWire), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := AdaptKimiSession(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evs := decodeAdapted(t, r)
+	var dispatch, substart, subread bool
+	for _, e := range evs {
+		if e.Event == "PreToolUse" && e.ToolName == "Agent" && e.ToolInput["name"] == "coder" {
+			dispatch = true
+		}
+		if e.Event == "SubagentStart" && e.AgentID == "agent-0" && e.AgentType == "coder" {
+			substart = true
+		}
+		if e.Event == "PreToolUse" && e.ToolName == "Read" && e.AgentID == "agent-0" {
+			subread = true
+		}
+	}
+	if !dispatch || !substart || !subread {
+		t.Fatalf("delegation not captured (dispatch=%v substart=%v subread=%v): %+v", dispatch, substart, subread, evs)
 	}
 }
 

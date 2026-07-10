@@ -49,6 +49,7 @@ func launchCmd(dataDir *string) *cobra.Command {
 				Sensor:        sensor,
 				SignKeyPath:   signKey,
 				FileDiff:      fileDiff,
+				JSON:          jsonOut,
 				Stdout:        cmd.OutOrStdout(),
 				Stderr:        cmd.ErrOrStderr(),
 			})

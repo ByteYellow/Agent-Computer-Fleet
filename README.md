@@ -292,7 +292,12 @@ system-side telemetry + application-side agent context
 The fastest path: wrap any agent in a full provenance run with a single command.
 
 ```sh
-go install github.com/ByteYellow/AgentProvenance/cmd/agentprov@latest
+# Build from source. A direct `go install ...@latest` does not work: the module
+# pins two transitive Docker deps (distribution/reference, go-connections) via
+# replace directives, which `go install` from a version tag does not honor.
+git clone https://github.com/byteyellow/agentprovenance
+cd agentprovenance
+go install ./cmd/agentprov
 
 agentprov doctor -- claude          # preflight: hooks, cgroup, sensor, dashboard port
 agentprov launch -- claude          # or codex, or any agent command

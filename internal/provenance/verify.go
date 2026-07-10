@@ -76,6 +76,14 @@ func Verify(db *sql.DB, runID string) (VerifyResult, error) {
 			result.WarningCount++
 		}
 	}
+	// A run that left no trace anywhere is not "ok" -- there is nothing to
+	// verify. Without this guard every check below runs over empty result sets
+	// and the run passes clean, so `graph verify <typo>` reports a false green.
+	if !runExists(db, runID) {
+		add("error", "unknown_run", runID, "run %s has no evidence in any table; nothing to verify", runID)
+		result.Status = "failed"
+		return result, nil
+	}
 	if err := verifyRollouts(db, runID, add); err != nil {
 		return result, err
 	}
@@ -959,6 +967,20 @@ func exists(db *sql.DB, query string, args ...any) bool {
 	var one int
 	err := db.QueryRow(query, args...).Scan(&one)
 	return err == nil
+}
+
+// runExists reports whether a run_id has any evidence at all. A run is not a row
+// in one table -- it is a logical grouping keyed by run_id across the anchor
+// tables -- so existence is presence in any of them. A single legitimate
+// record-only run lands at least a session, so a sparse run still verifies; only
+// a run with no rows anywhere (a typo, a wrong id) is treated as unknown.
+func runExists(db *sql.DB, runID string) bool {
+	for _, table := range []string{"sessions", "rollouts", "tool_calls", "events", "provenance_objects"} {
+		if exists(db, `SELECT 1 FROM `+table+` WHERE run_id = ? LIMIT 1`, runID) {
+			return true
+		}
+	}
+	return false
 }
 
 func externalContextBindingExists(db *sql.DB, runID, sessionID, attemptID, toolCallID, processID string) bool {

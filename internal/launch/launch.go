@@ -111,6 +111,42 @@ func transcriptPathFromHookLog(hookLogPath string) string {
 	return ""
 }
 
+// subAgentTranscriptsFromHookLog collects each sub-agent's own transcript from a
+// run's hook log. Claude Code's SubagentStart/Stop events carry agent_id +
+// agent_transcript_path pointing at the delegate's session file (where its real
+// Bash decisions live). Deduplicated by path and with the main transcript
+// excluded, so the orchestrator is never re-harvested as a delegate.
+func subAgentTranscriptsFromHookLog(hookLogPath, mainPath string) []provenance.AgentTranscript {
+	if hookLogPath == "" {
+		return nil
+	}
+	f, err := os.Open(hookLogPath)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	seen := map[string]bool{}
+	var out []provenance.AgentTranscript
+	for sc.Scan() {
+		var ev struct {
+			AgentID             string `json:"agent_id"`
+			AgentTranscriptPath string `json:"agent_transcript_path"`
+		}
+		if json.Unmarshal(sc.Bytes(), &ev) != nil {
+			continue
+		}
+		p := ev.AgentTranscriptPath
+		if p == "" || p == mainPath || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, provenance.AgentTranscript{AgentID: ev.AgentID, Path: p})
+	}
+	return out
+}
+
 // Run executes the full launch lifecycle and returns its Report. The returned
 // error is a launch-infrastructure error only; a nonzero agent exit is reported
 // via Report.ExitCode, not as an error, so the caller can propagate it.
@@ -326,7 +362,12 @@ func seal(db *sql.DB, paths store.Paths, runID, hookLogPath, transcriptHarness, 
 		fmt.Fprintf(stderr, "launch: materialize llm: %v\n", err)
 	}
 	if tp := transcriptPathFromHookLog(hookLogPath); tp != "" {
-		if turns, err := provenance.HarvestTranscript(provenance.ObjectStore{DB: db, Paths: paths}, db, runID, tp); err != nil {
+		// Also harvest each sub-agent's own transcript: a command a delegate
+		// decided lives there, not in the main session transcript, so without
+		// this the delegate's decision never becomes an llm_call and can never
+		// carry an llm_caused edge to the syscall it ran.
+		subs := subAgentTranscriptsFromHookLog(hookLogPath, tp)
+		if turns, err := provenance.HarvestTranscriptSet(provenance.ObjectStore{DB: db, Paths: paths}, db, runID, tp, subs); err != nil {
 			fmt.Fprintf(stderr, "launch: harvest transcript: %v\n", err)
 		} else {
 			report.TranscriptTurns = turns

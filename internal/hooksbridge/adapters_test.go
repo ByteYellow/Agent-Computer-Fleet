@@ -134,6 +134,38 @@ func TestAdaptKimiSessionCapturesDelegation(t *testing.T) {
 	}
 }
 
+func TestAdaptCodexRolloutCapturesSpawnAgent(t *testing.T) {
+	// Codex multi-agent: the parent rollout records a spawn_agent dispatch (the
+	// sub-agent's own tool calls live in a separate per-thread trace, not here).
+	// The adapter must yield the delegation shape the bridge draws a spawn edge
+	// from: an Agent dispatch named by agent_type + a bracketing SubagentStart/Stop.
+	rollout := strings.Join([]string{
+		`{"timestamp":"2026-07-09T06:00:00Z","type":"response_item","payload":{"type":"function_call","name":"spawn_agent","arguments":"{\"agent_type\":\"explorer\",\"message\":\"count the files\"}","call_id":"sp1"}}`,
+		`{"timestamp":"2026-07-09T06:00:05Z","type":"response_item","payload":{"type":"function_call_output","call_id":"sp1"}}`,
+	}, "\n")
+
+	r, err := AdaptHarness("codex", strings.NewReader(rollout))
+	if err != nil {
+		t.Fatal(err)
+	}
+	evs := decodeAdapted(t, r)
+	var dispatch, substart, substop bool
+	for _, e := range evs {
+		if e.Event == "PreToolUse" && e.ToolName == "Agent" && e.ToolInput["name"] == "explorer" && e.ToolUseID == "sp1" {
+			dispatch = true
+		}
+		if e.Event == "SubagentStart" && e.AgentID == "codex-sub-sp1" && e.AgentType == "explorer" {
+			substart = true
+		}
+		if e.Event == "SubagentStop" && e.AgentID == "codex-sub-sp1" {
+			substop = true
+		}
+	}
+	if !dispatch || !substart || !substop {
+		t.Fatalf("spawn_agent not mapped to delegation (dispatch=%v start=%v stop=%v): %+v", dispatch, substart, substop, evs)
+	}
+}
+
 func TestAdaptHarnessUnknownRejected(t *testing.T) {
 	if _, err := AdaptHarness("langchain", strings.NewReader("")); err == nil {
 		t.Fatal("unknown harness should error")

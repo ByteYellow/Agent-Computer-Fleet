@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -225,6 +226,7 @@ func kimiAgentType(wirePath string) string {
 // the agent's tool call (name + arguments), its output the result.
 func adaptCodexRollout(r io.Reader) (io.Reader, error) {
 	var out []normalizedEvent
+	spawnSub := map[string]string{} // spawn_agent call_id -> synthetic sub-agent id
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 1024*1024), 8*1024*1024)
 	for sc.Scan() {
@@ -245,22 +247,73 @@ func adaptCodexRollout(r io.Reader) (io.Reader, error) {
 			if name == "" && itemType == "local_shell_call" {
 				name = "Bash"
 			}
+			callID := firstStr(payload, "call_id", "id")
 			ti := codexArgs(payload)
+			// Codex multi-agent: spawn_agent is a delegation dispatch. The parent
+			// rollout records that a sub-agent (role=agent_type) was created with an
+			// initial task; that sub-agent's OWN tool calls live in a separate
+			// per-thread trace, not this file, so they are out of scope here. Emit
+			// the dispatch as an Agent call plus a SubagentStart/Stop so the bridge
+			// draws the main->sub spawn edge and a named teammate node, exactly like
+			// Claude Code / Kimi delegation.
+			if isCodexSpawnAgent(name) {
+				subID := "codex-sub-" + callID
+				spawnSub[callID] = subID
+				out = append(out,
+					normalizedEvent{Event: "PreToolUse", ToolName: "Agent", ToolInput: map[string]any{"name": codexSpawnLabel(ti)}, ToolUseID: callID, TS: ts},
+					normalizedEvent{Event: "SubagentStart", AgentID: subID, AgentType: firstStr(ti, "agent_type", "new_agent_role", "agent_role"), TS: ts},
+				)
+				break
+			}
 			// Codex's shell tool (exec_command / local_shell) is where syscalls
 			// come from; normalize it to Bash with a `command` so command-match to
 			// the kernel works, exactly like Claude Code / Kimi.
 			if cmd := firstStr(ti, "command", "cmd"); cmd != "" && isCodexShellTool(name) {
 				name, ti = "Bash", map[string]any{"command": cmd}
 			}
-			out = append(out, normalizedEvent{Event: "PreToolUse", ToolName: name, ToolInput: ti, ToolUseID: firstStr(payload, "call_id", "id"), TS: ts})
+			out = append(out, normalizedEvent{Event: "PreToolUse", ToolName: name, ToolInput: ti, ToolUseID: callID, TS: ts})
 		case "function_call_output", "local_shell_call_output", "custom_tool_call_output":
-			out = append(out, normalizedEvent{Event: "PostToolUse", ToolUseID: firstStr(payload, "call_id", "id"), TS: ts})
+			callID := firstStr(payload, "call_id", "id")
+			if subID := spawnSub[callID]; subID != "" {
+				out = append(out, normalizedEvent{Event: "SubagentStop", AgentID: subID, TS: ts})
+				break
+			}
+			out = append(out, normalizedEvent{Event: "PostToolUse", ToolUseID: callID, TS: ts})
 		}
 	}
 	if err := sc.Err(); err != nil {
 		return nil, err
 	}
 	return encodeEvents(out)
+}
+
+// isCodexSpawnAgent reports whether a codex tool name is the multi-agent spawn
+// dispatch, bare or namespaced (e.g. "multi_agent_v1.spawn_agent").
+func isCodexSpawnAgent(name string) bool {
+	if i := strings.LastIndexByte(name, '.'); i >= 0 {
+		name = name[i+1:]
+	}
+	return name == "spawn_agent"
+}
+
+// codexSpawnLabel picks a teammate label for a spawn_agent dispatch: the agent
+// role, else the first line of the initial task message, else "agent".
+func codexSpawnLabel(ti map[string]any) string {
+	if r := firstStr(ti, "agent_type", "new_agent_role", "agent_role"); r != "" {
+		return r
+	}
+	if m := firstStr(ti, "message", "prompt", "instruction"); m != "" {
+		if i := strings.IndexByte(m, '\n'); i >= 0 {
+			m = m[:i]
+		}
+		if m = strings.TrimSpace(m); m != "" {
+			if len(m) > 60 {
+				m = m[:60]
+			}
+			return m
+		}
+	}
+	return "agent"
 }
 
 // isCodexShellTool reports whether a codex tool name runs a shell command (so it

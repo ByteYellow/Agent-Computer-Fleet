@@ -12,6 +12,25 @@ import (
 	"time"
 )
 
+// BridgeTranscript opens a harness's session record at path (a Kimi session
+// DIRECTORY, else a transcript file) and returns a reader of normalized hook
+// events ready for Ingest. It is the one entry point launch and `hooks bridge`
+// share, so both handle Kimi's per-agent directory the same way.
+func BridgeTranscript(harness, path string) (io.Reader, error) {
+	if harness == "kimi" {
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			return AdaptKimiSession(path)
+		}
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	// Read the whole file now (defer-close is fine: the adapters buffer output).
+	return AdaptHarness(harness, f)
+}
+
 // AdaptHarness wraps a harness-specific session transcript in a reader of the
 // normalized hook-JSONL events Ingest consumes, so a non-Claude-Code harness is
 // captured by translating its OWN session record — no per-harness bespoke bridge.

@@ -12,15 +12,17 @@ import (
 
 func TestDetectRecipe(t *testing.T) {
 	cases := []struct {
-		argv0  string
-		tier   string
-		inject bool
+		argv0   string
+		tier    string
+		inject  bool
+		harness string
 	}{
-		{"claude", "hooks(claude-code)", true},
-		{"/usr/local/bin/claude", "hooks(claude-code)", true},
-		{"claude-code", "hooks(claude-code)", true},
-		{"codex", "record", false},
-		{"python3", "record", false},
+		{"claude", "hooks(claude-code)", true, ""},
+		{"/usr/local/bin/claude", "hooks(claude-code)", true, ""},
+		{"claude-code", "hooks(claude-code)", true, ""},
+		{"codex", "transcript(codex)", false, "codex"},
+		{"/opt/homebrew/bin/kimi", "transcript(kimi)", false, "kimi"},
+		{"python3", "record", false, ""},
 	}
 	for _, c := range cases {
 		r := detectRecipe([]string{c.argv0, "arg"})
@@ -29,6 +31,12 @@ func TestDetectRecipe(t *testing.T) {
 		}
 		if r.injectHooks != c.inject {
 			t.Errorf("%s: injectHooks=%v want %v", c.argv0, r.injectHooks, c.inject)
+		}
+		if r.harness != c.harness {
+			t.Errorf("%s: harness=%q want %q", c.argv0, r.harness, c.harness)
+		}
+		if c.harness != "" && r.findTranscript == nil {
+			t.Errorf("%s: findTranscript should be set", c.argv0)
 		}
 	}
 }

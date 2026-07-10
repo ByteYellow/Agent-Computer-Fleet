@@ -28,6 +28,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/byteyellow/agentprovenance/internal/dashboard"
 	"github.com/byteyellow/agentprovenance/internal/forensics"
@@ -227,6 +228,7 @@ func Run(opts Options) (Report, error) {
 
 	// --- Exec the agent in a dedicated cgroup (kernel telemetry auto-joins by
 	// cgroup_id). record.Run blocks until the agent exits.
+	agentStart := time.Now()
 	result, rerr := (record.Service{DB: db, Paths: paths}).Run(record.Request{
 		RunID:           runID,
 		Name:            "launch",
@@ -240,6 +242,17 @@ func Run(opts Options) (Report, error) {
 	report.ExitCode = result.ExitCode
 	report.Status = result.Status
 
+	// A transcript-recipe harness (codex/kimi) wrote its own session record during
+	// the run; locate it now (after exit) to bridge in seal.
+	transcriptHarness, transcriptPath := "", ""
+	if recipe.harness != "" && recipe.findTranscript != nil {
+		if p := recipe.findTranscript(agentStart); p != "" {
+			transcriptHarness, transcriptPath = recipe.harness, p
+		} else {
+			fmt.Fprintf(opts.Stderr, "launch: no %s session record found for this run (app-side degrades to record-only)\n", recipe.harness)
+		}
+	}
+
 	// Stop the sensor before sealing so its final correlated events are flushed.
 	if sensorProc != nil {
 		sensorProc.stop()
@@ -247,7 +260,7 @@ func Run(opts Options) (Report, error) {
 	}
 
 	// --- Seal: fold every source into the graph, apply policy, summarize, sign.
-	seal(db, paths, runID, hookLogPath, opts.SignKeyPath, &report, opts.Stderr)
+	seal(db, paths, runID, hookLogPath, transcriptHarness, transcriptPath, opts.SignKeyPath, &report, opts.Stderr)
 
 	printVerdict(opts.Stdout, report)
 
@@ -264,21 +277,34 @@ func Run(opts Options) (Report, error) {
 // evidence graph and fills the risk/bundle fields of report. Best-effort: a
 // failure in any stage is reported to stderr but does not abort the others, so
 // the operator always gets whatever evidence was capturable.
-func seal(db *sql.DB, paths store.Paths, runID, hookLogPath, signKeyPath string, report *Report, stderr io.Writer) {
+func seal(db *sql.DB, paths store.Paths, runID, hookLogPath, transcriptHarness, transcriptPath, signKeyPath string, report *Report, stderr io.Writer) {
+	// App-side intent comes from EITHER an injected hook log (Claude Code) or a
+	// harness's own session transcript (codex/kimi), normalized to the same hook
+	// events. Both then command-match to the kernel via CorrelateSyscalls.
+	var appReader io.Reader
 	if hookLogPath != "" {
 		if f, err := os.Open(hookLogPath); err == nil {
-			sum, ierr := hooksbridge.Ingest(db, f, hooksbridge.Options{
-				RunID:   runID,
-				Objects: provenance.ObjectStore{DB: db, Paths: paths},
-			})
-			f.Close()
-			if ierr != nil {
-				fmt.Fprintf(stderr, "launch: hooks ingest: %v\n", ierr)
-			} else {
-				report.HooksIngested = sum.ToolCalls
-				if _, cerr := hooksbridge.CorrelateSyscalls(db, runID); cerr != nil {
-					fmt.Fprintf(stderr, "launch: syscall correlation: %v\n", cerr)
-				}
+			defer f.Close()
+			appReader = f
+		}
+	} else if transcriptHarness != "" && transcriptPath != "" {
+		if r, err := hooksbridge.BridgeTranscript(transcriptHarness, transcriptPath); err != nil {
+			fmt.Fprintf(stderr, "launch: bridge %s transcript: %v\n", transcriptHarness, err)
+		} else {
+			appReader = r
+		}
+	}
+	if appReader != nil {
+		sum, ierr := hooksbridge.Ingest(db, appReader, hooksbridge.Options{
+			RunID:   runID,
+			Objects: provenance.ObjectStore{DB: db, Paths: paths},
+		})
+		if ierr != nil {
+			fmt.Fprintf(stderr, "launch: app-context ingest: %v\n", ierr)
+		} else {
+			report.HooksIngested = sum.ToolCalls
+			if _, cerr := hooksbridge.CorrelateSyscalls(db, runID); cerr != nil {
+				fmt.Fprintf(stderr, "launch: syscall correlation: %v\n", cerr)
 			}
 		}
 	}

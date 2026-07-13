@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -35,6 +36,77 @@ func HarvestTranscript(store ObjectStore, db *sql.DB, runID, path string) (int, 
 type AgentTranscript struct {
 	AgentID string
 	Path    string
+}
+
+// HarvestTranscriptsFromHookLog harvests every transcript a run's hook log points
+// at -- each distinct main session transcript_path AND each sub-agent
+// agent_transcript_path -- into the llm_call graph. Unlike the launch path (one
+// main + its sub-agents), a hook log can span several main sessions (e.g. the
+// double-attempt demo's recon + team runs in one run graph); each is namespaced
+// distinctly so none collide or get dropped. This is the reusable entry point for
+// pipelines that seal a run outside `launch`.
+func HarvestTranscriptsFromHookLog(store ObjectStore, db *sql.DB, runID, hookLogPath string) (int, error) {
+	mains, subs, err := transcriptsFromHookLog(hookLogPath)
+	if err != nil {
+		return 0, err
+	}
+	entries := make([]AgentTranscript, 0, len(mains)+len(subs))
+	for _, m := range mains {
+		// Namespace a main by its session file stem so multiple mains stay distinct.
+		entries = append(entries, AgentTranscript{AgentID: "session-" + fileStem(m), Path: m})
+	}
+	entries = append(entries, subs...)
+	// mainPath "" -> no empty-namespace main; every transcript is namespaced.
+	return HarvestTranscriptSet(store, db, runID, "", entries)
+}
+
+// transcriptsFromHookLog reads a hook JSONL log and returns the distinct main
+// session transcript paths and the distinct sub-agent transcripts (with agent id).
+func transcriptsFromHookLog(path string) (mains []string, subs []AgentTranscript, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("harvest transcripts: open hook log %s: %w", path, err)
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	seenMain, seenSub := map[string]bool{}, map[string]bool{}
+	for sc.Scan() {
+		var ev struct {
+			TranscriptPath      string `json:"transcript_path"`
+			AgentID             string `json:"agent_id"`
+			AgentTranscriptPath string `json:"agent_transcript_path"`
+		}
+		if json.Unmarshal(sc.Bytes(), &ev) != nil {
+			continue
+		}
+		if ev.TranscriptPath != "" && !seenMain[ev.TranscriptPath] {
+			seenMain[ev.TranscriptPath] = true
+			mains = append(mains, ev.TranscriptPath)
+		}
+		if ev.AgentTranscriptPath != "" && !seenSub[ev.AgentTranscriptPath] {
+			seenSub[ev.AgentTranscriptPath] = true
+			subs = append(subs, AgentTranscript{AgentID: ev.AgentID, Path: ev.AgentTranscriptPath})
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return nil, nil, err
+	}
+	// A sub-agent path must never also be treated as a main.
+	filtered := mains[:0]
+	for _, m := range mains {
+		if !seenSub[m] {
+			filtered = append(filtered, m)
+		}
+	}
+	return filtered, subs, nil
+}
+
+// fileStem returns a file's base name without its extension, for use as a
+// transcript namespace token.
+func fileStem(path string) string {
+	base := filepath.Base(path)
+	return strings.TrimSuffix(base, filepath.Ext(base))
 }
 
 // HarvestTranscriptSet harvests the main session transcript and every sub-agent

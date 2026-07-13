@@ -164,6 +164,47 @@ func graphCmd(dataDir, daemonURL *string) *cobra.Command {
 	}
 	materializeLLM.Flags().StringVar(&llmRunID, "run", "", "run id")
 
+	var harvestRunID, harvestHookLog string
+	harvestTranscripts := &cobra.Command{
+		Use:   "harvest-transcripts",
+		Short: "harvest every transcript a run's hook log points at (main sessions + sub-agents) into llm_call nodes",
+		Long: "Objectify each turn of every transcript referenced by the hook log -- each main\n" +
+			"session transcript_path and each sub-agent agent_transcript_path -- as llm_call\n" +
+			"nodes, with llm_caused edges to the syscalls the decided shell commands ran.\n" +
+			"Use when sealing a run outside `launch` (e.g. a record + hooks bridge pipeline);\n" +
+			"a delegate's decided command only becomes llm_caused once its own transcript is\n" +
+			"harvested. Must run on the host that produced the transcripts (sub-agent files\n" +
+			"are not in the bundle).",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if harvestRunID == "" {
+				return fmt.Errorf("--run is required")
+			}
+			if harvestHookLog == "" {
+				return fmt.Errorf("--hooklog is required")
+			}
+			paths, err := store.Init(*dataDir)
+			if err != nil {
+				return err
+			}
+			db, err := store.Open(paths)
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+			turns, err := provenance.HarvestTranscriptsFromHookLog(provenance.ObjectStore{DB: db, Paths: paths}, db, harvestRunID, harvestHookLog)
+			if err != nil {
+				return err
+			}
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
+				"schema_version": "agentprovenance.harvest_transcripts/v1",
+				"run":            harvestRunID,
+				"turns":          turns,
+			})
+		},
+	}
+	harvestTranscripts.Flags().StringVar(&harvestRunID, "run", "", "run id")
+	harvestTranscripts.Flags().StringVar(&harvestHookLog, "hooklog", "", "hook JSONL log whose transcript_path / agent_transcript_path fields to harvest")
+
 	var objectsRunID string
 	var objectsLimit int
 	var objectsCursor string
@@ -452,6 +493,7 @@ func graphCmd(dataDir, daemonURL *string) *cobra.Command {
 	cmd.AddCommand(logCmd)
 	cmd.AddCommand(materialize)
 	cmd.AddCommand(materializeLLM)
+	cmd.AddCommand(harvestTranscripts)
 	cmd.AddCommand(objectsCmd)
 	cmd.AddCommand(diffCmd)
 	cmd.AddCommand(blameCmd)

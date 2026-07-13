@@ -23,6 +23,14 @@ func BridgeTranscript(harness, path string) (io.Reader, error) {
 			return AdaptKimiSession(path)
 		}
 	}
+	if harness == "grok" {
+		// A session or workspace directory: find the newest chat_history.jsonl.
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			if p := newestGrokChatHistory(path); p != "" {
+				path = p
+			}
+		}
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -51,8 +59,10 @@ func AdaptHarness(harness string, r io.Reader) (io.Reader, error) {
 		return adaptKimiWire(r)
 	case "codex":
 		return adaptCodexRollout(r)
+	case "grok":
+		return adaptGrokSession(r)
 	default:
-		return nil, fmt.Errorf("hooksbridge: unknown harness %q (want claude|kimi|codex)", harness)
+		return nil, fmt.Errorf("hooksbridge: unknown harness %q (want claude|kimi|codex|grok)", harness)
 	}
 }
 
@@ -360,6 +370,111 @@ func commandString(v any) string {
 		return joinSpace(parts)
 	}
 	return ""
+}
+
+// adaptGrokSession maps a Grok CLI local session transcript (chat_history.jsonl)
+// to the normalized hook events. Grok records each turn as
+// {"type":"system|user|assistant","content":...,"model_id":...}; a turn that
+// decided tool calls carries them on the assistant entry (OpenAI-shaped
+// tool_calls) or as separate tool_call lines. The shell tool is normalized to
+// Bash+command so command-match to the kernel works, exactly like codex/kimi.
+// The app-context point here: an assistant turn with NO tool_calls is the model
+// DECLARING nothing but text -- the file/network effects are the mismatch.
+// NOTE: the tool_call shape is handled tolerantly (OpenAI function-style +
+// input/args variants); validate against a real tool-using Grok session.
+func adaptGrokSession(r io.Reader) (io.Reader, error) {
+	var out []normalizedEvent
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 1024*1024), 8*1024*1024)
+	for sc.Scan() {
+		var e map[string]any
+		if json.Unmarshal(sc.Bytes(), &e) != nil {
+			continue
+		}
+		ts := firstStr(e, "ts", "timestamp")
+		switch str(e["type"]) {
+		case "assistant":
+			if tcs, ok := e["tool_calls"].([]any); ok {
+				for _, raw := range tcs {
+					if tc, ok := raw.(map[string]any); ok {
+						out = append(out, grokToolEvent(tc, ts))
+					}
+				}
+			}
+		case "tool_call", "tool_use", "function_call":
+			out = append(out, grokToolEvent(e, ts))
+		case "tool_result", "tool_output", "function_call_output":
+			out = append(out, normalizedEvent{Event: "PostToolUse", ToolUseID: firstStr(e, "tool_call_id", "call_id", "id"), TS: ts})
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	return encodeEvents(out)
+}
+
+func grokToolEvent(tc map[string]any, ts string) normalizedEvent {
+	id := firstStr(tc, "id", "call_id", "tool_call_id")
+	name := firstStr(tc, "name")
+	ti := grokArgs(tc)
+	if fn, ok := tc["function"].(map[string]any); ok { // OpenAI function-shaped
+		if n := firstStr(fn, "name"); n != "" {
+			name = n
+		}
+		ti = grokArgs(fn)
+	}
+	if cmd := firstStr(ti, "command", "cmd"); cmd != "" && isGrokShellTool(name) {
+		name, ti = "Bash", map[string]any{"command": cmd}
+	}
+	return normalizedEvent{Event: "PreToolUse", ToolName: name, ToolInput: ti, ToolUseID: id, TS: ts}
+}
+
+func grokArgs(m map[string]any) map[string]any {
+	if raw := firstStr(m, "arguments"); raw != "" {
+		var mm map[string]any
+		if json.Unmarshal([]byte(raw), &mm) == nil {
+			return mm
+		}
+	}
+	if in, ok := m["input"].(map[string]any); ok {
+		return in
+	}
+	if args, ok := m["args"].(map[string]any); ok {
+		return args
+	}
+	if cmd, ok := m["command"]; ok {
+		return map[string]any{"command": commandString(cmd)}
+	}
+	return nil
+}
+
+func isGrokShellTool(name string) bool {
+	switch strings.ToLower(name) {
+	case "bash", "shell", "run", "exec", "run_command", "execute", "terminal", "run_terminal_cmd":
+		return true
+	}
+	return false
+}
+
+// newestGrokChatHistory locates a Grok chat_history.jsonl under a session or
+// workspace directory (sessions/<workspace>/<session-id>/chat_history.jsonl),
+// picking the most-recently-modified.
+func newestGrokChatHistory(dir string) string {
+	var best string
+	var bestMod int64
+	for _, pat := range []string{
+		filepath.Join(dir, "chat_history.jsonl"),
+		filepath.Join(dir, "*", "chat_history.jsonl"),
+		filepath.Join(dir, "*", "*", "chat_history.jsonl"),
+	} {
+		matches, _ := filepath.Glob(pat)
+		for _, m := range matches {
+			if fi, err := os.Stat(m); err == nil && fi.ModTime().UnixNano() > bestMod {
+				best, bestMod = m, fi.ModTime().UnixNano()
+			}
+		}
+	}
+	return best
 }
 
 func str(v any) string {

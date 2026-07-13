@@ -81,6 +81,6 @@ func hooksBridgeCmd(dataDir *string) *cobra.Command {
 	cmd.Flags().StringVar(&runID, "run", "", "run id to attach the orchestration graph to")
 	cmd.Flags().StringVar(&file, "file", "-", "hook JSONL file (default stdin)")
 	cmd.Flags().BoolVar(&correlate, "correlate", true, "attribute sensor syscall events to the acting agent by command-match")
-	cmd.Flags().StringVar(&harness, "harness", "claude", "harness whose session transcript this is: claude | kimi | codex")
+	cmd.Flags().StringVar(&harness, "harness", "claude", "harness whose session transcript this is: claude | kimi | codex | grok")
 	return cmd
 }

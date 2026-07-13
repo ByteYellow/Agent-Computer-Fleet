@@ -140,38 +140,68 @@ func MaterializeLLMCalls(store ObjectStore, db *sql.DB, runID string) (int, erro
 	return n, nil
 }
 
-// commandMatchedActions returns the execve event nodes whose command line matches
+// commandMatchedActions returns the runtime-event nodes whose command line matches
 // one of the commands the model decided to run, collected before any write (to
 // avoid the single-connection nested-cursor footgun). Empty when the model
 // decided no command or nothing ran it -- we link only what we can attribute.
+//
+// It scans BOTH execve events and process_observed samples. The eBPF execve
+// captures argv from user memory at exec and intermittently truncates it to just
+// the program (e.g. "/usr/bin/python3", losing the script path) -- which strips
+// the distinctive token command-match needs. The record process sampler reads the
+// full command line from /proc/<pid>/cmdline independently, so it carries the
+// complete command for the same action. Matching against both makes the llm_caused
+// edge robust to execve argv truncation: when the execve string is stripped, the
+// process_observed sample still ties the decided command to the syscall it ran.
 func commandMatchedActions(db *sql.DB, runID string, commands []string) ([]string, error) {
 	if len(commands) == 0 {
 		return nil, nil
 	}
-	rows, err := db.Query(`SELECT id, COALESCE(payload,'') FROM events
-		WHERE run_id = ? AND event_type = 'execve'`, runID)
+	rows, err := db.Query(`SELECT id, event_type, COALESCE(payload,'') FROM events
+		WHERE run_id = ? AND event_type IN ('execve', 'process_observed')`, runID)
 	if err != nil {
 		return nil, fmt.Errorf("materialize llm calls: command match: %w", err)
 	}
 	defer rows.Close()
 	var out []string
+	seen := map[string]bool{}
 	for rows.Next() {
-		var id, payload string
-		if err := rows.Scan(&id, &payload); err != nil {
+		var id, eventType, payload string
+		if err := rows.Scan(&id, &eventType, &payload); err != nil {
 			return nil, err
 		}
-		cmd := execveCommand(payload)
+		cmd := actionCommand(eventType, payload)
 		if cmd == "" {
 			continue
 		}
 		for _, decided := range commands {
 			if commandsMatch(cmd, decided) {
-				out = append(out, "runtime_event/"+id)
+				node := "runtime_event/" + id
+				if !seen[node] {
+					seen[node] = true
+					out = append(out, node)
+				}
 				break
 			}
 		}
 	}
 	return out, rows.Err()
+}
+
+// actionCommand pulls the command line from a runtime action event: execve carries
+// argv (possibly truncated) in its own envelope; a record process sample carries
+// the full /proc/<pid>/cmdline command in the record envelope.
+func actionCommand(eventType, payload string) string {
+	if eventType == "process_observed" {
+		var proc struct {
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal(unwrapRecordProcessPayload(payload), &proc); err == nil {
+			return proc.Command
+		}
+		return ""
+	}
+	return execveCommand(payload)
 }
 
 // execveCommand pulls the command line from an execve event payload, handling the

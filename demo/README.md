@@ -4,12 +4,18 @@ Three stages, read simplest → hardest. Each is a **real capture on genuine
 kernel events**, exported as a signed, verifiable bundle you can replay locally
 (no VM needed). Start with Stage 1.
 
-Both capture harnesses fire one real model/tool-intent request through
-[`shared/llm-intent-curl.sh`](shared/llm-intent-curl.sh) (curl/OpenSSL, secrets
-never in the body), so the sensor's full-TLS-body capture puts the **model call
-that decided the poisoned install** into the bundle: an `llm_call` node whose
-`llm_caused` edge points at the very command that ran, rendered by the
-agent-intent DAG lens.
+Each agent's session transcript is harvested into `llm_call` nodes — the model's
+real prompt, reasoning, and decided commands. In the **multi-agent stage**
+(Stage 2) the **model call that decided the poisoned install** links to the very
+command that ran via an `llm_caused` edge — including the call made by a
+**sub-agent** (bob), whose decision lives in its own transcript, not the
+orchestrator's. The join is robust to eBPF argv truncation: it matches the
+decided command against the record process sample (`/proc/cmdline`), so the edge
+survives even when the execve argv is clipped. Rendered by the agent-intent DAG
+lens.
+
+(Stage 1's committed bundle predates this harvest, so it shows the causal join
+only at the tool_call→syscall level; its `llm_caused` regeneration is pending.)
 
 ## Stage 1 — [`snake-supply-chain/`](snake-supply-chain/) · one agent
 

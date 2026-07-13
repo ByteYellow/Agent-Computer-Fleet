@@ -28,8 +28,15 @@ func BridgeTranscript(harness, path string) (io.Reader, error) {
 		return nil, err
 	}
 	defer f.Close()
-	// Read the whole file now (defer-close is fine: the adapters buffer output).
-	return AdaptHarness(harness, f)
+	// Buffer the whole file before returning: the claude adapter is a passthrough
+	// that hands the reader back unread, so a reader over `f` would be consumed by
+	// the caller AFTER this defer closes it ("file already closed"). A bytes.Reader
+	// is safe after close, and the codex/kimi adapters read eagerly anyway.
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, err
+	}
+	return AdaptHarness(harness, bytes.NewReader(data))
 }
 
 // AdaptHarness wraps a harness-specific session transcript in a reader of the

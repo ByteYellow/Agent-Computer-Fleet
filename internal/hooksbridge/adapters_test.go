@@ -166,6 +166,29 @@ func TestAdaptCodexRolloutCapturesSpawnAgent(t *testing.T) {
 	}
 }
 
+func TestBridgeTranscriptClaudeFileIsReadableAfterClose(t *testing.T) {
+	// Regression: the claude adapter is a passthrough, so BridgeTranscript must
+	// buffer the file -- otherwise its defer-close fires before the caller reads,
+	// yielding "file already closed" and an empty bridge (no agents/tool_calls).
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hooklog.jsonl")
+	line := `{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo hi"},"tool_use_id":"c1"}`
+	if err := os.WriteFile(path, []byte(line+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, err := BridgeTranscript("claude", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("reader unreadable (file closed too early?): %v", err)
+	}
+	if !strings.Contains(string(data), "echo hi") {
+		t.Fatalf("bridged content lost: %q", data)
+	}
+}
+
 func TestAdaptHarnessUnknownRejected(t *testing.T) {
 	if _, err := AdaptHarness("langchain", strings.NewReader("")); err == nil {
 		t.Fatal("unknown harness should error")

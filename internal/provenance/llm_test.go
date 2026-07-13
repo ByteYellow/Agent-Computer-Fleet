@@ -76,13 +76,18 @@ func TestCommandMatchedActionsRobustToExecveTruncation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	decided := "python3 ../pysnake-helper/setup.py install --user"
+	decided := "python3 ../pysnake-helper/setup.py install"
 	// The execve for that command came through truncated to just the program.
 	ins("ev-exec", "execve", `{"payload":{"raw":{"command":"/usr/bin/python3"}}}`)
-	// The record sample of the same process kept the full /proc/cmdline command.
+	// The record sample of the same process kept the full /proc/cmdline command
+	// (with an extra trailing arg -- a prefix match, not exact).
 	ins("ev-proc", "process_observed", `{"payload":{"command":"python3 ../pysnake-helper/setup.py install --user","pid":913280}}`)
-	// An unrelated sample must not match.
-	ins("ev-other", "process_observed", `{"payload":{"command":"ls -la /tmp/build","pid":42}}`)
+	// The shell wrapper Claude runs the command through CONTAINS the decided
+	// command but does not start with it -- it must NOT be attributed (prefix, not
+	// substring), else llm_caused points at plumbing instead of the command.
+	ins("ev-wrap", "process_observed", `{"payload":{"command":"/bin/bash -c source /home/u/.claude/shell-snapshots/snap.sh && python3 ../pysnake-helper/setup.py install","pid":913279}}`)
+	// A different command that merely shares the workspace path must not match.
+	ins("ev-other", "process_observed", `{"payload":{"command":"ls -la ../pysnake-helper","pid":42}}`)
 
 	got, err := commandMatchedActions(db, run, []string{decided})
 	if err != nil {
@@ -99,8 +104,11 @@ func TestCommandMatchedActionsRobustToExecveTruncation(t *testing.T) {
 	if !has("runtime_event/ev-proc") {
 		t.Errorf("truncated execve: expected match via process_observed sample, got %v", got)
 	}
+	if has("runtime_event/ev-wrap") {
+		t.Errorf("shell wrapper was attributed (should be excluded by prefix match): %v", got)
+	}
 	if has("runtime_event/ev-other") {
-		t.Errorf("unrelated process sample matched: %v", got)
+		t.Errorf("different command sharing the workspace path matched: %v", got)
 	}
 	if len(got) != 1 {
 		t.Errorf("expected exactly one matched action (the setup.py process), got %v", got)

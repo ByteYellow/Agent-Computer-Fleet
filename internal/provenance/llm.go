@@ -224,39 +224,38 @@ func execveCommand(payload string) string {
 	return c
 }
 
-// commandsMatch reports whether an execve command line ran the command the model
-// decided to run. The sensor captures argv reordered and truncated (~31 chars per
-// slot), so a full-line compare fails; instead we match the model command's most
-// distinctive token -- its longest path-like token -- (or a prefix of it, to
-// tolerate truncation) appearing in the execve line. A token under 8 chars is too
-// generic to attribute safely, so such commands link nothing.
-func commandsMatch(execCmd, decided string) bool {
-	tok := longestToken(decided)
-	if len(tok) < 8 {
+// commandsMatch reports whether a runtime action's command line ran the command
+// the model decided to run. It requires one command to be a PREFIX of the other
+// (after normalization): the actual process command begins with the decided one
+// (extra trailing args allowed), or vice-versa when the sample is itself clipped.
+//
+// Prefix, not substring, is what keeps attribution both precise and clean:
+//   - Precise: several commands in one workspace share a long directory-path
+//     token (`/home/u/proj/...`), so token- or substring-matching cross-links
+//     `ls`, `git`, and `rg` to each other. A prefix match does not.
+//   - Clean: Claude runs each command as `bash -c 'source <snapshot> && <cmd>'`.
+//     That wrapper CONTAINS the decided command but does not start with it, so a
+//     prefix match attaches llm_caused to the command's own process, not the
+//     shell-plumbing wrapper.
+//
+// This does not cost truncation robustness: the eBPF execve may be argv-truncated,
+// but the record process sample carries the full /proc/cmdline for the same action
+// (see commandMatchedActions), and that starts with the decided command. A command
+// under 12 chars is too generic to attribute.
+func commandsMatch(actual, decided string) bool {
+	a := normCmd(actual)
+	d := normCmd(decided)
+	short, long := d, a
+	if len(a) < len(d) {
+		short, long = a, d
+	}
+	if len(short) < 12 {
 		return false
 	}
-	if len(tok) > 20 {
-		tok = tok[:20] // match a prefix: the sensor truncates long argv slots
-	}
-	return strings.Contains(normCmd(execCmd), tok)
+	return strings.HasPrefix(long, short)
 }
 
 func normCmd(s string) string { return strings.ToLower(strings.Join(strings.Fields(s), " ")) }
-
-// longestToken returns the longest non-flag token of a command (lowercased) --
-// usually the script/target path, the most distinctive part to match on.
-func longestToken(cmd string) string {
-	best := ""
-	for _, f := range strings.Fields(strings.ToLower(cmd)) {
-		if strings.HasPrefix(f, "-") {
-			continue
-		}
-		if len(f) > len(best) {
-			best = f
-		}
-	}
-	return best
-}
 
 // insertLLMEdge writes one graph edge. An empty endpoint is a legitimate skip
 // (e.g. a request with no captured response body) and returns nil; a real write

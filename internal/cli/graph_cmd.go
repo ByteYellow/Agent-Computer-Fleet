@@ -205,6 +205,48 @@ func graphCmd(dataDir, daemonURL *string) *cobra.Command {
 	harvestTranscripts.Flags().StringVar(&harvestRunID, "run", "", "run id")
 	harvestTranscripts.Flags().StringVar(&harvestHookLog, "hooklog", "", "hook JSONL log whose transcript_path / agent_transcript_path fields to harvest")
 
+	var epRunID, epDump string
+	ingestEndpoint := &cobra.Command{
+		Use:   "ingest-endpoint",
+		Short: "fold a capture proxy's dump (chat + data egress) into the run graph",
+		Long: "For agents whose TLS the libssl uprobe cannot read (e.g. rustls CLIs like\n" +
+			"Grok), the model traffic and data egress are captured at a controlled proxy.\n" +
+			"This ingests that dump: chat/responses -> llm_call nodes (with tool-call\n" +
+			"declaration); /v1/upload|/traces -> a network_connect egress event + a\n" +
+			"content-addressed payload descriptor, marked blocked/deny when the proxy\n" +
+			"blocked the upload.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if epRunID == "" {
+				return fmt.Errorf("--run is required")
+			}
+			if epDump == "" {
+				return fmt.Errorf("--dump is required")
+			}
+			paths, err := store.Init(*dataDir)
+			if err != nil {
+				return err
+			}
+			db, err := store.Open(paths)
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+			r, err := provenance.IngestEndpointDump(provenance.ObjectStore{DB: db, Paths: paths}, db, epRunID, epDump)
+			if err != nil {
+				return err
+			}
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
+				"schema_version": "agentprovenance.ingest_endpoint/v1",
+				"run":            epRunID,
+				"llm_calls":      r.LLMCalls,
+				"egress":         r.Egress,
+				"blocked_egress": r.BlockedEgress,
+			})
+		},
+	}
+	ingestEndpoint.Flags().StringVar(&epRunID, "run", "", "run id")
+	ingestEndpoint.Flags().StringVar(&epDump, "dump", "", "capture proxy dump directory")
+
 	var objectsRunID string
 	var objectsLimit int
 	var objectsCursor string
@@ -494,6 +536,7 @@ func graphCmd(dataDir, daemonURL *string) *cobra.Command {
 	cmd.AddCommand(materialize)
 	cmd.AddCommand(materializeLLM)
 	cmd.AddCommand(harvestTranscripts)
+	cmd.AddCommand(ingestEndpoint)
 	cmd.AddCommand(objectsCmd)
 	cmd.AddCommand(diffCmd)
 	cmd.AddCommand(blameCmd)

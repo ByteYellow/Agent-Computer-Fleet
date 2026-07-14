@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/byteyellow/agentprovenance/internal/ids"
+	"github.com/byteyellow/agentprovenance/internal/security"
 )
 
 // EndpointResult summarizes an endpoint-dump ingestion.
@@ -78,6 +79,25 @@ func IngestEndpointDump(store ObjectStore, db *sql.DB, runID, dumpDir string) (E
 	if _, err := db.Exec(`DELETE FROM graph_edges WHERE run_id = ? AND from_id LIKE 'llm_call/ep-%'`, runID); err != nil {
 		return res, err
 	}
+	// Clear the deny chain (policy_decision -> risk_signal -> response_action ->
+	// unified signal + edges) a prior ingest attached to the endpoint egress
+	// events, keyed on those events so only THIS layer is removed (not the gate's).
+	// Runs before the events are deleted so the subqueries can still see them.
+	const epEvents = `(SELECT id FROM events WHERE run_id = ? AND source = 'endpoint_capture')`
+	for _, stmt := range []struct {
+		sql  string
+		args []any
+	}{
+		{`DELETE FROM graph_edges WHERE run_id = ? AND edge_type IN ('runtime_event_policy_decision','policy_decision_risk_signal','risk_signal_response_action','policy_decision_session') AND source_event_id IN ` + epEvents, []any{runID, runID}},
+		{`DELETE FROM signals WHERE run_id = ? AND source_table = 'risk_signals' AND event_id IN ` + epEvents, []any{runID, runID}},
+		{`DELETE FROM response_actions WHERE run_id = ? AND policy_decision_id IN (SELECT id FROM policy_decisions WHERE run_id = ? AND event_id IN ` + epEvents + `)`, []any{runID, runID, runID}},
+		{`DELETE FROM risk_signals WHERE run_id = ? AND event_id IN ` + epEvents, []any{runID, runID}},
+		{`DELETE FROM policy_decisions WHERE run_id = ? AND event_id IN ` + epEvents, []any{runID, runID}},
+	} {
+		if _, err := db.Exec(stmt.sql, stmt.args...); err != nil {
+			return res, err
+		}
+	}
 	if _, err := db.Exec(`DELETE FROM events WHERE run_id = ? AND source = 'endpoint_capture'`, runID); err != nil {
 		return res, err
 	}
@@ -90,6 +110,9 @@ func IngestEndpointDump(store ObjectStore, db *sql.DB, runID, dumpDir string) (E
 		}
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	// Attribute the egress to the SAME session/process the kernel saw reading the
+	// files, so the exfil renders as one chain with the rest of the run's activity.
+	sessionID, processID := runSessionProcess(db, runID)
 
 	for _, m := range metas {
 		body := readBody(m.base)
@@ -102,7 +125,7 @@ func IngestEndpointDump(store ObjectStore, db *sql.DB, runID, dumpDir string) (E
 			res.LLMCalls++
 		case isEndpointEgress(m.Path) && m.Kind != "resp":
 			blocked := m.Kind == "EXFIL-REQ" || m.Kind == "exfil-req"
-			if err := ingestEgress(store, db, runID, m, body, blocked, now); err != nil {
+			if err := ingestEgress(store, db, runID, m, body, blocked, sessionID, processID, now); err != nil {
 				return res, err
 			}
 			res.Egress++
@@ -161,7 +184,7 @@ func ingestChatCall(store ObjectStore, db *sql.DB, runID string, m endpointMeta,
 
 // ingestEgress records a data-egress upload as a network_connect event (so the
 // intent diff sees an effect) plus a content-addressed descriptor of the payload.
-func ingestEgress(store ObjectStore, db *sql.DB, runID string, m endpointMeta, body []byte, blocked bool, now string) error {
+func ingestEgress(store ObjectStore, db *sql.DB, runID string, m endpointMeta, body []byte, blocked bool, sessionID, processID, now string) error {
 	sum := sha256.Sum256(body)
 	digest := "sha256:" + hex.EncodeToString(sum[:])
 	// Prefer the proxy's own detection (it saw the whole body); fall back to
@@ -191,12 +214,42 @@ func ingestEgress(store ObjectStore, db *sql.DB, runID string, m endpointMeta, b
 		"payload_sha256": digest, "is_git_bundle": isBundle, "canary_hits": canaries,
 		"blocked": blocked, "policy_decision": ternary(blocked, "deny", "observe"),
 	})
-	if _, err := db.Exec(`INSERT INTO events (id, run_id, source, event_type, payload, created_at)
-		VALUES (?, ?, 'endpoint_capture', 'network_connect', ?, ?)`, eventID, runID, string(payload), now); err != nil {
+	// Attribute the egress to grok's session/process so it joins the same chain as
+	// the kernel's reads of those files.
+	if _, err := db.Exec(`INSERT INTO events (id, run_id, session_id, process_id, source, event_type, payload, created_at)
+		VALUES (?, ?, ?, ?, 'endpoint_capture', 'network_connect', ?, ?)`, eventID, runID, sessionID, processID, string(payload), now); err != nil {
 		return err
 	}
 	// Link the egress event node to the payload evidence object.
-	return insertLLMEdge(db, runID, "runtime_event/"+eventID, obj.Hash, "endpoint_egress_payload", eventID, now)
+	if err := insertLLMEdge(db, runID, "runtime_event/"+eventID, obj.Hash, "endpoint_egress_payload", eventID, now); err != nil {
+		return err
+	}
+	// A blocked codebase upload becomes a first-class deny in the risk -> response
+	// chain (the same one the gate uses), so the dashboard headlines "codebase
+	// exfiltration -> BLOCKED" alongside the secret-read signals -- one chain.
+	if blocked {
+		reason := fmt.Sprintf("BLOCKED: grok attempted to upload %d bytes of the codebase to grok-code-session-traces (%s)", len(body), m.Path)
+		if _, err := security.PersistDenyForEvent(db, eventID, "codebase_egress_block", reason); err != nil {
+			return fmt.Errorf("ingest endpoint: egress deny chain: %w", err)
+		}
+	}
+	return nil
+}
+
+// runSessionProcess returns the session and process the run's activity is under,
+// preferring the process the kernel saw reading a secret path (so the egress
+// attaches to the same node as the reads), falling back to any of the run's.
+func runSessionProcess(db *sql.DB, runID string) (sessionID, processID string) {
+	_ = db.QueryRow(`SELECT COALESCE(process_id,''), COALESCE(session_id,'') FROM events
+		WHERE run_id = ? AND event_type = 'secret_path' AND COALESCE(process_id,'') != '' LIMIT 1`, runID).Scan(&processID, &sessionID)
+	if sessionID == "" {
+		_ = db.QueryRow(`SELECT p.id, p.session_id FROM processes p JOIN sessions s ON p.session_id = s.id
+			WHERE s.run_id = ? ORDER BY p.started_at LIMIT 1`, runID).Scan(&processID, &sessionID)
+	}
+	if sessionID == "" {
+		_ = db.QueryRow(`SELECT id FROM sessions WHERE run_id = ? LIMIT 1`, runID).Scan(&sessionID)
+	}
+	return sessionID, processID
 }
 
 // responseDeclaresToolCall reports whether the model's response (JSON or SSE)

@@ -399,6 +399,22 @@ func PersistDecision(db *sql.DB, event Event, rawPayload string, decision Decisi
 	return persistDecision(db, event, rawPayload, decision)
 }
 
+// PersistDenyForEvent attaches a deny policy decision -- plus its risk signal,
+// response action, unified security signal, and graph edges -- to an
+// already-stored runtime event, in the exact same verifiable chain the rule
+// engine writes. It is for out-of-band enforcers (e.g. the endpoint egress
+// blocker that DENIED a codebase upload the rule engine never saw): the block
+// becomes a first-class risk -> response node attributed to the event's
+// session/process, so it renders as one chain with the rest of the run.
+func PersistDenyForEvent(db *sql.DB, eventID, ruleID, reason string) (DecisionRecord, error) {
+	event, rawPayload, err := runtimeEventForPolicy(db, eventID)
+	if err != nil {
+		return DecisionRecord{}, err
+	}
+	return persistDecisionForEventID(db, eventID, event, rawPayload,
+		Decision{Decision: "deny", RuleID: ruleID, Reason: reason})
+}
+
 // ReevaluateRun re-runs the policy engine over a run's already-captured runtime
 // events, replacing the derived security layer (policy_decisions -> risk_signals
 // -> response_actions -> unified signals + their graph edges) with fresh verdicts

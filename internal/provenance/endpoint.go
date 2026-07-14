@@ -1,6 +1,7 @@
 package provenance
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -25,12 +26,14 @@ type EndpointResult struct {
 // endpointMeta is one record the capture proxy wrote for a request or response.
 // (proxy writes <seq>_<kind>_<path>.{meta.json,body.bin}; kind is req|resp|EXFIL-REQ.)
 type endpointMeta struct {
-	Seq    int    `json:"seq"`
-	Kind   string `json:"kind"`
-	Method string `json:"method"`
-	Path   string `json:"path"`
-	Size   int    `json:"size"`
-	base   string // path without .meta.json (to find the sibling .body.bin)
+	Seq         int      `json:"seq"`
+	Kind        string   `json:"kind"`
+	Method      string   `json:"method"`
+	Path        string   `json:"path"`
+	Size        int      `json:"size"`
+	CanaryHits  []string `json:"canary_hits"`   // canary strings the proxy matched in this body
+	IsGitBundle bool     `json:"is_git_bundle"` // proxy-detected git-bundle marker
+	base        string   // path without .meta.json (to find the sibling .body.bin)
 }
 
 // IngestEndpointDump folds a capture proxy's dump into the run graph for agents
@@ -161,15 +164,21 @@ func ingestChatCall(store ObjectStore, db *sql.DB, runID string, m endpointMeta,
 func ingestEgress(store ObjectStore, db *sql.DB, runID string, m endpointMeta, body []byte, blocked bool, now string) error {
 	sum := sha256.Sum256(body)
 	digest := "sha256:" + hex.EncodeToString(sum[:])
-	isBundle := len(body) >= 4 && (string(body[:min4(body)]) == "PACK" || strings.Contains(string(body[:min64(body)]), "git bundle"))
-	descriptor := map[string]any{
+	// Prefer the proxy's own detection (it saw the whole body); fall back to
+	// scanning the (possibly chunked) body here.
+	isBundle := m.IsGitBundle || bytes.Contains(body, []byte("git bundle")) ||
+		(len(body) >= 4 && bytes.HasPrefix(body, []byte("PACK")))
+	// canary_hits is the proof of WHICH do-not-read files entered the (blocked)
+	// upload -- the demo's smoking gun, now a first-class field on the egress node.
+	canaries := m.CanaryHits
+	fields := map[string]any{
 		"kind": "egress_payload", "path": m.Path, "bytes": len(body),
-		"payload_sha256": digest, "is_git_bundle": isBundle,
+		"payload_sha256": digest, "is_git_bundle": isBundle, "canary_hits": canaries,
 		"blocked": blocked, "policy_decision": ternary(blocked, "deny", "observe"),
 	}
 	obj, err := store.PutExternalObject(ExternalObjectInput{
 		Type: "egress_payload", SourceID: fmt.Sprintf("endpoint/egress-%d", m.Seq), RunID: runID,
-		Payload: descriptor,
+		Payload: fields,
 	})
 	if err != nil {
 		return fmt.Errorf("ingest endpoint: egress object: %w", err)
@@ -178,8 +187,8 @@ func ingestEgress(store ObjectStore, db *sql.DB, runID string, m endpointMeta, b
 	// with no declared intent (the codebase left the box, or was blocked leaving).
 	eventID := ids.New("evt")
 	payload, _ := json.Marshal(map[string]any{
-		"dst_host": "api.x.ai", "path": m.Path, "bytes": len(body),
-		"payload_sha256": digest, "is_git_bundle": isBundle,
+		"dst_host": "grok-code-session-traces", "path": m.Path, "bytes": len(body),
+		"payload_sha256": digest, "is_git_bundle": isBundle, "canary_hits": canaries,
 		"blocked": blocked, "policy_decision": ternary(blocked, "deny", "observe"),
 	})
 	if _, err := db.Exec(`INSERT INTO events (id, run_id, source, event_type, payload, created_at)
@@ -196,20 +205,6 @@ func responseDeclaresToolCall(body []byte) bool {
 	s := string(body)
 	return strings.Contains(s, "\"tool_calls\"") || strings.Contains(s, "\"tool_use\"") ||
 		strings.Contains(s, "\"function_call\"") || strings.Contains(s, "\"tool_call\"")
-}
-
-func min4(b []byte) int {
-	if len(b) < 4 {
-		return len(b)
-	}
-	return 4
-}
-
-func min64(b []byte) int {
-	if len(b) < 64 {
-		return len(b)
-	}
-	return 64
 }
 
 func ternary(cond bool, a, b string) string {

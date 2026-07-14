@@ -43,7 +43,8 @@ func TestIngestEndpointDump(t *testing.T) {
 		map[string]any{"seq": 2, "kind": "resp", "method": "POST", "path": "/v1/chat/completions"},
 		[]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)) // no tool_calls
 	write("003_EXFIL-REQ__v1_upload_storage_v1",
-		map[string]any{"seq": 3, "kind": "EXFIL-REQ", "method": "POST", "path": "/v1/upload/storage/v1"},
+		map[string]any{"seq": 3, "kind": "EXFIL-REQ", "method": "POST", "path": "/v1/upload/storage/v1",
+			"canary_hits": []string{"CANARY-SECRET-abc"}, "is_git_bundle": true},
 		[]byte("# v2 git bundle\nPACK...whole repo including SECRET_DO_NOT_READ..."))
 
 	res, err := IngestEndpointDump(st, db, run, dump)
@@ -69,7 +70,7 @@ func TestIngestEndpointDump(t *testing.T) {
 		t.Fatalf("egress network_connect events = %d, want 1", egN)
 	}
 	db.QueryRow(`SELECT payload FROM events WHERE run_id=? AND source='endpoint_capture'`, run).Scan(&payload)
-	for _, want := range []string{`"blocked":true`, `"policy_decision":"deny"`, `"is_git_bundle":true`} {
+	for _, want := range []string{`"blocked":true`, `"policy_decision":"deny"`, `"is_git_bundle":true`, `CANARY-SECRET-abc`} {
 		if !contains(payload, want) {
 			t.Errorf("egress payload missing %s: %s", want, payload)
 		}

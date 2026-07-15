@@ -44,12 +44,27 @@ func taintFlowScope(src, sink lensEvent, allowFallback bool) (fromNode, scopeKey
 		}
 		return fmt.Sprintf("runtime_process/pid/%d", src.PID), fmt.Sprintf("pid:%d", src.PID),
 			"dataflow.same_process.secret_to_network.v1", 0.82
-	case allowFallback && src.ProcessID != "" && src.ProcessID == sink.ProcessID:
-		return src.ProcessID, "process:" + src.ProcessID, "dataflow.same_process.secret_to_network.v1", 0.8
+	case (allowFallback || endpointCorrelationAvailable(src, sink)) && src.ProcessID != "" && src.ProcessID == sink.ProcessID:
+		// Endpoint captures (for example a rustls agent observed at its controlled
+		// HTTP endpoint) do not have a kernel PID. They inherit the process_id
+		// chosen while joining the endpoint request to the kernel evidence. Allow
+		// this narrow fallback so the real source -> payload -> egress chain remains
+		// visible, while ordinary coarse process IDs still require explicit opt-in.
+		confidence := 0.8
+		rule := "dataflow.same_process.secret_to_network.v1"
+		if !allowFallback {
+			confidence = 0.74
+			rule = "dataflow.endpoint_process_join.secret_to_payload.v1"
+		}
+		return src.ProcessID, "process:" + src.ProcessID, rule, confidence
 	case allowFallback && src.ToolCallID != "" && src.ToolCallID == sink.ToolCallID:
 		return src.ToolCallID, "tool_call:" + src.ToolCallID, "dataflow.same_tool_call.risky_egress.v1", 0.52
 	}
 	return "", "", "", 0
+}
+
+func endpointCorrelationAvailable(src, sink lensEvent) bool {
+	return src.Source == "endpoint_capture" || sink.Source == "endpoint_capture"
 }
 
 // isLoopbackDestination reports whether a destination is the local host (e.g. the

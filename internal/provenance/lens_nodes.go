@@ -34,7 +34,7 @@ func graphLensNodes(db *sql.DB, runID string) (map[string]GraphLensNode, map[str
 		}
 		ev.NodeID = "runtime_event/" + ev.ID
 		ev.Path = payloadString(ev.Payload, "path", "file")
-		ev.Destination = payloadString(ev.Payload, "host", "dst_ip", "dst", "destination")
+		ev.Destination = payloadString(ev.Payload, "host", "dst_host", "dst_ip", "dst", "destination")
 		events[ev.NodeID] = ev
 		add(GraphLensNode{
 			ID:      ev.NodeID,
@@ -482,7 +482,7 @@ func llmContentSummary(content string) (prompt string, command string) {
 func addProvenanceObjectNodes(db *sql.DB, runID string, add func(GraphLensNode)) error {
 	agentNames := agentNameMap(db, runID)
 	rows, err := db.Query(`SELECT hash, object_type, COALESCE(source_id,''), COALESCE(path,''), COALESCE(size_bytes,0)
-		FROM provenance_objects WHERE run_id = ? AND object_type IN ('artifact','llm_message')`, runID)
+		FROM provenance_objects WHERE run_id = ? AND object_type IN ('artifact','llm_message','egress_payload')`, runID)
 	if err != nil {
 		return err
 	}
@@ -521,6 +521,23 @@ func addProvenanceObjectNodes(db *sql.DB, runID string, add func(GraphLensNode))
 					"tool_decision": meta.ToolCalls, "tools_offered": meta.ToolsOffered,
 					"message_count": meta.MessageCount, "stop_reason": meta.StopReason,
 					"prompt": meta.Prompt, "command": meta.Command,
+				},
+			})
+			continue
+		}
+		if objectType == "egress_payload" {
+			meta := readEgressPayloadMeta(path)
+			label := fallback(stringFromAny(meta["egress_kind"]), "egress payload")
+			if hits, ok := meta["canary_hits"].([]any); ok && len(hits) > 0 {
+				label = fmt.Sprintf("%s: %d canary", label, len(hits))
+			}
+			add(GraphLensNode{
+				ID: hash, Kind: "artifact", Subtype: "egress_payload", Label: label,
+				Risk: riskIf(stringFromAny(meta["policy_decision"]) == "deny"), TrustOrigin: "content_addressed",
+				Data: map[string]any{
+					"hash": hash, "object_type": objectType, "source_id": sourceID, "path": path,
+					"size_bytes": sizeBytes, "egress_kind": meta["egress_kind"], "canary_hits": meta["canary_hits"],
+					"canary_paths": meta["canary_paths"], "blocked": meta["blocked"], "policy_decision": meta["policy_decision"],
 				},
 			})
 			continue
@@ -564,6 +581,20 @@ func addProvenanceObjectNodes(db *sql.DB, runID string, add func(GraphLensNode))
 		})
 	}
 	return rows.Err()
+}
+
+func readEgressPayloadMeta(path string) map[string]any {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var obj struct {
+		Payload map[string]any `json:"payload"`
+	}
+	if json.Unmarshal(raw, &obj) != nil {
+		return nil
+	}
+	return obj.Payload
 }
 
 // parseAgentMessageSource splits an objectified peer-message source id

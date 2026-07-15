@@ -55,6 +55,7 @@ func Diff(contracts []IntentContract, effects []RuntimeEffect) []IntentRuntimeDi
 	byAgent := map[string][]RuntimeEffect{}
 	byToolCall := map[string][]RuntimeEffect{}
 	contractedAgents := map[string]bool{}
+	contractedToolCalls := map[string]bool{}
 	for _, e := range effects {
 		byAgent[e.AgentID] = append(byAgent[e.AgentID], e)
 		if e.ToolCallID != "" {
@@ -65,12 +66,15 @@ func Diff(contracts []IntentContract, effects []RuntimeEffect) []IntentRuntimeDi
 	var out []IntentRuntimeDiff
 	for _, c := range contracts {
 		contractedAgents[c.ScopeAgent] = true
+		if c.ToolCallID != "" {
+			contractedToolCalls[c.ToolCallID] = true
+		}
 
 		// Scope the effects a contract is answerable for: a tool_call contract
 		// owns its own tool_call's effects; a peer_message/refusal contract
 		// governs everything its target agent did.
 		scope := byAgent[c.ScopeAgent]
-		if c.Kind == ContractToolCall && c.ToolCallID != "" {
+		if (c.Kind == ContractToolCall || c.Kind == ContractModelResponse) && c.ToolCallID != "" {
 			if te, ok := byToolCall[c.ToolCallID]; ok {
 				scope = te
 			} else {
@@ -147,6 +151,9 @@ func Diff(contracts []IntentContract, effects []RuntimeEffect) []IntentRuntimeDi
 		}
 		if e.AgentID != "" && contractedAgents[e.AgentID] {
 			continue // its contract handled it (as match or mismatch) above
+		}
+		if e.ToolCallID != "" && contractedToolCalls[e.ToolCallID] {
+			continue
 		}
 		key := "scope:" + e.ToolCallID
 		isAgent := false

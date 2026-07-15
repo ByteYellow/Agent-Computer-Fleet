@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-func buildDataFlowSummaryEdges(events map[string]lensEvent) []GraphLensEdge {
+func buildDataFlowSummaryEdges(events map[string]lensEvent, edges []GraphLensEdge) []GraphLensEdge {
 	sources := make([]lensEvent, 0)
 	sinks := make([]lensEvent, 0)
 	for _, ev := range events {
@@ -18,7 +18,14 @@ func buildDataFlowSummaryEdges(events map[string]lensEvent) []GraphLensEdge {
 	}
 	sortLensEventsByTime(sources)
 	sortLensEventsByTime(sinks)
-	return deriveAggregatedDataFlowEdges(sources, sinks)
+	out := deriveAggregatedDataFlowEdges(sources, sinks)
+	for _, edge := range edges {
+		switch edge.EdgeType {
+		case "sensitive_source_payload", "payload_egress_attempt", "confirmed_sensitive_data_flow":
+			out = append(out, edge)
+		}
+	}
+	return out
 }
 
 func dedupStrings(in []string) []string {

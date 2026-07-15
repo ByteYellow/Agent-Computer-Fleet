@@ -10,9 +10,10 @@ import (
 
 // Contract kinds.
 const (
-	ContractToolCall    = "tool_call"
-	ContractPeerMessage = "peer_message"
-	ContractRefusal     = "refusal"
+	ContractToolCall      = "tool_call"
+	ContractPeerMessage   = "peer_message"
+	ContractRefusal       = "refusal"
+	ContractModelResponse = "model_response"
 )
 
 // assertedConfidence caps how much a hook-derived (model-asserted) contract may
@@ -92,7 +93,55 @@ func ExtractContracts(db *sql.DB, runID string, profiles map[string]Profile) ([]
 		return nil, err
 	}
 	out = append(out, msgs...)
+	modelContracts, err := extractModelResponseContracts(db, runID)
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, modelContracts...)
 	return out, nil
+}
+
+func extractModelResponseContracts(db *sql.DB, runID string) ([]IntentContract, error) {
+	var rootAgent string
+	_ = db.QueryRow(`SELECT id FROM agents WHERE run_id = ? AND parent_agent_id = '' ORDER BY created_at LIMIT 1`, runID).Scan(&rootAgent)
+	var rootToolCall string
+	_ = db.QueryRow(`SELECT id FROM tool_calls WHERE run_id = ? ORDER BY started_at LIMIT 1`, runID).Scan(&rootToolCall)
+	rows, err := db.Query(`SELECT source_id, path FROM provenance_objects
+		WHERE run_id = ? AND object_type = 'llm_message' AND source_id LIKE 'endpoint/resp-%'`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []IntentContract
+	for rows.Next() {
+		var sourceID, path string
+		if err := rows.Scan(&sourceID, &path); err != nil {
+			return nil, err
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var obj struct {
+			Payload struct {
+				Semantics struct {
+					DeclaredToolCall bool   `json:"declared_tool_call"`
+					IntentRole       string `json:"intent_role"`
+				} `json:"semantics"`
+			} `json:"payload"`
+		}
+		if json.Unmarshal(raw, &obj) != nil || obj.Payload.Semantics.DeclaredToolCall || obj.Payload.Semantics.IntentRole != "primary" {
+			continue
+		}
+		seq := strings.TrimPrefix(sourceID, "endpoint/resp-")
+		out = append(out, IntentContract{
+			ID: "contract/endpoint-response-" + seq, Kind: ContractModelResponse,
+			ScopeAgent: rootAgent, ToolCallID: rootToolCall, Operation: "text_response",
+			Target:  "model returned text without declaring a tool call",
+			Profile: Profile{Operation: "text_response"}, Source: sourceID, Confidence: assertedConfidence,
+		})
+	}
+	return out, rows.Err()
 }
 
 // extractMessageContracts turns each peer SendMessage into a contract that

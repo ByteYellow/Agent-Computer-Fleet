@@ -1,8 +1,8 @@
 #!/bin/bash
 # Full Grok codebase-exfil capture -> signed bundle.
 #  axis1 kernel: record+sensor witnesses grok reading the repo (secret files).
-#  axis2 endpoint: the capture+BLOCK proxy (grok is rustls) records the codebase
-#    upload grok attempts and DENIES it; ingest-endpoint folds it into the graph.
+#  axis2 endpoint: the capture+BLOCK proxy (grok is rustls) records vendor-storage
+#    traffic and DENIES payloads proven sensitive by per-file canaries.
 #  axis3 app-context: the grok harness adapter (chat_history) shows the model
 #    "declared" only text ("ok") while the CLI shipped the whole repo.
 # Disclosed force: xAI's server sets trace_upload_enabled=false for this account;
@@ -48,6 +48,7 @@ echo "== SEAL: ingest endpoint (axis2) + grok app-context (axis3) + materialize 
 "$BIN" --data-dir "$DATA" graph ingest-endpoint --run "$RUN" --dump "$DUMP"
 "$BIN" --data-dir "$DATA" hooks bridge --run "$RUN" --harness grok --file "$HOME/.grok/sessions" 2>&1 | tail -1
 "$BIN" --data-dir "$DATA" graph materialize --run "$RUN" 2>&1 | tail -1
+"$BIN" --data-dir "$DATA" intent diff --run "$RUN" 2>&1 | tail -1
 
 echo "== verify + sign + export + package =="
 "$BIN" --data-dir "$DATA" graph verify --run "$RUN" 2>&1 | head -1
@@ -68,13 +69,13 @@ print('    secret_path/file reads of canary files:', q("select count(*) from eve
 print('    execve total:', q("select count(*) from events where run_id='%s' and event_type='execve'"%RUN))
 print('  ENDPOINT axis2 — model turn + blocked exfil:')
 print('    llm_call nodes:', q("select count(*) from graph_edges where run_id='%s' and edge_type='llm_request'"%RUN))
-print('    data-egress events (blocked codebase uploads):', q("select count(*) from events where run_id='%s' and source='endpoint_capture'"%RUN))
+print('    vendor-storage egress events:', q("select count(*) from events where run_id='%s' and source='endpoint_capture'"%RUN))
 print('    blocked/deny egress:', q("select count(*) from events where run_id='%s' and source='endpoint_capture' and payload like '%%\"blocked\": true%%'"%RUN))
 print('  APP-CONTEXT axis3:')
 print('    agents:', [r for r in c.execute("select id,agent_type from agents where run_id='%s'"%RUN)])
 print('    tool_calls (grok declared):', q("select count(*) from tool_calls where run_id='%s'"%RUN))
 PY
 echo "== proxy DENY summary =="
-echo "  blocked codebase egress requests: $(grep -c 'BLOCKED codebase egress' /tmp/proxy.log)"
+echo "  blocked sensitive egress requests: $(grep -c 'BLOCKED sensitive egress' /tmp/proxy.log)"
 echo "  canary-bearing uploads captured: $(grep -c 'CANARIES:' /tmp/proxy.log)"
 echo "== DONE (out=$OUT) =="

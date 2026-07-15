@@ -18,11 +18,12 @@ Env:
   DUMP_DIR (./proxy-dump)  CANARY_FILE  FORCE_UPLOAD=1 (rewrite config to upload-on)
   BLOCK_UPLOAD=1 (default; set 0 to observe-only without blocking)
 """
-import json, os, ssl, sys, time, urllib.request, urllib.error
+import gzip, json, os, ssl, sys, time, urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(os.environ.get("PORT", "8088"))
 UPSTREAM = os.environ.get("UPSTREAM", "https://api.x.ai").rstrip("/")
+UPSTREAM_HOST = UPSTREAM.split("://", 1)[-1].split("/", 1)[0]  # host the capture recorded (not hardcoded downstream)
 KEY = os.environ.get("XAI_API_KEY", "")
 DUMP = os.environ.get("DUMP_DIR", os.path.join(os.getcwd(), "proxy-dump"))
 BLOCK_UPLOAD = os.environ.get("BLOCK_UPLOAD", "1") == "1"
@@ -31,8 +32,16 @@ os.makedirs(DUMP, exist_ok=True)
 CANARIES = open(os.environ["CANARY_FILE"]).read().split() if os.environ.get("CANARY_FILE") and os.path.exists(os.environ.get("CANARY_FILE", "")) else []
 _seq = [0]
 
-# Codebase/session-trace egress paths -> BLOCK (this is the exfil we prevent).
-EXFIL_PATHS = ("/v1/upload/storage", "/v1/upload", "/v1/traces")
+def _body_facts(body):
+    candidates = [body or b""]
+    if (body or b"").startswith(b"\x1f\x8b"):
+        try:
+            candidates.append(gzip.decompress(body))
+        except Exception:
+            pass
+    hits = [c for c in CANARIES if c and any(c.encode() in b for b in candidates)]
+    bundle = any(b"# v2 git bundle" in b[:256] or b.startswith(b"PACK") for b in candidates)
+    return hits, bundle
 
 
 def _record(kind, method, path, body, extra=""):
@@ -41,19 +50,26 @@ def _record(kind, method, path, body, extra=""):
     safe = "".join(c if c.isalnum() else "_" for c in path)[:50]
     with open(os.path.join(DUMP, f"{n:03d}_{kind}_{safe}.body.bin"), "wb") as f:
         f.write(body or b"")
+    hits, bundle = _body_facts(body)
     with open(os.path.join(DUMP, f"{n:03d}_{kind}_{safe}.meta.json"), "w") as f:
         json.dump({"seq": n, "kind": kind, "method": method, "path": path,
-                   "size": len(body or b"")}, f)
-    hits = [c for c in CANARIES if c and c.encode() in (body or b"")]
-    bundle = (body or b"")[:64].find(b"git bundle") >= 0 or (body or b"")[:4].startswith(b"PACK")
+                   "host": UPSTREAM_HOST, "size": len(body or b""), "canary_hits": hits,
+                   "is_git_bundle": bundle}, f)
     tag = "  [git-bundle]" if bundle else ""
     flag = f"  !! CANARIES: {hits}" if hits else ""
     print(f"[{time.strftime('%H:%M:%S')}] {kind:10s} {method} {path}  {len(body or b'')}B{tag}{flag}{extra}", flush=True)
 
 
 def _is_exfil(path):
-    p = path.lower()
-    return "/upload" in p or "/traces" in p or "/storage" in p
+    p = path.lower().split("?", 1)[0]
+    return p == "/storage" or p == "/traces" or "/upload/storage" in p or "/upload" in p
+
+
+def _must_block(path, body):
+    if not _is_exfil(path) or path.lower().split("?", 1)[0].endswith("/storage/batch_exists"):
+        return False
+    hits, bundle = _body_facts(body)
+    return bool(hits or bundle)
 
 
 # SuperGrok CLI backend is https://cli-chat-proxy.grok.com and its paths
@@ -84,7 +100,11 @@ class H(BaseHTTPRequestHandler):
         # Ask upstream for uncompressed responses so we can read/rewrite config JSON
         # (the VM has no brotli decoder).
         req.add_header("Accept-Encoding", "identity")
-        if KEY:
+        # Prefer the client's own credential (SuperGrok sends an OAuth bearer that
+        # cli-chat-proxy.grok.com requires); only fall back to a configured API key
+        # when the client sent no auth (e.g. forwarding to the api.x.ai dev API).
+        client_auth = self.headers.get("Authorization")
+        if KEY and not client_auth:
             req.add_header("Authorization", f"Bearer {KEY}")
         ctx = ssl.create_default_context()
         try:
@@ -147,11 +167,11 @@ class H(BaseHTTPRequestHandler):
 
     def _handle(self, method):
         body = self._read_body()
-        if _is_exfil(self.path):
+        if _must_block(self.path, body):
             _record("EXFIL-REQ", method, self.path, body, extra="")
             if BLOCK_UPLOAD:
-                # AgentProvenance DENY: do not forward the codebase upload.
-                print(f"           >>> BLOCKED codebase egress to {self.path} "
+                # AgentProvenance DENY: only proven-sensitive payloads are blocked.
+                print(f"           >>> BLOCKED sensitive egress to {self.path} "
                       f"({len(body)}B) — AgentProvenance policy: DENY", flush=True)
                 self.send_response(200)
                 data = json.dumps({"ok": True, "id": "accepted"}).encode()
@@ -169,6 +189,20 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self):
         _record("req", "GET", self.path, b"")
+        # DISCLOSED force: after a prior upload the server already holds this
+        # workspace's bundle, so grok fetches it (GET /bundle/archive -> 200) and
+        # skips re-uploading. Return 404 so grok believes no bundle exists and
+        # re-bundles + POSTs /storage, letting us capture the codebase egress. The
+        # real server behavior (it WOULD serve the bundle) is logged, not hidden.
+        if FORCE_UPLOAD and "/bundle/archive" in self.path.split("?", 1)[0]:
+            print("           >>> FORCED bundle-absent (GET /bundle/archive -> 404) so grok re-uploads — DISCLOSED", flush=True)
+            data = b'{"error":"not_found"}'
+            self.send_response(404)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         self._forward("GET", b"")
 
     do_PUT = do_POST

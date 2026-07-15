@@ -71,6 +71,22 @@ func TestRedactPreservesJSONStructure(t *testing.T) {
 	}
 }
 
+// A secret embedded in an ESCAPED JSON string (e.g. an LLM request body stored as
+// a string field of a provenance object) is immediately followed by a \" escape.
+// Redaction must mask the secret without consuming the backslash — otherwise the
+// following quote becomes structural and the whole object is corrupted.
+func TestRedactPreservesEscapedJSONString(t *testing.T) {
+	in := `{"content":"env: access_key=FAKE-secret-do-not-use\",\"role\":\"user\"","semantics":{"host":"api.x.ai"}}`
+	out, _ := Redact(in)
+	var v any
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		t.Fatalf("redacted escaped-JSON payload is no longer valid JSON: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "FAKE-secret-do-not-use") {
+		t.Errorf("secret survived redaction: %q", out)
+	}
+}
+
 func TestRedactHeadersMasksByName(t *testing.T) {
 	h := map[string]string{
 		"X-Api-Key":     leakedKey,

@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -52,6 +53,7 @@ func (s Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/lens", s.lens)
 	mux.HandleFunc("GET /api/artifact", s.artifact)
 	mux.HandleFunc("GET /api/egress", s.egress)
+	mux.HandleFunc("GET /api/outbound", s.outbound)
 	mux.HandleFunc("GET /api/processes", s.processes)
 	mux.HandleFunc("GET /api/frameworks", s.frameworks)
 	mux.HandleFunc("GET /api/compliance", s.compliance)
@@ -134,6 +136,159 @@ func (s Server) egress(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, out)
+}
+
+// outbound returns the run's Outbound Data Surfaces: evidence-driven cards of
+// where data left (or was blocked from leaving) the box, aggregated by
+// channel/owner/data-class/decision. Nothing here is demo-specific — the cards
+// are whatever the run's egress observations imply, and a run with no egress
+// yields an empty list (the client shows "No outbound surfaces observed").
+func (s Server) outbound(w http.ResponseWriter, r *http.Request) {
+	run := r.URL.Query().Get("run")
+	if run == "" {
+		httpError(w, "run is required", 400)
+		return
+	}
+	var obs []provenance.OutboundObservation
+
+	// Named / payload-bearing egress from the event stream. A getaddrinfo(host)
+	// precedes the connect, so the last dns host per comm names the egress that
+	// follows it (same correlation the /api/egress view uses).
+	rows, err := s.DB.Query(`SELECT id, source, event_type, payload, created_at FROM events
+		WHERE run_id = ? AND event_type IN ('network_connect','metadata_ip','private_cidr','dns_query') ORDER BY created_at`, run)
+	if err != nil {
+		httpError(w, err.Error(), 500)
+		return
+	}
+	lastHost := map[string]string{}
+	lastHostAny := ""
+	for rows.Next() {
+		var id, source, et, payload, created string
+		if err := rows.Scan(&id, &source, &et, &payload, &created); err != nil {
+			rows.Close()
+			httpError(w, err.Error(), 500)
+			return
+		}
+		raw := rawBody(payload)
+		comm := firstStr(raw, "comm")
+		switch {
+		case source == "endpoint_capture":
+			// A captured upload with an inspected body: the richest evidence.
+			obs = append(obs, provenance.OutboundObservation{
+				Kind: "artifact_upload", Host: firstStr(raw, "dst_host", "host"), Path: firstStr(raw, "path"),
+				Bytes: intFromRaw(raw, "bytes"), Blocked: boolFromRaw(raw, "blocked"),
+				IsSourceCode: boolFromRaw(raw, "codebase_payload") || boolFromRaw(raw, "is_git_bundle"),
+				HasSecret:    hasNonEmptyList(raw, "canary_hits"),
+				EvidenceRef:  "runtime_event/" + id, Time: created,
+			})
+		case et == "dns_query":
+			if h := firstStr(raw, "host"); h != "" {
+				lastHost[comm] = h
+				lastHostAny = h
+				obs = append(obs, provenance.OutboundObservation{Kind: "dns", Host: h, EvidenceRef: "runtime_event/" + id, Time: created})
+			}
+		default: // ebpf network_connect / metadata_ip / private_cidr
+			dst := firstStr(raw, "dst_ip", "dst")
+			host := firstStr(raw, "host", "dst")
+			if host == "" {
+				if host = lastHost[comm]; host == "" {
+					host = lastHostAny
+				}
+			}
+			// Loopback is the local capture proxy / same-box IPC, not egress off the
+			// box, so it is not an outbound surface.
+			if isLoopbackHost(host) || isLoopbackHost(dst) {
+				continue
+			}
+			obs = append(obs, provenance.OutboundObservation{
+				Kind: "network", Host: host, Risky: et == "metadata_ip" || et == "private_cidr",
+				EvidenceRef: "runtime_event/" + id, Time: created, Note: dst,
+			})
+		}
+	}
+	rows.Close()
+
+	// Model-inference turns are stored as llm_request edges to the captured request
+	// body object (not as events), so pull them separately. The upstream host is
+	// not recorded in the capture, so it surfaces honestly as an unknown destination.
+	mrows, err := s.DB.Query(`SELECT e.from_id, COALESCE(o.size_bytes,0), COALESCE(o.created_at,''), COALESCE(o.path,'')
+		FROM graph_edges e LEFT JOIN provenance_objects o ON o.hash = e.to_id
+		WHERE e.run_id = ? AND e.edge_type = 'llm_request'`, run)
+	if err != nil {
+		httpError(w, err.Error(), 500)
+		return
+	}
+	for mrows.Next() {
+		var from, created, objPath string
+		var size int
+		if err := mrows.Scan(&from, &size, &created, &objPath); err != nil {
+			mrows.Close()
+			httpError(w, err.Error(), 500)
+			return
+		}
+		host, hasSecret := llmMessageMeta(objPath)
+		obs = append(obs, provenance.OutboundObservation{Kind: "model_turn", Host: host, HasSecret: hasSecret, Bytes: size, EvidenceRef: from, Time: created})
+	}
+	mrows.Close()
+
+	surfaces := provenance.BuildOutboundSurfaces(obs)
+	if surfaces == nil {
+		surfaces = []provenance.OutboundSurface{}
+	}
+	writeJSON(w, surfaces)
+}
+
+func intFromRaw(m map[string]any, k string) int {
+	if f, ok := m[k].(float64); ok {
+		return int(f)
+	}
+	return 0
+}
+
+func boolFromRaw(m map[string]any, k string) bool {
+	b, _ := m[k].(bool)
+	return b
+}
+
+func hasNonEmptyList(m map[string]any, k string) bool {
+	a, ok := m[k].([]any)
+	return ok && len(a) > 0
+}
+
+// llmMessageMeta reads the captured request object and returns the upstream host
+// the proxy recorded for that model turn plus whether the capture layer matched
+// any sensitive markers in the request body (secrets that reached model context).
+func llmMessageMeta(objPath string) (host string, hasSecret bool) {
+	if objPath == "" {
+		return "", false
+	}
+	b, err := os.ReadFile(objPath)
+	if err != nil {
+		return "", false
+	}
+	var o struct {
+		Payload struct {
+			Semantics struct {
+				Host       string   `json:"host"`
+				CanaryHits []string `json:"canary_hits"`
+			} `json:"semantics"`
+		} `json:"payload"`
+	}
+	if json.Unmarshal(b, &o) != nil {
+		return "", false
+	}
+	return o.Payload.Semantics.Host, len(o.Payload.Semantics.CanaryHits) > 0
+}
+
+func isLoopbackHost(h string) bool {
+	h = strings.TrimSpace(strings.ToLower(h))
+	if h == "localhost" || h == "::1" {
+		return true
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // processes returns the run's OS process events (pid/ppid/command) so the client

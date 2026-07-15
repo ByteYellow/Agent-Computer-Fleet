@@ -260,6 +260,33 @@
   @media(max-width:720px){.profilebar{grid-template-columns:1fr}}
   @media(max-width:1100px){.askgrid{grid-template-columns:repeat(3,minmax(0,1fr))}}
   @media(max-width:900px){main{grid-template-columns:1fr}.hero,.side,.full{grid-column:1}.askgrid{grid-template-columns:1fr 1fr}}
+  /* Outbound Data Surfaces — evidence-driven cards */
+  .surfaces{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
+  .surface{border:1px solid var(--line2);border-left:4px solid var(--mut);border-radius:12px;padding:13px 15px;
+    background:var(--panel2);cursor:pointer;transition:box-shadow .12s,transform .12s;display:flex;flex-direction:column;gap:7px}
+  .surface:hover{box-shadow:var(--shadow);transform:translateY(-1px)}
+  .surface:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+  .surface.risk-critical{border-left-color:#ff3b30}
+  .surface.risk-high{border-left-color:#ff9f0a}
+  .surface.risk-medium{border-left-color:#ffcc00}
+  .surface.risk-low{border-left-color:var(--line2)}
+  .surface-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+  .surface .chan{font-weight:600;font-size:13px;letter-spacing:-.01em}
+  .surface-flow{font-size:14px}.surface-flow .dc{color:var(--tx)}.surface-flow .arr{color:var(--mut);margin:0 3px}
+  .surface-dest{font-size:12px;color:var(--mut);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all}
+  .surface-meta{display:flex;align-items:center;gap:8px;font-size:12px;flex-wrap:wrap}
+  .surface-time,.surface-note{font-size:11px}
+  .surface .mut{color:var(--mut)}
+  .surface .badge{display:inline-flex;align-items:center;padding:2px 9px;border-radius:99px;font-size:10.5px;font-weight:700;
+    letter-spacing:.03em;text-transform:uppercase;border:1px solid transparent;gap:0}
+  .badge.risk.risk-critical{background:rgba(255,59,48,.12);color:#d70015;border-color:rgba(255,59,48,.3)}
+  .badge.risk.risk-high{background:rgba(255,159,10,.14);color:#a65a00;border-color:rgba(255,159,10,.32)}
+  .badge.risk.risk-medium{background:rgba(255,204,0,.16);color:#8a6d00;border-color:rgba(255,204,0,.4)}
+  .badge.risk.risk-low{background:rgba(0,0,0,.05);color:var(--mut);border-color:var(--line2)}
+  .badge.dec.dec-blocked{background:rgba(255,59,48,.1);color:#d70015;border-color:rgba(255,59,48,.28)}
+  .badge.dec.dec-redacted{background:rgba(191,90,242,.12);color:#8944ab;border-color:rgba(191,90,242,.3)}
+  .badge.dec.dec-allowed{background:rgba(52,199,89,.12);color:#1d8c3e;border-color:rgba(52,199,89,.3)}
+  .badge.dec.dec-observed{background:rgba(0,0,0,.05);color:var(--mut);border-color:var(--line2)}
 </style>
 </head>
 <body>
@@ -324,6 +351,10 @@
   <section class="card full">
     <h2>Process Tree <span class="sub">OS processes by parent pid</span></h2>
     <div id="ptree" class="ptree"></div>
+  </section>
+  <section class="card full" id="outboundcard">
+    <h2>Outbound Data Surfaces <span class="sub">where data left (or was blocked from leaving) the box — grouped by channel · owner · data class · decision, generated from evidence</span></h2>
+    <div id="outbound" class="surfaces"></div>
   </section>
   <section class="card full">
     <h2>Egress <span class="sub">outbound network — the destination is the security-relevant fact</span></h2>
@@ -1065,6 +1096,55 @@ function renderEgress(rows){
   }).join('');
 }
 
+const CHANNEL_LABEL={model_inference:'Model inference',artifact_storage:'Artifact storage',product_analytics:'Product analytics',external_api:'External API',database:'Database',tool_service:'Tool service',unknown_egress:'Unknown egress'};
+const DATA_LABEL={secret:'secret',source_code:'source code',conversation:'conversation',behavioral_metadata:'behavioral metadata',unknown:'unknown data'};
+const EVIDENCE_LABEL={payload_observed:'payload observed',connection_observed:'connection observed',dns_only:'DNS only',documented:'documented'};
+function fmtBytes(n){ if(!n)return''; const u=['B','KB','MB','GB']; let i=0,v=n; while(v>=1024&&i<u.length-1){v/=1024;i++;} return (i?v.toFixed(1):v)+' '+u[i]; }
+function fmtRange(a,b){ const f=s=>(s||'').replace('T',' ').replace(/\.\d+Z?$/,'').replace(/^.* /,''); if(!a&&!b)return''; return f(a)===f(b)?f(a):f(a)+'–'+f(b); }
+// renderOutbound draws the evidence-driven Outbound Data Surfaces cards. Nothing
+// here is demo-specific: it renders whatever /api/outbound returns, and shows an
+// explicit empty state when a run had no outbound surfaces.
+function renderOutbound(surfaces){
+  const el=$('#outbound');
+  if(!surfaces||!surfaces.length){ el.innerHTML='<div class="empty">No outbound surfaces observed</div>'; return; }
+  el.innerHTML=surfaces.map((s,i)=>{
+    const dest=s.destination||'(destination not recorded)';
+    const more=(s.destinations&&s.destinations.length>1)?` <span class="mut">+${s.destinations.length-1}</span>`:'';
+    const meta=[EVIDENCE_LABEL[s.evidence_level]||s.evidence_level, s.request_count+' req'+(s.request_count===1?'':'s'), fmtBytes(s.bytes)].filter(Boolean).join(' · ');
+    const rng=fmtRange(s.first_seen,s.last_seen);
+    return `<div class="surface risk-${esc(s.risk)}" data-i="${i}" tabindex="0" role="button" title="click to focus this surface in the graph">
+      <div class="surface-top">
+        <span class="chan">${esc(CHANNEL_LABEL[s.channel_class]||s.channel_class)}</span>
+        <span class="badge risk risk-${esc(s.risk)}">${esc(s.risk)}</span>
+      </div>
+      <div class="surface-flow"><span class="dc">${esc(DATA_LABEL[s.data_class]||s.data_class)}</span> <span class="arr">→</span> <b>${esc(s.destination_owner)}</b></div>
+      <div class="surface-dest">${esc(dest)}${more}</div>
+      <div class="surface-meta"><span class="badge dec dec-${esc(s.decision)}">${esc(s.decision)}</span> <span class="mut">${esc(meta)}</span></div>
+      ${rng?`<div class="surface-time mut">${esc(rng)}</div>`:''}
+      ${s.note?`<div class="surface-note mut">${esc(s.note)}</div>`:''}
+    </div>`;
+  }).join('');
+  el.querySelectorAll('.surface').forEach(c=>{
+    const focusIt=()=>focusSurface(surfaces[+c.dataset.i]);
+    c.onclick=focusIt;
+    c.onkeydown=e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); focusIt(); } };
+  });
+}
+// focusSurface drills from a card into the graph: it picks the lens that holds the
+// surface's evidence nodes and focuses the first one — the "local DAG" for that card.
+function focusSurface(s){
+  if(!s)return;
+  const ref=(s.evidence_refs&&s.evidence_refs[0])||'';
+  const lens=s.channel_class==='model_inference'?'agent-intent':'network-egress';
+  const avail=(window._lensManifest&&window._lensManifest.available_lenses)||[];
+  if(avail.includes(lens))LENS=lens;
+  DETAIL='raw'; SEL=null; GRAPH_FOCUS=ref; EXPAND_MODE='lineage'; EV_FILTER=null; EV_OFFSET=0;
+  const ls=$('#lenssel'); if(ls)ls.value=LENS;
+  const ds=$('#detailsel'); if(ds)ds.value=DETAIL;
+  stopPlay(); loadRun(cur);
+  const gc=$('#graphcard'); if(gc)gc.scrollIntoView({behavior:'smooth',block:'start'});
+}
+
 function renderProcessTree(procs){
   const el=$('#ptree');
   if(!procs||!procs.length){el.innerHTML='<div class="empty">no process events</div>';return;}
@@ -1378,7 +1458,7 @@ async function loadRun(run){
   const q='run='+encodeURIComponent(run);
   const lq=q+'&lens='+encodeURIComponent(LENS)+'&detail='+encodeURIComponent(DETAIL)+(GRAPH_FOCUS?'&focus='+encodeURIComponent(GRAPH_FOCUS):'')+[...OV].map(o=>'&overlay='+o).join('');
   const overviewQ=q+'&lens=default&detail=summary';
-  const [ov,lens,overviewLens,eg,pr]=await Promise.all([j('/api/overview?'+q),j('/api/lens?'+lq),j('/api/lens?'+overviewQ),j('/api/egress?'+q),j('/api/processes?'+q)]);
+  const [ov,lens,overviewLens,eg,pr,ob]=await Promise.all([j('/api/overview?'+q),j('/api/lens?'+lq),j('/api/lens?'+overviewQ),j('/api/egress?'+q),j('/api/processes?'+q),j('/api/outbound?'+q)]);
   const g=adaptLens(lens);
   window._lg=g; window._lensManifest=lens;
   if(SEL && !g.nodes.find(n=>n.id===SEL)) { SEL=null; GRAPH_FOCUS=''; } // selection gone after refresh/lens switch
@@ -1388,7 +1468,7 @@ async function loadRun(run){
   // actually changed, so the live 5s refresh never re-lays-out under the cursor.
   const sig=LENS+'|'+DETAIL+'|'+GRAPH_FOCUS+'|'+[...OV].sort().join(',')+'|'+JSON.stringify(g.nodes.map(n=>n.id))+'|'+JSON.stringify(g.edges.map(e=>e.from+'>'+e.to+(e.derived?'*':'')));
   if(sig!==window._gsig){ window._gsig=sig; renderLensMeta(lens); rebuildScrubber(g); renderDAG(g,SEL); }
-  renderEgress(eg); renderProcessTree(pr); showDetail(SEL);
+  renderOutbound(ob); renderEgress(eg); renderProcessTree(pr); showDetail(SEL);
   loadCompliance(run);
   await loadEvidenceDrilldown(EV_OFFSET);
   await loadTimeline(run, tlOffset);

@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"strconv"
 )
@@ -289,73 +288,4 @@ func envFloat(name string, fallback float64) float64 {
 		return fallback
 	}
 	return parsed
-}
-
-type BenchResult struct {
-	Sessions    int
-	IdleRatio   float64
-	Admitted    int
-	Rejected    int
-	WeightedCPU float64
-	CapacityCPU float64
-}
-
-func SimulateOvercommit(sessions int, idleRatio, cpuPerSession, physicalCPU, overcommitRatio, idleDiscount float64, memoryPerSessionMB, memoryTotalMB int64) BenchResult {
-	if sessions < 0 {
-		sessions = 0
-	}
-	if idleRatio < 0 {
-		idleRatio = 0
-	}
-	if idleRatio > 1 {
-		idleRatio = 1
-	}
-	if cpuPerSession == 0 {
-		cpuPerSession = 1
-	}
-	if physicalCPU == 0 {
-		physicalCPU = 8
-	}
-	if overcommitRatio == 0 {
-		overcommitRatio = 2
-	}
-	if idleDiscount == 0 {
-		idleDiscount = 0.1
-	}
-	if memoryPerSessionMB == 0 {
-		memoryPerSessionMB = 256
-	}
-	if memoryTotalMB == 0 {
-		memoryTotalMB = 8192
-	}
-	result := BenchResult{
-		Sessions:    sessions,
-		IdleRatio:   idleRatio,
-		CapacityCPU: physicalCPU * overcommitRatio,
-	}
-	var memoryAllocated int64
-	for i := 0; i < sessions; i++ {
-		activeCPU := cpuPerSession * (1 - idleRatio)
-		idleCPU := cpuPerSession * idleRatio
-		nextWeighted := activeCPU + idleCPU*idleDiscount
-		ok := Admit(AdmissionInput{
-			PhysicalCPU:       physicalCPU,
-			OvercommitRatio:   overcommitRatio,
-			ActiveCPURequest:  result.WeightedCPU + activeCPU,
-			IdleCPURequest:    idleCPU,
-			IdleDiscount:      idleDiscount,
-			MemoryAllocatedMB: memoryAllocated,
-			MemoryRequestMB:   memoryPerSessionMB,
-			MemoryTotalMB:     memoryTotalMB,
-			MemorySafetyRatio: 0.9,
-		})
-		if !ok || math.IsNaN(nextWeighted) {
-			result.Rejected++
-			continue
-		}
-		result.Admitted++
-		result.WeightedCPU += nextWeighted
-		memoryAllocated += memoryPerSessionMB
-	}
-	return result
 }

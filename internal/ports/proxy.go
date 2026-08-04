@@ -3,7 +3,6 @@ package ports
 import (
 	"database/sql"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"os"
@@ -162,13 +161,4 @@ func freePort() (int, error) {
 
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
-}
-
-func ReadAll(url string) ([]byte, error) {
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
 }

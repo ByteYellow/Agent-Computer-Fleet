@@ -63,15 +63,8 @@ type Options struct {
 	OnReady func()
 }
 
-// Run loads the eBPF probes (exec/connect/openat), reads events from the ring
-// buffer, enriches each with a container id derived from the task's cgroup, and
-// writes one normalized telemetry event per line (JSONL) to out. It blocks until
-// SIGINT/SIGTERM. Requires root or CAP_BPF + CAP_PERFMON.
-func Run(out io.Writer) error {
-	return RunWithOptions(out, Options{})
-}
-
-// RunWithOptions is Run with optional extra probes (see Options).
+// RunWithOptions loads the configured eBPF probes and writes normalized JSONL
+// telemetry until SIGINT/SIGTERM. It requires root or CAP_BPF + CAP_PERFMON.
 func RunWithOptions(out io.Writer, opts Options) error {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return fmt.Errorf("remove memlock: %w", err)

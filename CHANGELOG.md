@@ -138,7 +138,7 @@ transcript with zero instrumentation.
   new `intent_conformance` dimension in the unified signal model and flip the
   launch verdict; `peer_message_intent_mismatch` marks a violation whose intent
   came from another agent's message.
-- **Transcript harvest (`internal/provenance.HarvestTranscript`).** The Claude
+- **Transcript harvest.** The Claude
   Code session transcript (the JSONL a hook's stdin points at) is ingested into
   the same `llm_call` graph model TLS capture feeds — the model's real prompt,
   reasoning, and tool decisions — with zero instrumentation and on any platform.

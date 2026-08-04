@@ -12,22 +12,6 @@ import (
 	"time"
 )
 
-// HarvestTranscript ingests a Claude Code session transcript (the JSONL file a
-// hook's stdin points at via `transcript_path`) into the same llm_call graph
-// model that TLS capture feeds -- so the agent-intent 4-stage flow renders the
-// model's real prompt, reasoning, and tool decisions with ZERO instrumentation
-// and on any platform (no eBPF/TLS needed). This is the cognitive-intent axis
-// the contract-vs-effect diff deliberately cannot capture: what the model was
-// asked, what it reasoned, and what it decided to do.
-//
-// Each user→assistant turn becomes: an llm_message request object (the prompt),
-// an llm_message response object (the assistant's reasoning + decided tools), an
-// llm_call node linking them, and llm_caused edges to the syscalls the decided
-// shell commands actually ran. Idempotent per run.
-func HarvestTranscript(store ObjectStore, db *sql.DB, runID, path string) (int, error) {
-	return HarvestTranscriptSet(store, db, runID, path, nil)
-}
-
 // AgentTranscript is a sub-agent's own session transcript, located via the hook
 // log's agent_transcript_path. The command a sub-agent decided to run lives here,
 // not in the main session transcript -- so without harvesting these, a command

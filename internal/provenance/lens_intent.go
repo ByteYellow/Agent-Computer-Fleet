@@ -433,19 +433,6 @@ func isObserverNoiseCommand(cmd string) bool {
 	return false
 }
 
-func ensurePrefix(label, prefix string) string {
-	if strings.HasPrefix(label, prefix) {
-		return label
-	}
-	if label == "" {
-		return prefix
-	}
-	if strings.Contains(label, "[") {
-		return prefix + " " + label[strings.Index(label, "["):]
-	}
-	return prefix + " · " + label
-}
-
 func conciseCommandLabel(cmd string) string {
 	cmd = strings.TrimSpace(cmd)
 	cmd = strings.Join(strings.Fields(cmd), " ")

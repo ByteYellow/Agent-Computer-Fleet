@@ -222,14 +222,6 @@ func timelineDigestEvents(events []TimelineEvent) []map[string]string {
 	return out
 }
 
-func PrintTimeline(db *sql.DB, opts TimelineOptions, out io.Writer) error {
-	manifest, err := BuildTimeline(db, opts)
-	if err != nil {
-		return err
-	}
-	return PrintTimelineManifest(manifest, out)
-}
-
 func PrintTimelineManifest(manifest TimelineManifest, out io.Writer) error {
 	if timelineView(manifest.View) == "causality" {
 		return PrintTimelineCausality(manifest, out)
@@ -259,16 +251,6 @@ func PrintTimelineCausality(manifest TimelineManifest, out io.Writer) error {
 			event.Time, event.Lane, event.Type, event.ToolCallID, event.ProcessID, event.CorrelationStatus, event.Summary, drilldown)
 	}
 	return w.Flush()
-}
-
-func PrintTimelineJSON(db *sql.DB, opts TimelineOptions, out io.Writer) error {
-	manifest, err := BuildTimeline(db, opts)
-	if err != nil {
-		return err
-	}
-	enc := json.NewEncoder(out)
-	enc.SetIndent("", "  ")
-	return enc.Encode(manifest)
 }
 
 func timelineView(view string) string {

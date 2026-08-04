@@ -29,13 +29,6 @@ type SpoolEnqueueRequest struct {
 	DropPolicy    string
 }
 
-type SpoolListOptions struct {
-	RunID  string
-	Status string
-	Limit  int
-	Cursor string
-}
-
 type SpoolBatch struct {
 	ID            string `json:"id"`
 	RunID         string `json:"run_id"`
@@ -72,17 +65,6 @@ type SpoolProcessedBatch struct {
 	IngestedCount       int    `json:"ingested_count"`
 	FailedCount         int    `json:"failed_count"`
 	RowResultsTruncated bool   `json:"row_results_truncated,omitempty"`
-}
-
-type SpoolPruneResult struct {
-	Deleted int      `json:"deleted"`
-	Errors  []string `json:"errors,omitempty"`
-}
-
-type SpoolListResult struct {
-	Batches    []SpoolBatch `json:"batches"`
-	NextCursor string       `json:"next_cursor,omitempty"`
-	Limit      int          `json:"limit"`
 }
 
 type SpoolBackpressureError struct {

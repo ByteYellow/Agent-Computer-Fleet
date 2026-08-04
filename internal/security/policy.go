@@ -361,10 +361,6 @@ func (r Rule) Matches(event Event) bool {
 	return r.Match.Source != "" || r.Match.EventType != "" || r.Match.DstIP != "" || r.Match.PrivateCIDR
 }
 
-func EvaluateJSONL(path string, out io.Writer) error {
-	return EvaluateJSONLWithEngine(nil, path, out, DefaultEngine())
-}
-
 func EvaluateJSONLWithState(db *sql.DB, path string, out io.Writer) error {
 	return EvaluateJSONLWithEngine(db, path, out, DefaultEngine())
 }

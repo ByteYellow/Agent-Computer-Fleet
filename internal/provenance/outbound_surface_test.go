@@ -25,7 +25,8 @@ func TestBuildOutboundSurfaces_GrokShape(t *testing.T) {
 	if len(ss) != 3 {
 		t.Fatalf("want 3 surfaces, got %d: %+v", len(ss), ss)
 	}
-	// Most-severe first: source_code (high) before conversation (medium) before behavioral (low).
+	// Most-severe first: source_code (high) before conversation (medium) before
+	// DNS-only analytics endpoint evidence (low, data class deliberately unknown).
 	if ss[0].ChannelClass != "artifact_storage" || ss[len(ss)-1].ChannelClass != "product_analytics" {
 		t.Fatalf("ordering wrong: %s ... %s", ss[0].ChannelClass, ss[len(ss)-1].ChannelClass)
 	}
@@ -50,11 +51,42 @@ func TestBuildOutboundSurfaces_GrokShape(t *testing.T) {
 	}
 
 	pa, _ := findSurface(ss, "product_analytics")
-	if pa.DataClass != "behavioral_metadata" || pa.EvidenceLevel != "dns_only" || pa.Risk != "low" {
+	if pa.DataClass != "unknown" || pa.EvidenceLevel != "dns_only" || pa.Risk != "low" {
 		t.Errorf("analytics: data=%s evidence=%s risk=%s", pa.DataClass, pa.EvidenceLevel, pa.Risk)
 	}
 	if pa.DestinationOwner != "Mixpanel" {
 		t.Errorf("analytics owner: %s", pa.DestinationOwner)
+	}
+}
+
+func TestBuildOutboundSurfaces_AnalyticsPayloadCanProveBehavioralMetadata(t *testing.T) {
+	ss := BuildOutboundSurfaces([]OutboundObservation{{
+		Kind: "analytics_payload", Host: "api.mixpanel.com", Bytes: 512,
+		HasBehavioralMetadata: true, EvidenceRef: "runtime_event/evt-track",
+	}})
+	if len(ss) != 1 || ss[0].ChannelClass != "product_analytics" || ss[0].DataClass != "behavioral_metadata" || ss[0].EvidenceLevel != "payload_observed" {
+		t.Fatalf("inspected analytics payload classification = %+v", ss)
+	}
+}
+
+func TestBuildOutboundSurfaces_DNSSupportDoesNotCreateDuplicateOwnerCard(t *testing.T) {
+	ss := BuildOutboundSurfaces([]OutboundObservation{
+		{Kind: "model_turn", Host: "api.x.ai", Bytes: 100, EvidenceRef: "llm_call/1"},
+		{Kind: "dns", Host: "cli-chat-proxy.grok.com", EvidenceRef: "runtime_event/dns-1"},
+		{Kind: "dns", Host: "api.mixpanel.com", EvidenceRef: "runtime_event/dns-2"},
+	})
+	if len(ss) != 2 {
+		t.Fatalf("xAI DNS should be supporting evidence, Mixpanel DNS should remain: %+v", ss)
+	}
+	if _, ok := findSurface(ss, "unknown_egress"); ok {
+		t.Fatalf("strong model evidence must suppress a duplicate xAI DNS surface: %+v", ss)
+	}
+}
+
+func TestBuildOutboundSurfaces_TelemetryIsNotArtifactStorage(t *testing.T) {
+	ss := BuildOutboundSurfaces([]OutboundObservation{{Kind: "telemetry", Host: "api.vendor.example", Bytes: 900}})
+	if len(ss) != 1 || ss[0].ChannelClass != "telemetry_service" || ss[0].DataClass != "unknown" {
+		t.Fatalf("vendor trace traffic must remain telemetry, got %+v", ss)
 	}
 }
 
@@ -74,6 +106,19 @@ func TestBuildOutboundSurfaces_SecretEscalates(t *testing.T) {
 	}
 }
 
+func TestBuildOutboundSurfaces_OneRouteKeepsMultipleDataClasses(t *testing.T) {
+	ss := BuildOutboundSurfaces([]OutboundObservation{
+		{Kind: "model_turn", Host: "api.x.ai", Bytes: 100},
+		{Kind: "model_turn", Host: "api.x.ai", Bytes: 200, HasSecret: true},
+	})
+	if len(ss) != 1 || ss[0].DataClass != "secret" || ss[0].RequestCount != 2 {
+		t.Fatalf("one model route should be one card with secret as primary class: %+v", ss)
+	}
+	if len(ss[0].DataClasses) != 2 || ss[0].DataClasses[0] != "secret" || ss[0].DataClasses[1] != "conversation" {
+		t.Fatalf("all route data classes must remain visible: %+v", ss[0].DataClasses)
+	}
+}
+
 func TestDestinationOwner(t *testing.T) {
 	cases := map[string]string{
 		"api.x.ai":                  "xAI",
@@ -87,5 +132,15 @@ func TestDestinationOwner(t *testing.T) {
 		if got := destinationOwner(host); got != want {
 			t.Errorf("destinationOwner(%q)=%q want %q", host, got, want)
 		}
+	}
+}
+
+func TestBuildOutboundSurfaces_UnresolvedIPsShareOneCard(t *testing.T) {
+	ss := BuildOutboundSurfaces([]OutboundObservation{
+		{Kind: "network", Host: "203.0.113.10"},
+		{Kind: "network", Host: "198.51.100.20"},
+	})
+	if len(ss) != 1 || ss[0].DestinationOwner != "unresolved_ip" || len(ss[0].Destinations) != 2 {
+		t.Fatalf("unresolved IPs should fold into one route: %+v", ss)
 	}
 }

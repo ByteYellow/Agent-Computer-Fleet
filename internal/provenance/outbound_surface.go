@@ -11,7 +11,7 @@ import (
 // that produces outbound observations yields the surfaces those observations
 // imply, and a run with no egress yields none. See BuildOutboundSurfaces.
 type OutboundSurface struct {
-	ChannelClass     string   `json:"channel_class"`     // model_inference|artifact_storage|product_analytics|external_api|database|tool_service|unknown_egress
+	ChannelClass     string   `json:"channel_class"`     // model_inference|artifact_storage|telemetry_service|product_analytics|external_api|database|tool_service|unknown_egress
 	DataClass        string   `json:"data_class"`        // secret|source_code|conversation|behavioral_metadata|unknown
 	Destination      string   `json:"destination"`       // observed host/endpoint (may be empty/unknown)
 	DestinationOwner string   `json:"destination_owner"` // resolved via the owner registry
@@ -24,6 +24,7 @@ type OutboundSurface struct {
 	FirstSeen        string   `json:"first_seen"`
 	LastSeen         string   `json:"last_seen"`
 	Destinations     []string `json:"destinations"`  // all distinct hosts folded into this card
+	DataClasses      []string `json:"data_classes"`  // all observed classes; DataClass is the highest-risk primary class
 	EvidenceRefs     []string `json:"evidence_refs"` // node/event ids for the click-through DAG
 	Note             string   `json:"note,omitempty"`
 }
@@ -33,32 +34,54 @@ type OutboundSurface struct {
 // events); BuildOutboundSurfaces stays free of any storage or vendor knowledge
 // beyond the owner registry, so it is unit-testable in isolation.
 type OutboundObservation struct {
-	Kind         string // model_turn|artifact_upload|dns|network
-	Host         string
-	Path         string
-	Bytes        int
-	Blocked      bool
-	Redacted     bool
-	Risky        bool // metadata_ip / private_cidr / taint sink
-	IsSourceCode bool // git bundle / whole-repo payload
-	HasSecret    bool // canary / secret markers observed in the payload
-	EvidenceRef  string
-	Time         string
-	Note         string
+	Kind                  string // model_turn|artifact_upload|telemetry|analytics_payload|dns|network
+	Host                  string
+	Path                  string
+	Bytes                 int
+	Blocked               bool
+	Redacted              bool
+	Risky                 bool // metadata_ip / private_cidr / taint sink
+	IsSourceCode          bool // git bundle / whole-repo payload
+	HasSecret             bool // canary / secret markers observed in the payload
+	HasBehavioralMetadata bool // inspected analytics payload contains identity/usage properties
+	EvidenceRef           string
+	Time                  string
+	Note                  string
 }
 
-// BuildOutboundSurfaces classifies each observation into (channel, data, owner,
-// decision) and aggregates by that composite key so 200 same-class requests
-// collapse to one card carrying the totals. Cards are ordered most-severe first.
+// BuildOutboundSurfaces classifies each observation and aggregates by outbound
+// channel, destination owner, and decision. Data classes remain a set inside the
+// card, with the highest-risk class promoted as its primary label. Cards are
+// ordered most-severe first.
 func BuildOutboundSurfaces(obs []OutboundObservation) []OutboundSurface {
+	// DNS proves name resolution, not a second data transfer. If richer evidence
+	// exists for the same destination owner, keep the DNS event in the raw timeline
+	// and avoid presenting it as an independent outbound surface card.
+	strongOwners := map[string]bool{}
+	for _, o := range obs {
+		if o.Kind == "dns" {
+			continue
+		}
+		owner, _ := outboundDestination(o)
+		if owner != "" && owner != "unknown" {
+			strongOwners[owner] = true
+		}
+	}
 	byKey := map[string]*OutboundSurface{}
 	dests := map[string]map[string]bool{}
+	dataClasses := map[string]map[string]bool{}
 	order := []string{}
 	for _, o := range obs {
+		owner, dest := outboundDestination(o)
+		if o.Kind == "dns" && strongOwners[owner] {
+			continue
+		}
 		cc := outboundChannelClass(o)
 		dc := outboundDataClass(o, cc)
-		owner, dest := outboundDestination(o)
-		key := cc + "|" + owner + "|" + dc + "|" + outboundDecision(o)
+		// A card represents one outbound channel/trust boundary. Multiple payload
+		// classes observed on that route are retained inside the card instead of
+		// fragmenting one model/API route into several visually competing cards.
+		key := cc + "|" + owner + "|" + outboundDecision(o)
 		s := byKey[key]
 		if s == nil {
 			s = &OutboundSurface{
@@ -68,11 +91,16 @@ func BuildOutboundSurfaces(obs []OutboundObservation) []OutboundSurface {
 			}
 			byKey[key] = s
 			dests[key] = map[string]bool{}
+			dataClasses[key] = map[string]bool{}
 			order = append(order, key)
+		}
+		dataClasses[key][dc] = true
+		if outboundRiskRank(outboundRisk(dc, o.Risky || o.Blocked)) > outboundRiskRank(outboundRisk(s.DataClass, s.RiskCount > 0)) {
+			s.DataClass = dc
 		}
 		s.RequestCount++
 		s.Bytes += o.Bytes
-		if o.Risky || o.Blocked {
+		if o.Risky || o.Blocked || o.HasSecret || o.IsSourceCode {
 			s.RiskCount++
 		}
 		s.EvidenceLevel = strongerEvidence(s.EvidenceLevel, outboundEvidenceLevel(o))
@@ -98,6 +126,7 @@ func BuildOutboundSurfaces(obs []OutboundObservation) []OutboundSurface {
 	for _, key := range order {
 		s := byKey[key]
 		s.Destinations = sortedBoolKeys(dests[key])
+		s.DataClasses = sortedDataClasses(dataClasses[key])
 		if s.Destination == "" && len(s.Destinations) > 0 {
 			s.Destination = s.Destinations[0]
 		}
@@ -113,12 +142,24 @@ func BuildOutboundSurfaces(obs []OutboundObservation) []OutboundSurface {
 	return out
 }
 
+func sortedDataClasses(values map[string]bool) []string {
+	out := sortedBoolKeys(values)
+	sort.SliceStable(out, func(i, j int) bool {
+		return outboundRiskRank(outboundRisk(out[i], false)) > outboundRiskRank(outboundRisk(out[j], false))
+	})
+	return out
+}
+
 func outboundChannelClass(o OutboundObservation) string {
 	switch o.Kind {
 	case "model_turn":
 		return "model_inference"
 	case "artifact_upload":
 		return "artifact_storage"
+	case "telemetry":
+		return "telemetry_service"
+	case "analytics_payload":
+		return "product_analytics"
 	}
 	owner, _ := outboundDestination(o)
 	switch {
@@ -142,6 +183,9 @@ func outboundDataClass(o OutboundObservation, channel string) string {
 	case "model_inference":
 		return "conversation"
 	case "product_analytics":
+		if !o.HasBehavioralMetadata {
+			return "unknown"
+		}
 		return "behavioral_metadata"
 	}
 	return "unknown"
@@ -151,7 +195,7 @@ func outboundEvidenceLevel(o OutboundObservation) string {
 	switch o.Kind {
 	case "model_turn":
 		return "payload_observed"
-	case "artifact_upload":
+	case "artifact_upload", "telemetry", "analytics_payload":
 		if o.Bytes > 0 {
 			return "payload_observed"
 		}
@@ -184,6 +228,11 @@ func outboundDestination(o OutboundObservation) (owner, dest string) {
 			return "unknown", ""
 		}
 		return "unknown", ""
+	}
+	if net.ParseIP(host) != nil {
+		// Preserve each address in Destinations, but group unresolved IP-only
+		// observations into one route instead of one card per address.
+		return "unresolved_ip", o.Host
 	}
 	return destinationOwner(host), o.Host
 }

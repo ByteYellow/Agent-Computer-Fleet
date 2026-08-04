@@ -304,6 +304,10 @@
     <div id="profilebar" class="profilebar"></div>
     <div id="askgrid" class="askgrid"></div>
   </section>
+  <section class="card full" id="outboundcard">
+    <h2>Outbound Data Surfaces <span class="sub">where data left (or was blocked from leaving) the box — grouped by channel · owner · data class · decision, generated from evidence</span></h2>
+    <div id="outbound" class="surfaces"></div>
+  </section>
   <section class="card hero" id="graphcard">
     <h2>Graph Explorer <span class="sub">canonical graph → lens projection → derived edges</span>
       <span class="spacer"></span>
@@ -352,14 +356,10 @@
     <h2>Process Tree <span class="sub">OS processes by parent pid</span></h2>
     <div id="ptree" class="ptree"></div>
   </section>
-  <section class="card full" id="outboundcard">
-    <h2>Outbound Data Surfaces <span class="sub">where data left (or was blocked from leaving) the box — grouped by channel · owner · data class · decision, generated from evidence</span></h2>
-    <div id="outbound" class="surfaces"></div>
-  </section>
   <section class="card full">
     <h2>Egress <span class="sub">outbound network — the destination is the security-relevant fact</span></h2>
     <div style="overflow:auto;max-height:300px"><table id="egtbl"><thead><tr>
-      <th>time</th><th>type</th><th>destination</th><th>port</th><th>proc</th>
+      <th>time</th><th>type</th><th>destination</th><th>path</th><th>port</th><th>evidence</th><th>count</th><th>proc</th>
     </tr></thead><tbody></tbody></table></div>
   </section>
   <section class="card full" id="compliancecard">
@@ -1087,16 +1087,18 @@ async function loadEvidenceDrilldown(offset){
 
 function renderEgress(rows){
   const tb=$('#egtbl tbody');
-  if(!rows||!rows.length){tb.innerHTML='<tr><td colspan="5" class="empty">no outbound network</td></tr>';return;}
+  if(!rows||!rows.length){tb.innerHTML='<tr><td colspan="8" class="empty">no outbound network</td></tr>';return;}
   tb.innerHTML=rows.map(e=>{
     const t=(e.time||'').replace('T',' ').replace(/\.\d+Z?$/,'');
     const cls=e.risk?'eg-risk':'eg-ok';
     const dst=e.domain?`${esc(e.domain)} <span style="color:var(--mut);font-size:11px">${esc(e.dst)}</span>`:esc(e.dst);
-    return `<tr><td>${esc(t)}</td><td class="${cls}">${esc(e.type)}</td><td class="${cls}">${dst}</td><td>${esc(e.port)}</td><td>${esc(e.comm)}</td></tr>`;
+    const decision=e.decision&&e.decision!=='observed'?` · ${esc(e.decision)}`:'';
+    return `<tr><td>${esc(t)}</td><td class="${cls}">${esc(e.type)}</td><td class="${cls}">${dst}</td><td>${esc(e.path||'')}</td><td>${esc(e.port||'')}</td><td>${esc(e.evidence||'')}${decision}</td><td>${esc(e.count||1)}</td><td>${esc(e.comm||'')}</td></tr>`;
   }).join('');
 }
 
-const CHANNEL_LABEL={model_inference:'Model inference',artifact_storage:'Artifact storage',product_analytics:'Product analytics',external_api:'External API',database:'Database',tool_service:'Tool service',unknown_egress:'Unknown egress'};
+const CHANNEL_LABEL={model_inference:'Model inference',artifact_storage:'Artifact storage',telemetry_service:'Telemetry service',product_analytics:'Product analytics',external_api:'External API',database:'Database',tool_service:'Tool service',unknown_egress:'Unknown egress'};
+const CHANNEL_DESC={model_inference:'model request body',artifact_storage:'uploaded artifact / code payload',telemetry_service:'session trace / product telemetry',product_analytics:'analytics endpoint',external_api:'external service call',database:'database connection',tool_service:'tool or MCP service',unknown_egress:'unclassified outbound channel'};
 const DATA_LABEL={secret:'secret',source_code:'source code',conversation:'conversation',behavioral_metadata:'behavioral metadata',unknown:'unknown data'};
 const EVIDENCE_LABEL={payload_observed:'payload observed',connection_observed:'connection observed',dns_only:'DNS only',documented:'documented'};
 function fmtBytes(n){ if(!n)return''; const u=['B','KB','MB','GB']; let i=0,v=n; while(v>=1024&&i<u.length-1){v/=1024;i++;} return (i?v.toFixed(1):v)+' '+u[i]; }
@@ -1110,16 +1112,17 @@ function renderOutbound(surfaces){
   el.innerHTML=surfaces.map((s,i)=>{
     const dest=s.destination||'(destination not recorded)';
     const more=(s.destinations&&s.destinations.length>1)?` <span class="mut">+${s.destinations.length-1}</span>`:'';
-    const meta=[EVIDENCE_LABEL[s.evidence_level]||s.evidence_level, s.request_count+' req'+(s.request_count===1?'':'s'), fmtBytes(s.bytes)].filter(Boolean).join(' · ');
     const rng=fmtRange(s.first_seen,s.last_seen);
-    return `<div class="surface risk-${esc(s.risk)}" data-i="${i}" tabindex="0" role="button" title="click to focus this surface in the graph">
+    const classes=(s.data_classes&&s.data_classes.length?s.data_classes:[s.data_class]).map(x=>DATA_LABEL[x]||x).join(' + ');
+    return `<div class="surface" data-i="${i}" tabindex="0" role="button" title="click to inspect this outbound evidence in the graph">
       <div class="surface-top">
         <span class="chan">${esc(CHANNEL_LABEL[s.channel_class]||s.channel_class)}</span>
-        <span class="badge risk risk-${esc(s.risk)}">${esc(s.risk)}</span>
+        <span class="badge dec dec-observed">${esc(EVIDENCE_LABEL[s.evidence_level]||s.evidence_level)}</span>
       </div>
-      <div class="surface-flow"><span class="dc">${esc(DATA_LABEL[s.data_class]||s.data_class)}</span> <span class="arr">→</span> <b>${esc(s.destination_owner)}</b></div>
+      <div class="surface-note mut">${esc(CHANNEL_DESC[s.channel_class]||'outbound channel')}</div>
+      <div class="surface-flow"><span class="dc">${esc(classes)}</span> <span class="arr">→</span> <b>${esc(s.destination_owner)}</b></div>
       <div class="surface-dest">${esc(dest)}${more}</div>
-      <div class="surface-meta"><span class="badge dec dec-${esc(s.decision)}">${esc(s.decision)}</span> <span class="mut">${esc(meta)}</span></div>
+      <div class="surface-meta"><span class="badge dec dec-${esc(s.decision)}">${esc(s.decision)}</span> <span class="mut">${esc([s.request_count+' req'+(s.request_count===1?'':'s'),fmtBytes(s.bytes)].filter(Boolean).join(' · '))}</span></div>
       ${rng?`<div class="surface-time mut">${esc(rng)}</div>`:''}
       ${s.note?`<div class="surface-note mut">${esc(s.note)}</div>`:''}
     </div>`;
@@ -1138,7 +1141,8 @@ function focusSurface(s){
   const lens=s.channel_class==='model_inference'?'agent-intent':'network-egress';
   const avail=(window._lensManifest&&window._lensManifest.available_lenses)||[];
   if(avail.includes(lens))LENS=lens;
-  DETAIL='raw'; SEL=null; GRAPH_FOCUS=ref; EXPAND_MODE='lineage'; EV_FILTER=null; EV_OFFSET=0;
+  DETAIL='raw'; SEL=null; GRAPH_FOCUS=ref; EXPAND_MODE='lineage'; EV_OFFSET=0;
+  EV_FILTER={title:(CHANNEL_LABEL[s.channel_class]||s.channel_class)+' · '+(s.destination_owner||'unknown'),lens:lens,group:'',focus:'',refs:(s.evidence_refs||[])};
   const ls=$('#lenssel'); if(ls)ls.value=LENS;
   const ds=$('#detailsel'); if(ds)ds.value=DETAIL;
   stopPlay(); loadRun(cur);

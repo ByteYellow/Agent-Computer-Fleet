@@ -33,22 +33,24 @@ import (
 )
 
 type Server struct {
-	DB               *sql.DB
-	Paths            store.Paths
-	Driver           runtimeplane.Driver
-	SampleInterval   time.Duration
-	SampleLimit      int
-	SampleTimeout    time.Duration
-	RawRetention     time.Duration
-	MaxRawSamples    int
-	EvidenceInterval time.Duration
-	EvidenceLimit    int
-	SpoolInterval    time.Duration
-	SpoolLimit       int
-	SpoolMaxQueued   int
-	SpoolDropPolicy  string
-	GCInterval       time.Duration
-	GCLimit          int
+	DB                 *sql.DB
+	Paths              store.Paths
+	Driver             runtimeplane.Driver
+	SampleInterval     time.Duration
+	SampleLimit        int
+	SampleTimeout      time.Duration
+	RawRetention       time.Duration
+	MaxRawSamples      int
+	EvidenceInterval   time.Duration
+	EvidenceLimit      int
+	SpoolInterval      time.Duration
+	SpoolLimit         int
+	SpoolMaxQueued     int
+	SpoolMaxBytes      int64
+	SpoolMaxBatchBytes int64
+	SpoolDropPolicy    string
+	GCInterval         time.Duration
+	GCLimit            int
 	// AuthToken, when set, requires every request except GET /v1/health to carry
 	// `Authorization: Bearer <AuthToken>`. Empty = open (backward compatible).
 	AuthToken string
@@ -87,6 +89,7 @@ func (s Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/telemetry/windows", s.listTelemetryWindows)
 	mux.HandleFunc("GET /v1/telemetry/correlations", s.telemetryCorrelations)
 	mux.HandleFunc("GET /v1/telemetry/spool", s.listTelemetrySpool)
+	mux.HandleFunc("GET /v1/telemetry/producer-health", s.telemetryProducerHealth)
 	mux.HandleFunc("POST /v1/telemetry/spool/process", s.processTelemetrySpool)
 	mux.HandleFunc("POST /v1/telemetry/retention/prune", s.pruneTelemetryRetention)
 	mux.HandleFunc("POST /v1/telemetry/ingest-falco", s.ingestFalco)
@@ -140,36 +143,41 @@ func (s Server) control() control.Service {
 func (s Server) health(w http.ResponseWriter, r *http.Request) {
 	var lastSample string
 	var queuedEvidence, queuedGC, queuedSpool int64
+	var queuedSpoolBytes int64
 	_ = s.DB.QueryRow(`SELECT COALESCE(MAX(created_at), '') FROM cpu_samples`).Scan(&lastSample)
 	_ = s.DB.QueryRow(`SELECT COALESCE(COUNT(*), 0) FROM evidence_events WHERE status = 'queued'`).Scan(&queuedEvidence)
 	_ = s.DB.QueryRow(`SELECT COALESCE(COUNT(*), 0) FROM gc_jobs WHERE status = 'queued'`).Scan(&queuedGC)
 	_ = s.DB.QueryRow(`SELECT COALESCE(COUNT(*), 0) FROM telemetry_spool_batches WHERE status = 'queued'`).Scan(&queuedSpool)
+	_ = s.DB.QueryRow(`SELECT COALESCE(SUM(size_bytes), 0) FROM telemetry_spool_batches WHERE status IN ('queued', 'processing')`).Scan(&queuedSpoolBytes)
 	runtimeName := ""
 	if s.Driver != nil {
 		runtimeName = s.Driver.Name()
 	}
 	writeJSON(w, map[string]any{
-		"schema_version":       "agentprovenance.daemon_health/v1",
-		"status":               "ok",
-		"runtime":              runtimeName,
-		"sample_interval_ms":   s.SampleInterval.Milliseconds(),
-		"sample_limit":         s.SampleLimit,
-		"sample_timeout_ms":    s.SampleTimeout.Milliseconds(),
-		"raw_retention_ms":     s.RawRetention.Milliseconds(),
-		"max_raw_samples":      s.MaxRawSamples,
-		"last_cpu_sample_at":   lastSample,
-		"background_sampler":   s.SampleInterval > 0,
-		"evidence_interval_ms": s.EvidenceInterval.Milliseconds(),
-		"evidence_limit":       s.EvidenceLimit,
-		"spool_interval_ms":    s.SpoolInterval.Milliseconds(),
-		"spool_limit":          s.SpoolLimit,
-		"spool_max_queued":     s.SpoolMaxQueued,
-		"spool_drop_policy":    s.SpoolDropPolicy,
-		"gc_interval_ms":       s.GCInterval.Milliseconds(),
-		"gc_limit":             s.GCLimit,
-		"queued_evidence":      queuedEvidence,
-		"queued_gc":            queuedGC,
-		"queued_spool":         queuedSpool,
+		"schema_version":        "agentprovenance.daemon_health/v1",
+		"status":                "ok",
+		"runtime":               runtimeName,
+		"sample_interval_ms":    s.SampleInterval.Milliseconds(),
+		"sample_limit":          s.SampleLimit,
+		"sample_timeout_ms":     s.SampleTimeout.Milliseconds(),
+		"raw_retention_ms":      s.RawRetention.Milliseconds(),
+		"max_raw_samples":       s.MaxRawSamples,
+		"last_cpu_sample_at":    lastSample,
+		"background_sampler":    s.SampleInterval > 0,
+		"evidence_interval_ms":  s.EvidenceInterval.Milliseconds(),
+		"evidence_limit":        s.EvidenceLimit,
+		"spool_interval_ms":     s.SpoolInterval.Milliseconds(),
+		"spool_limit":           s.SpoolLimit,
+		"spool_max_queued":      s.SpoolMaxQueued,
+		"spool_max_bytes":       s.SpoolMaxBytes,
+		"spool_max_batch_bytes": s.SpoolMaxBatchBytes,
+		"spool_drop_policy":     s.SpoolDropPolicy,
+		"gc_interval_ms":        s.GCInterval.Milliseconds(),
+		"gc_limit":              s.GCLimit,
+		"queued_evidence":       queuedEvidence,
+		"queued_gc":             queuedGC,
+		"queued_spool":          queuedSpool,
+		"queued_spool_bytes":    queuedSpoolBytes,
 	})
 }
 
@@ -513,12 +521,14 @@ func (s Server) ingestFalco(w http.ResponseWriter, r *http.Request) {
 		s.lockWrites()
 		defer s.unlockWrites()
 		batch, err := (telemetry.SpoolService{DB: s.DB, Paths: s.Paths}).Enqueue(telemetry.SpoolEnqueueRequest{
-			Format:        "falco",
-			RunID:         req.RunID,
-			SourcePath:    req.File,
-			PolicyEnabled: !req.NoPolicy,
-			MaxQueued:     s.SpoolMaxQueued,
-			DropPolicy:    s.SpoolDropPolicy,
+			Format:         "falco",
+			RunID:          req.RunID,
+			SourcePath:     req.File,
+			PolicyEnabled:  !req.NoPolicy,
+			MaxQueued:      s.SpoolMaxQueued,
+			MaxQueuedBytes: s.SpoolMaxBytes,
+			MaxBatchBytes:  s.SpoolMaxBatchBytes,
+			DropPolicy:     s.SpoolDropPolicy,
 		})
 		writeSpoolEnqueueResult(w, batch, err)
 		return
@@ -541,6 +551,17 @@ func (s Server) ingestFalco(w http.ResponseWriter, r *http.Request) {
 func (s Server) listTelemetrySpool(w http.ResponseWriter, r *http.Request) {
 	items, err := (telemetry.SpoolService{DB: s.DB, Paths: s.Paths}).List(r.URL.Query().Get("run"))
 	writeResult(w, map[string]any{"schema_version": "agentprovenance.telemetry_spool/v1", "batches": items}, err)
+}
+
+func (s Server) telemetryProducerHealth(w http.ResponseWriter, r *http.Request) {
+	report, err := telemetry.BuildProducerHealth(s.DB, telemetry.ProducerHealthOptions{
+		RunID:          r.URL.Query().Get("run"),
+		MaxQueued:      s.SpoolMaxQueued,
+		MaxQueuedBytes: s.SpoolMaxBytes,
+		MaxBatchBytes:  s.SpoolMaxBatchBytes,
+		DropPolicy:     s.SpoolDropPolicy,
+	})
+	writeResult(w, report, err)
 }
 
 func (s Server) listTelemetryEvents(w http.ResponseWriter, r *http.Request) {
@@ -950,11 +971,15 @@ func writeSpoolEnqueueResult(w http.ResponseWriter, batch telemetry.SpoolBatch, 
 		if errors.As(err, &backpressure) {
 			w.WriteHeader(http.StatusTooManyRequests)
 			writeJSON(w, map[string]any{
-				"schema_version": "agentprovenance.daemon_falco_spool/v1",
-				"error":          backpressure.Reason,
-				"queued":         backpressure.Queued,
-				"max_queued":     backpressure.MaxQueued,
-				"reject_reason":  backpressure.Reason,
+				"schema_version":   "agentprovenance.daemon_falco_spool/v1",
+				"error":            backpressure.Reason,
+				"queued":           backpressure.Queued,
+				"max_queued":       backpressure.MaxQueued,
+				"queued_bytes":     backpressure.QueuedBytes,
+				"incoming_bytes":   backpressure.IncomingBytes,
+				"max_queued_bytes": backpressure.MaxQueuedBytes,
+				"max_batch_bytes":  backpressure.MaxBatchBytes,
+				"reject_reason":    backpressure.Reason,
 			})
 			return
 		}

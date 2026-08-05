@@ -1,0 +1,42 @@
+{
+  "schema_version": "agentprovenance.telemetry_pressure_report/v1",
+  "generated_at": "2026-08-04T10:48:34.229539Z",
+  "environment": {
+    "os": "macOS 26.2 (25C56)",
+    "kernel": "Darwin 25.2.0 arm64",
+    "machine": "MacBookPro18,3",
+    "cpu": "Apple M1 Pro",
+    "store": "local SQLite WAL"
+  },
+  "event_count": 100000,
+  "generation_ms": 420.34,
+  "enqueue_ms": 67.346,
+  "drain_ms": 745481.221,
+  "ingest_events_per_second": 134.14,
+  "health_latency": {
+    "samples": 20,
+    "p50_ms": 0.676,
+    "p95_ms": 1.209,
+    "p99_ms": 1.68,
+    "max_ms": 1.68
+  },
+  "paged_query_latency": {
+    "samples": 20,
+    "p50_ms": 1.625,
+    "p95_ms": 9.182,
+    "p99_ms": 9.68,
+    "max_ms": 9.68
+  },
+  "daemon_peak_rss_bytes": 57524224,
+  "daemon_peak_cpu_percent": 102.7,
+  "result": {
+    "ingested_events": 100000,
+    "failed_events": 0,
+    "dropped_batches": 0,
+    "failed_batches": 0,
+    "correlation_ratio": 1,
+    "health_responsive": true,
+    "bounded_paging": true
+  },
+  "claim_boundary": "Measured local SQLite baseline; not a production latency or throughput SLA."
+}

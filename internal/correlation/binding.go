@@ -10,20 +10,20 @@ import (
 )
 
 type Binding struct {
-	ID            string
-	RunID         string
-	SessionID     string
-	AttemptID     string
-	ToolCallID    string
-	ProcessID     string
-	ContainerID   string
-	CgroupID      string
-	RootPID       int64
-	PID           int64
-	StartedAt     string
-	EndedAt       string
-	BindingSource string
-	Confidence    float64
+	ID            string  `json:"id"`
+	RunID         string  `json:"run_id"`
+	SessionID     string  `json:"session_id"`
+	AttemptID     string  `json:"attempt_id"`
+	ToolCallID    string  `json:"tool_call_id"`
+	ProcessID     string  `json:"process_id"`
+	ContainerID   string  `json:"container_id"`
+	CgroupID      string  `json:"cgroup_id"`
+	RootPID       int64   `json:"root_pid"`
+	PID           int64   `json:"pid"`
+	StartedAt     string  `json:"started_at"`
+	EndedAt       string  `json:"ended_at"`
+	BindingSource string  `json:"binding_source"`
+	Confidence    float64 `json:"confidence"`
 }
 
 type RawIdentity struct {
@@ -178,13 +178,31 @@ func CloseBinding(db *sql.DB, processID, endedAt string) error {
 	return err
 }
 
+// CloseBindingByID closes one exact binding. Kubernetes informer attribution
+// uses this when a container restarts or its pod is deleted: closing by cgroup
+// or session could accidentally terminate a sibling container's scope.
+func CloseBindingByID(db bindingExecer, bindingID, endedAt string) error {
+	if strings.TrimSpace(bindingID) == "" {
+		return fmt.Errorf("binding id is required")
+	}
+	if endedAt == "" {
+		endedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	_, err := db.Exec(`UPDATE execution_context_bindings SET ended_at = ? WHERE id = ? AND ended_at = ''`, endedAt, bindingID)
+	return err
+}
+
 // CloseBindingByPID closes open bindings for an OS pid, used when a system
 // process_exit is observed (the kernel pid is known, our internal process_id is
 // not). Setting ended_at bounds the binding's match window so it no longer
 // over-binds later, unrelated events that reuse the pid -- the stale-open
 // problem MaxOpenBindingAge only partially guards. Matches pid, not root_pid: a
 // child exiting must not close the scope-root's binding.
-func CloseBindingByPID(db *sql.DB, pid int64, endedAt string) error {
+type bindingExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func CloseBindingByPID(db bindingExecer, pid int64, endedAt string) error {
 	if pid == 0 {
 		return nil
 	}

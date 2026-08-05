@@ -62,7 +62,7 @@ Producer Profile = {
 | Profile | Sensor placement | Scope source | Layers reachable | Net-new work |
 |---|---|---|---|---|
 | **local-record** (baseline, exists) | local host | `record` cgroup leaf | system + app-context full; model-intent partial (dynamic OpenSSL + Go request/write when configured) | — (parity reference) |
-| **k8s-daemonset** | node DaemonSet (privileged / hostPID / CAP_BPF) | passive cgroup→container→pod (+ optional record-wrap entrypoint) | system + app-context directly; model-intent only when workload TLS symbols are resolvable from the node/rootfs | DaemonSet manifest; cgroup→pod resolver; pod metadata via `sandbox bind-cgroup` flags (caller resolves from the K8s API; a client-go informer is deferred until auto-discovery is needed) |
+| **k8s-daemonset** | node sensor DaemonSet plus unprivileged attribution-controller companion | passive cgroup→container→pod (+ optional record-wrap entrypoint) | system telemetry validated across multiple pods; app-context joins through existing adapters; model-intent only when workload TLS symbols are resolvable from the node/rootfs | **Validated:** DaemonSet placement, stdout JSONL transport, container/pod metadata→kernel-cgroup attribution, 8-workload graph verification, and client-go informer create/restart/delete lifecycle. **Deferred:** full operator/HA and cluster-wide control plane. |
 | **microvm-guest-init** | inside the guest (init service) | `record` works natively in-guest | system + app-context full; model-intent partial (dynamic OpenSSL + Go request/write when configured) | guest-image integration; **design + minimal runner**; flush + bundle export on teardown |
 
 The sensor already parses `docker-<id>.scope`, `cri-containerd-<id>.scope`, and
@@ -91,6 +91,21 @@ container attribution is partly wired at the kernel layer already.
   the same way, differing only in confidence tier. Fits the existing
   `scripts/accept_*.sh` gate culture. This is the proof that "adaptation level
   is preserved".
+
+The first K8s half of this gate is now repeatable in
+`scripts/accept_k8s_node_multiworkload.sh`: it builds and deploys the actual
+sensor DaemonSet, launches N pods, resolves pod/container metadata to observed
+kernel cgroups, ingests the DaemonSet JSONL stream, and verifies one run. The
+2026-08-05 arm64 K3s reference used 8 pods and captured 1,140 events with zero
+verify errors/warnings. Semantic local-vs-K8s workload parity remains a separate
+cross-profile assertion; KVM parity remains environment-gated.
+
+The node attribution lifecycle is independently repeatable in
+`scripts/accept_k8s_informer_controller.sh`. The 2026-08-05 K3s 1.36.2
+reference run created an initial binding, closed and rebound it after a real
+container restart under the same Pod UID, then closed the replacement on Pod
+deletion. Final state: 2 created, 2 closed, 0 active, 0 retry/failure/resolution
+failure. `client-go v0.32.0` is pinned to the repository's Go 1.23 baseline.
 
 ## Follow-on tracks (explicit non-goals for v0.7)
 

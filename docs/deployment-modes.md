@@ -84,9 +84,22 @@ Expected properties:
   verification, forensics export, and telemetry spool;
 - per-node native `sensor stream` can run beside the daemon or local store and
   feed normalized runtime events through the same ingest/correlation path;
+- `accept_k8s_node_multiworkload.sh` is the environment gate for the actual
+  sensor DaemonSet observing a configurable number of independent pod cgroups;
+  it builds/imports the sensor image, deploys the DaemonSet, resolves
+  pod/container metadata to kernel cgroups, ingests stdout JSONL, and verifies
+  one evidence graph;
+- `agentprov sandbox watch` is the node-local `client-go` informer companion:
+  it List/Watches only Pods scheduled on its node, maintains exact
+  container-to-cgroup bindings across restart/delete, and requires only Pod
+  `get/list/watch` RBAC;
 - CLI and Python helpers act as clients;
 - raw telemetry can be queued and drained without blocking the control/query
   path;
+- spool capacity is bounded independently by queued batch count, total queued
+  bytes, and per-batch bytes;
+- `telemetry producer-health` reports spool state, drops, source counts, and
+  correlation coverage;
 - local APIs expose observability, timeline, graph explain, security evidence,
   evidence manifest, forensics export, and signal import.
 
@@ -96,11 +109,19 @@ Boundary:
 - it is not a multi-tenant central service;
 - it should be deployable beside a worker without requiring Kubernetes or a
   central database.
+- the K8s gates prove one-node producer placement, passive attribution, and
+  informer lifecycle handling. A full operator (CRDs, HA/leader election,
+  upgrade control) and cluster-wide evidence service remain outside this
+  mode's implemented boundary.
 
-## 3. Central Evidence Service
+## 3. Central Evidence Service (design only)
 
 This is the later enterprise shape for security, audit, SRE, compliance, and
 incident review.
+
+It is intentionally **not implemented** in the current project scope. The
+component boundaries, failure model, capacity signals, and trust assumptions are
+documented in [central-evidence-service-design.md](central-evidence-service-design.md).
 
 Shape:
 
@@ -127,6 +148,7 @@ Boundary:
   local modes;
 - it requires explicit productization work rather than hidden assumptions in
   the local CLI.
+- multi-tenancy, billing, and a complex cluster control plane are out of scope.
 
 ## Design Rule
 

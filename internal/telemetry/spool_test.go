@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -190,5 +191,58 @@ func TestSpoolEnqueueDropOldestPolicy(t *testing.T) {
 	}
 	if dropped != 1 || queued != 1 {
 		t.Fatalf("dropped=%d queued=%d, want 1/1; rows=%+v", dropped, queued, items)
+	}
+}
+
+func TestSpoolEnqueueEnforcesByteLimits(t *testing.T) {
+	root := t.TempDir()
+	paths, err := store.Init(filepath.Join(root, ".agentprov"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	firstPath := filepath.Join(root, "first.jsonl")
+	secondPath := filepath.Join(root, "second.jsonl")
+	if err := os.WriteFile(firstPath, []byte("1234567890"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secondPath, []byte("abcdefghij"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	service := SpoolService{DB: db, Paths: paths}
+	first, err := service.Enqueue(SpoolEnqueueRequest{Format: "falco", SourcePath: firstPath, MaxQueuedBytes: 15})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.Enqueue(SpoolEnqueueRequest{Format: "falco", SourcePath: secondPath, MaxQueuedBytes: 15})
+	var backpressure SpoolBackpressureError
+	if !errors.As(err, &backpressure) || backpressure.Reason != "telemetry_spool_bytes_full" || backpressure.QueuedBytes != 10 {
+		t.Fatalf("unexpected byte backpressure: %#v (%v)", backpressure, err)
+	}
+
+	second, err := service.Enqueue(SpoolEnqueueRequest{Format: "falco", SourcePath: secondPath, MaxQueuedBytes: 15, DropPolicy: "drop_oldest"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ID == first.ID {
+		t.Fatal("expected replacement batch")
+	}
+	stats, err := service.QueueStats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.QueuedBatches != 1 || stats.QueuedBytes != 10 {
+		t.Fatalf("unexpected queue stats: %+v", stats)
+	}
+
+	_, err = service.Enqueue(SpoolEnqueueRequest{Format: "falco", SourcePath: secondPath, MaxBatchBytes: 9})
+	if !errors.As(err, &backpressure) || backpressure.Reason != "telemetry_spool_batch_too_large" {
+		t.Fatalf("unexpected max-batch error: %#v (%v)", backpressure, err)
 	}
 }

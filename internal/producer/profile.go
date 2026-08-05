@@ -73,8 +73,8 @@ func LocalRecord() Profile {
 }
 
 // K8sDaemonset runs one sensor per node (DaemonSet). It shares the node kernel,
-// so system telemetry is full; scope is passive cgroup→pod attribution unless the
-// pod entrypoint opts into record. Model intent is limited by whether the node
+// so system telemetry is full; scope is passive pod/container metadata -> host
+// cgroup inode attribution unless the pod entrypoint opts into record. Model intent is limited by whether the node
 // sensor can resolve the workload's dynamic libssl in the container rootfs.
 func K8sDaemonset() Profile {
 	return Profile{

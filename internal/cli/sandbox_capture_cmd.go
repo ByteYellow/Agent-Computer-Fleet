@@ -222,7 +222,7 @@ func cgroupInodeForPID(pid int) (string, error) {
 	if rel == "" {
 		return "", fmt.Errorf("no cgroup2 path in /proc/%d/cgroup", pid)
 	}
-	info, err := os.Stat(filepath.Join("/sys/fs/cgroup", rel))
+	info, err := os.Stat(hostCgroupPath(rel))
 	if err != nil {
 		return "", err
 	}
@@ -230,6 +230,16 @@ func cgroupInodeForPID(pid int) (string, error) {
 		return fmt.Sprintf("%d", st.Ino), nil
 	}
 	return "", fmt.Errorf("cannot read cgroup inode")
+}
+
+// hostCgroupPath anchors a /proc/<pid>/cgroup path at the host cgroup mount.
+// A hostPID container still has its own cgroup namespace, so host process paths
+// may be reported as ../../kubepods.... Cleaning after prepending '/' removes
+// those namespace-relative parents without allowing the path to escape the
+// read-only host cgroup root.
+func hostCgroupPath(rel string) string {
+	clean := filepath.Clean("/" + strings.TrimSpace(rel))
+	return filepath.Join("/sys/fs/cgroup", strings.TrimPrefix(clean, "/"))
 }
 
 // runSensorWindow runs the node sensor for a fixed window, writing raw JSONL. It

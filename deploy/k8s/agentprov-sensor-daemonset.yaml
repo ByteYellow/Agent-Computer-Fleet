@@ -3,15 +3,20 @@
 # Collection model: NODE-AGENT (DaemonSet), not sidecar. One privileged sensor
 # per node observes EVERY pod on that node from the shared node kernel via eBPF
 # (tracepoints are kernel-wide), so workload pods are never modified and no
-# per-pod injection is needed. Pod attribution is by cgroup: the sensor derives
-# the container id from the kubepods cgroup, and `agentprov sandbox bind-cgroup`
-# ties a pod's cgroup to a run so its telemetry correlates and exports as a
-# verifiable bundle. (microVMs use the separate microvm-guest-init in-guest
-# profile, since a guest kernel is opaque to the node.)
+# per-pod injection is needed. Pod attribution is by the kernel cgroup id stamped
+# on every event: a node resolver joins Kubernetes pod/container metadata to the
+# host cgroup inode, and `agentprov sandbox bind-cgroup` ties that cgroup to a run
+# so its telemetry correlates and exports as a
+# verifiable bundle. Normalized JSONL is emitted on stdout, which is the
+# Producer Profile event-transport boundary: a node-local collector or the
+# acceptance controller can consume it without changing the sensor. (microVMs
+# use the separate microvm-guest-init in-guest profile, since a guest kernel is
+# opaque to the node.)
 #
-# This is the deploy shape only; wiring the sensor's JSONL into a central
-# collector (POST /v1/telemetry/*) and enriching pod metadata via a K8s informer
-# are the remaining k8s-daemonset pieces (see docs/roadmap-v0.7.md).
+# Automatic pod identity enrichment is performed by the node-side attribution
+# controller (`agentprov sandbox watch`) or an environment-specific collector.
+# A central collector remains an optional future deployment, not a requirement
+# for the local/per-node profile.
 #
 # Prereqs: nodes must expose kernel BTF (/sys/kernel/btf/vmlinux) and tracefs.
 # The image must contain agentprov-sensor at /usr/local/bin/agentprov-sensor.
@@ -31,12 +36,18 @@ spec:
     matchLabels: { app: agentprov-sensor }
   template:
     metadata:
-      labels: { app: agentprov-sensor }
+      labels:
+        app: agentprov-sensor
+        agentprov.io/ignore: "true"
+      annotations:
+        agentprov.io/ignore: "true"
     spec:
       hostPID: true            # see host process ids for node-wide attribution
+      terminationGracePeriodSeconds: 10
       containers:
         - name: sensor
           image: agentprov-sensor:latest
+          imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/agentprov-sensor"]
           securityContext:
             privileged: true    # CAP_BPF/CAP_PERFMON + attach uprobes/tracepoints

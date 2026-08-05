@@ -319,3 +319,40 @@ func TestChildEventResolvesViaContainerNotPid(t *testing.T) {
 		t.Fatalf("expected container-based method for child pid, got %q", match.Method)
 	}
 }
+
+func TestCloseBindingByIDOnlyClosesTarget(t *testing.T) {
+	root := t.TempDir()
+	paths, err := store.Init(filepath.Join(root, ".agentprov"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	first, err := RecordBinding(db, Binding{RunID: "run-pod", SessionID: "pod", CgroupID: "101"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := RecordBinding(db, Binding{RunID: "run-pod", SessionID: "pod", CgroupID: "202"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ended := time.Now().UTC().Format(time.RFC3339Nano)
+	if err := CloseBindingByID(db, first, ended); err != nil {
+		t.Fatal(err)
+	}
+
+	var firstEnded, secondEnded string
+	if err := db.QueryRow(`SELECT ended_at FROM execution_context_bindings WHERE id = ?`, first).Scan(&firstEnded); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT ended_at FROM execution_context_bindings WHERE id = ?`, second).Scan(&secondEnded); err != nil {
+		t.Fatal(err)
+	}
+	if firstEnded != ended || secondEnded != "" {
+		t.Fatalf("ended_at target=%q sibling=%q", firstEnded, secondEnded)
+	}
+}

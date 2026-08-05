@@ -368,13 +368,19 @@ type dropLookuper interface {
 // survives a process whose /proc entry is already gone by the time userspace
 // drains the ring buffer - the failure mode of the previous /proc-only lookup.
 type cgroupResolver struct {
-	root string
-	mu   sync.RWMutex
-	byID map[uint64]string
+	root            string
+	mu              sync.RWMutex
+	refreshMu       sync.Mutex
+	byID            map[uint64]string
+	lastRefresh     time.Time
+	refreshInterval time.Duration
 }
 
 func newCgroupResolver() *cgroupResolver {
-	return &cgroupResolver{root: "/sys/fs/cgroup", byID: map[uint64]string{}}
+	return &cgroupResolver{
+		root: "/sys/fs/cgroup", byID: map[uint64]string{},
+		refreshInterval: time.Second,
+	}
 }
 
 // resolve returns the container id for a kernel cgroup id, refreshing the cache
@@ -389,11 +395,31 @@ func (r *cgroupResolver) resolve(cgroupID uint64) string {
 	if ok {
 		return id
 	}
-	r.refresh()
+	r.refreshIfDue()
 	r.mu.RLock()
 	id = r.byID[cgroupID]
 	r.mu.RUnlock()
 	return id
+}
+
+// refreshIfDue bounds hierarchy scans. A node-wide sensor sees many host
+// cgroups that can never map to a container; rescanning the complete hierarchy
+// for every such event stalls ring-buffer consumption under normal K8s host
+// activity. Unknown ids use the live /proc fallback until the next refresh.
+func (r *cgroupResolver) refreshIfDue() {
+	r.refreshMu.Lock()
+	defer r.refreshMu.Unlock()
+	interval := r.refreshInterval
+	if interval <= 0 {
+		interval = time.Second
+	}
+	r.mu.RLock()
+	last := r.lastRefresh
+	r.mu.RUnlock()
+	if !last.IsZero() && time.Since(last) < interval {
+		return
+	}
+	r.refresh()
 }
 
 // refresh walks the cgroup v2 hierarchy and maps each container cgroup
@@ -420,6 +446,7 @@ func (r *cgroupResolver) refresh() {
 	})
 	r.mu.Lock()
 	r.byID = next
+	r.lastRefresh = time.Now()
 	r.mu.Unlock()
 }
 

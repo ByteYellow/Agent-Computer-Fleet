@@ -1,0 +1,3 @@
+FROM scratch
+COPY agentprov /usr/local/bin/agentprov
+ENTRYPOINT ["/usr/local/bin/agentprov"]

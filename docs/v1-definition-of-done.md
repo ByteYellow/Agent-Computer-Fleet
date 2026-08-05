@@ -1,7 +1,8 @@
 # AgentProvenance Infra v1 -- Definition of Done
 
 > Status: release-scope doc. Turns the `north-star-three-pillars.md` vision into a
-> checkable v1 acceptance list. Decisions below were taken 2026-06-27 after a
+> checkable v1 acceptance list. Decisions below were taken 2026-06-27 and the
+> status table was reconciled with completed gates on 2026-08-05 after a
 > file-grounded audit of the whole repo. Each item is DONE / PARTIAL / DEFERRED
 > with the evidence symbol. "DEFERRED" means explicitly out of v1, into v2.
 
@@ -28,11 +29,11 @@ tamper-evident against a malicious host root.
 
 | # | Area | Status | Evidence (file:symbol) |
 |---|---|---|---|
-| 1 | Data-plane: spool / backpressure / drop | DONE | `telemetry/spool.go` Enqueue/applyBackpressure/dropPolicy (reject\|drop_oldest, HTTP 429); `accept_telemetry_100k_pressure.sh` |
-| 1 | Data-plane: collector as a *separate process* | PARTIAL -> v1 accepts in-daemon ingest | only `cmd/agentprov-sensor` is a separate producer; ingest is in-daemon (shared SQLite + writeMu). Full process-level data-plane split is coupled to Deploy 3 -> **v2** |
+| 1 | Data-plane: spool / backpressure / drop | DONE | `telemetry/spool.go` bounds batch count, total bytes, and per-batch bytes; reject\|drop_oldest + HTTP 429; `telemetry producer-health`; pressure/spool acceptance scripts |
+| 1 | Data-plane: collector as a *separate process* | DEFERRED -> v2 | `cmd/agentprov-sensor` is a separate producer; ingest remains in-daemon for Deploy 1/2. Full process-level data-plane isolation is coupled to Deploy 3 |
 | 2 | Control: daemon holds correlation/policy/risk/response/verify | DONE | `daemon/server.go` /v1 routes |
-| 2 | Control: CLI as client | PARTIAL | reads route via daemon; **writes (`record`,`telemetry ingest*`,`bind`) run in-process, no daemon client method** -> two-writer hazard, see Sec 2 must-fix |
-| 2 | Control: stable JSON schema | PARTIAL | `schema_version` is per-response-type, not a universal envelope; several handlers (health, security/*, graph/verify, observe, timeline) lack it. Tighten as the Tier-A contract item |
+| 2 | Control: CLI as client | DEFERRED -> v2 | reads route via daemon; some local-first writes remain in-process. WAL plus the daemon advisory lock make the Deploy 1/2 boundary explicit; a daemon-only write surface belongs to Deploy 3 |
+| 2 | Control: stable JSON schema | DONE for v1 | core JSON surfaces carry versioned response contracts; a single universal envelope would change existing wire formats and is deferred to v2 |
 | 2 | Control: authn | DONE | `withAuth` bearer token, constant-time, open-by-default |
 | 2 | Control: authz / scopes | DEFERRED | no roles/scopes; single all-or-nothing token -> **v2** (rides with Deploy 3) |
 | 3 | Storage: WAL + busy_timeout (all conns) | DONE | `store/store.go` DSN `_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)` |
@@ -61,11 +62,11 @@ tamper-evident against a malicious host root.
 | 8 | bundle contents (events/policy/risk/response/edges/manifest/cost) | DONE | export.go bundle map; `accept_forensics_bundle.sh` |
 | 8 | sign + offline verify (hash + schema) | DONE | `attest/` in-toto + DSSE + ed25519; VerifyBundleAttestation |
 | 8 | graph verify proves run chain unbroken | DONE | integrity only -- see Sec 0 honesty scoping |
-| 9 | 100k ingest keeps query responsive | PARTIAL | bounded paging asserted; no latency SLA (Sec 2) |
-| 9 | concurrent record/ingest preserves consistency | PARTIAL | `record batch --concurrency` exists (worker pool, WAL-serialized writes); **file-safe via WAL, logical consistency under concurrent writers untested** (Sec 2) |
+| 9 | 100k ingest keeps query responsive | DONE (measured baseline, not SLA) | bounded paging and health are asserted; the script emits ingest throughput, query/health p50/p95/p99, daemon CPU/RSS, queue/drop state, and coverage JSON |
+| 9 | concurrent record/ingest preserves consistency | DONE | WAL-serialized writes plus `record.TestConcurrentRecordPreservesGraphConsistency` verify logical graph consistency under concurrent writers |
 | 9 | raw retention effective | DONE | `accept_daemon_evidence_api.sh` prune |
 | 9 | pagination / cursor | DONE | ListEventsPage opaque cursor |
-| 9 | scenarios normal/risk/high-pressure/corrupted-chain | PARTIAL | corrupted-chain only tests the **signed bundle**, not an in-DB hash-chain tamper -> `graph verify` detection (Sec 2 test) |
+| 9 | scenarios normal/risk/high-pressure/corrupted-chain | DONE | acceptance gates cover normal/risk/high-pressure; `accept_evidence_tamper_detection.sh` proves object-file and in-DB record-manifest tamper detection |
 | 10 | Deploy 1 Library/CLI | DONE | single binary + python helper; `accept_deploy1_batch_pipeline.sh` |
 | 10 | Deploy 2 Sidecar/local daemon | DONE | `daemon serve` + REST + bearer auth |
 | 10 | Deploy 3 Central evidence service | DEFERRED | no object storage / multi-tenant / mTLS -> **v2** |
@@ -89,8 +90,8 @@ tamper-evident against a malicious host root.
    - concurrent writers -> graph consistency; record TestConcurrentRecord... (d84812a)
    - child pid != binding pid attributes via container; correlation test (f7f2a6b)
    - Tetragon `scripts/accept_tetragon_ingest.sh`; 10s window assertion (f7f2a6b)
-   - 100k latency SLA: intentionally NOT added (latency assertions are flaky /
-     low-value; the 100k script already proves bounded paging + health stays ok).
+   - 100k latency uses a persisted measured report rather than a fixed SLA;
+     machine-specific latency assertions remain intentionally avoided.
 6. **[DONE]** Contract: daemon `health` now emits `schema_version` (the one
    passthrough-less response; report handlers already carried it). Commit 2f2b4d7.
    A single universal envelope across all responses remains a v2 item (it would
@@ -108,6 +109,9 @@ tamper-evident against a malicious host root.
   Deploy 2 (sidecar daemon) already serves single-node security harnesses, so
   deferring Deploy 3 does **not** drop the security track -- it defers scale-out.
   north-star Sec 7: earn it through Mode 1/2 adoption.
+- **Daemon-only write API and one universal JSON envelope.** Deploy 1 remains
+  intentionally local-first; changing every existing response and write path is
+  coupled to the Deploy 3 API boundary rather than required for v1 correctness.
 - **Notifications** (Feishu/DingTalk/webhook response adapters).
 - Cross-host identity / clock-skew correlation (A2); auditd/extra substrates;
   rootless container cgroup-delegation validation; broader multi-arch sensor
@@ -115,6 +119,6 @@ tamper-evident against a malicious host root.
 
 ## 4. v1 done gate
 
-v1 is done when: every Sec 1 PARTIAL above is either DONE or consciously moved to Sec 3,
-all Sec 2 items are closed, and the full gate is green --
+v1 is done when every included item above is DONE, every excluded item is
+explicitly in Sec 3, all Sec 2 items are closed, and the full gate is green --
 `go vet/test ./...`, every `scripts/accept_*.sh`, gofmt + non-ASCII + `git diff --check`.

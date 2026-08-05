@@ -171,6 +171,16 @@ func (c Client) TelemetryCorrelations(runID, eventID string) (telemetry.Correlat
 	return report, err
 }
 
+func (c Client) TelemetryProducerHealth(runID string) (telemetry.ProducerHealthReport, error) {
+	values := url.Values{}
+	if runID != "" {
+		values.Set("run", runID)
+	}
+	var report telemetry.ProducerHealthReport
+	err := c.getJSON("/v1/telemetry/producer-health?"+values.Encode(), &report)
+	return report, err
+}
+
 func (c Client) SecurityRisks(runID string) (securitymodel.RiskSignalsReport, error) {
 	var report securitymodel.RiskSignalsReport
 	err := c.getJSON("/v1/security/risks?run="+url.QueryEscape(runID), &report)

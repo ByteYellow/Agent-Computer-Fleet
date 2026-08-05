@@ -245,6 +245,7 @@ func sandboxCmd(dataDir *string) *cobra.Command {
 	cmd.AddCommand(bindCgroup)
 	cmd.AddCommand(sandboxCaptureCmd(dataDir))
 	cmd.AddCommand(sandboxWatchCmd(dataDir))
+	cmd.AddCommand(sandboxPollingWatchCmd(dataDir))
 
 	run.Flags().SetInterspersed(false)
 	run.Flags().StringVar(&out, "out", "", "directory to copy the exported bundle into (mounted volume for teardown durability)")

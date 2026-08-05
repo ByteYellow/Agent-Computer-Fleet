@@ -1,22 +1,17 @@
 # AgentProvenance closeout criteria
 
-This document defines the finish line for the portfolio project. It deliberately
+This document defines the project's current engineering finish line. It deliberately
 stops before AgentProvenance becomes a virtualization platform or a centralized
 SaaS product.
 
 ## Portable Producer Profiles
 
-The KVM/microVM profile proves portability only:
-
-- guest init starts the sensor automatically;
-- VM identity, cgroup, and process identity map to an Execution Scope;
-- teardown flushes and exports a signed bundle;
-- the same workload produces semantically equivalent evidence graphs under
-  local, Kubernetes, and KVM profiles;
-- the dashboard reports substrate, VM ID, captured capabilities, and confidence.
-
-KVM validation requires a separate Linux/KVM environment and is tracked
-independently from the single-node scale work.
+The implemented portability boundary is `local-record` plus
+`k8s-daemonset`: the same substrate-neutral evidence model accepts an actively
+wrapped local process and externally scheduled Pods attributed by kernel
+cgroup identity. A microVM guest-init profile remains a discoverable future
+target, reports `planned` with no available coverage, and does not block this
+closeout.
 
 ## Single-node scale boundary
 
@@ -40,7 +35,7 @@ Reference run on the macOS development host (2026-08-04, 100,000 synthetic
 Falco events): all 100,000 events were ingested with zero failed/dropped batches;
 health p95 was 1.209 ms, paged-query p95 was 9.182 ms, peak daemon RSS was about
 55 MiB, and end-to-end spool drain throughput was 134.14 events/s. The query and
-memory behavior meet this portfolio closeout target. The throughput is an honest
+memory behavior meet this closeout target. The throughput is an honest
 single-node SQLite baseline, not a production streaming claim.
 The compact checked result is
 [`benchmarks/telemetry-100k-macos-arm64.json`](benchmarks/telemetry-100k-macos-arm64.json).
@@ -62,6 +57,16 @@ closed/replaced that binding, and closed the replacement after Pod deletion.
 The final report contained 2 created and 2 closed bindings, 0 active bindings,
 1 restart, and 0 retry/failure/resolution failure. This closes the node-local
 lifecycle gap; it is not a claim of operator HA or multi-node shared state.
+
+The cross-profile semantic gate was validated on the same arm64 K3s node on
+2026-08-05. The canonical `id + ls /` workload ran once under an active
+`local-record` cgroup and once as an externally scheduled Pod attributed by the
+passive `k8s_cgroup` source. Both graphs completed verification with zero errors
+and zero warnings. Their shared semantic projection contained both workload
+commands, `execve` events, `runtime_event` nodes, and `runtime_process_event`
+edges. Physical PID, cgroup, container, timestamp, and event-count differences
+were deliberately excluded; local confidence remained 1.0/0.9 and Kubernetes
+confidence remained 0.8.
 
 ## Central service boundary
 
@@ -93,7 +98,13 @@ AGENTPROV=/path/to/agentprov SENSOR=/path/to/agentprov-sensor \
 AGENTPROV=/path/to/agentprov \
   AGENTPROV_K8S_INFORMER_REPORT=/tmp/agentprov-k8s-informer.json \
   ./scripts/accept_k8s_informer_controller.sh
+
+# Same-workload local/Kubernetes semantic parity gate.
+AGENTPROV=/path/to/agentprov SENSOR=/path/to/agentprov-sensor \
+  AGENTPROV_K8S_PARITY_REPORT=/tmp/agentprov-local-k8s-parity.json \
+  ./scripts/accept_k8s_pod_parity.sh
 ```
 
-Kubernetes and KVM parity are environment-gated acceptance paths and must retain
-their captured reports/bundles outside the Git repository.
+Kubernetes parity is an environment-gated acceptance path and must retain its
+captured report outside the Git repository. Future substrate profiles must earn
+`validated` status through an equivalent live gate before advertising coverage.

@@ -1,13 +1,14 @@
-# AgentProvenance v0.7: Portable Producer Profiles (K8s Pod + microVM)
+# AgentProvenance v0.7: Portable Producer Profiles
 
 ## Goal
 
-Extend the collection capability that already works on local Linux / VM to
-**Kubernetes Pods** and **microVMs (Firecracker/Kata)**, keeping the same level
-of evidence completeness — **without changing the core graph or the schema, and
-without building a scheduler**. v0.7 is only about evidence *producers*: where
-they run, how scope is resolved, how events ship, and honestly declaring what
-each environment can and cannot collect.
+Extend the collection capability that already works on local Linux to
+**Kubernetes Pods**, keeping the same evidence model — **without changing the
+core graph or the schema, and without building a scheduler**. v0.7 is only
+about evidence *producers*: where they run, how scope is resolved, how events
+ship, and honestly declaring what each environment can and cannot collect.
+Firecracker/Kata guest integration remains a future profile and is not part of
+the v0.7 completion gate.
 
 ## Why this is a producer problem, not a core problem
 
@@ -63,7 +64,7 @@ Producer Profile = {
 |---|---|---|---|---|
 | **local-record** (baseline, exists) | local host | `record` cgroup leaf | system + app-context full; model-intent partial (dynamic OpenSSL + Go request/write when configured) | — (parity reference) |
 | **k8s-daemonset** | node sensor DaemonSet plus unprivileged attribution-controller companion | passive cgroup→container→pod (+ optional record-wrap entrypoint) | system telemetry validated across multiple pods; app-context joins through existing adapters; model-intent only when workload TLS symbols are resolvable from the node/rootfs | **Validated:** DaemonSet placement, stdout JSONL transport, container/pod metadata→kernel-cgroup attribution, 8-workload graph verification, and client-go informer create/restart/delete lifecycle. **Deferred:** full operator/HA and cluster-wide control plane. |
-| **microvm-guest-init** | inside the guest (init service) | `record` works natively in-guest | system + app-context full; model-intent partial (dynamic OpenSSL + Go request/write when configured) | guest-image integration; **design + minimal runner**; flush + bundle export on teardown |
+| **microvm-guest-init** | future in-guest init service | target: active record-wrap | **planned / unvalidated:** all current coverage reports `none` | future guest-image integration and teardown export; not part of the v0.7 completion gate |
 
 The sensor already parses `docker-<id>.scope`, `cri-containerd-<id>.scope`, and
 `kubepods/<id>` cgroups (`sensor_linux.go` `cgroupResolver.refresh`), so pod/
@@ -75,7 +76,7 @@ container attribution is partly wired at the kernel layer already.
 |---|---|
 | scope binding | `correlation.RecordBinding` → `execution_context_bindings` table; `POST /v1/telemetry/bind`. Add a new `binding_source` value (e.g. `k8s_cgroup`) and one confidence tier in `defaultBindingConfidence`. **No schema change.** |
 | event transport | existing `POST /v1/telemetry/*` ingest + spool/backpressure/retention (`internal/daemon`) — remote node/guest producers stream to a central or local daemon |
-| microVM evidence durability | existing forensics bundle export/import + signed attestation (`internal/forensics`) — flush on VM teardown |
+| future microVM evidence durability | existing forensics bundle export/import + signed attestation can be reused after a guest runner exists |
 | pod/container attribution | existing cgroup parsing in `internal/sensor/sensor_linux.go` |
 
 ## Visibility & verification
@@ -92,13 +93,18 @@ container attribution is partly wired at the kernel layer already.
   `scripts/accept_*.sh` gate culture. This is the proof that "adaptation level
   is preserved".
 
-The first K8s half of this gate is now repeatable in
+The K8s multi-workload half of this gate is repeatable in
 `scripts/accept_k8s_node_multiworkload.sh`: it builds and deploys the actual
 sensor DaemonSet, launches N pods, resolves pod/container metadata to observed
 kernel cgroups, ingests the DaemonSet JSONL stream, and verifies one run. The
 2026-08-05 arm64 K3s reference used 8 pods and captured 1,140 events with zero
-verify errors/warnings. Semantic local-vs-K8s workload parity remains a separate
-cross-profile assertion; KVM parity remains environment-gated.
+verify errors/warnings. The cross-profile assertion is implemented separately
+in `scripts/accept_k8s_pod_parity.sh`: on 2026-08-05 the same `id + ls /`
+workload produced verified local and K8s graphs with the same canonical command,
+event, node, and edge semantics. Physical identity and event-count differences
+are excluded while each profile's confidence tier is retained. Future KVM work
+must add its own environment gate before the profile can move from `planned` to
+`validated`.
 
 The node attribution lifecycle is independently repeatable in
 `scripts/accept_k8s_informer_controller.sh`. The 2026-08-05 K3s 1.36.2
@@ -143,7 +149,7 @@ them block shipping the environment profiles.
 | Environment | system telemetry | model intent | app context | scope |
 |---|---|---|---|---|
 | local-linux / VM (today) | ✅ | ⚠️ dynamic OpenSSL (`SSL_*` + `SSL_*_ex`; h1 + h2/HPACK) + partial Go request/write | ✅ | record (kernel-verified) |
-| microVM (Firecracker/Kata) | ✅ in-guest | ⚠️ in-guest dynamic OpenSSL + partial Go request/write | ✅ | record in-guest |
+| microVM (Firecracker/Kata) | ⬜ planned | ⬜ planned | ⬜ planned | future record in-guest |
 | K8s Pod | ✅ node | ⚠️ dynamic OpenSSL or Go write path when symbols are resolvable from node/rootfs | ✅ | passive cgroup→pod, or record-wrap |
 | K8s Job | ✅ node | ⚠️ same | ✅ | + job/owner metadata |
 | bare-metal / multi-node | ✅ per-node | ⚠️ dynamic OpenSSL + partial Go request/write | ✅ | record or cgroup |

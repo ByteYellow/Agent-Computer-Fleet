@@ -9,9 +9,10 @@
 # so its telemetry correlates and exports as a
 # verifiable bundle. Normalized JSONL is emitted on stdout, which is the
 # Producer Profile event-transport boundary: a node-local collector or the
-# acceptance controller can consume it without changing the sensor. (microVMs
-# use the separate microvm-guest-init in-guest profile, since a guest kernel is
-# opaque to the node.)
+# acceptance controller can consume it without changing the sensor. A future
+# microvm-guest-init profile must run inside the guest because a guest kernel is
+# opaque to the node; that profile is planned and does not currently advertise
+# collection coverage.
 #
 # Automatic pod identity enrichment is performed by the node-side attribution
 # controller (`agentprov sandbox watch`) or an environment-specific collector.

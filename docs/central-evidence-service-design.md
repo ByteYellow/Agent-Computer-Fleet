@@ -13,7 +13,7 @@ it would not become a scheduler, sandbox platform, or generic telemetry lake.
 ## Logical architecture
 
 ```text
-node / microVM producer
+node producer / future microVM producer
   -> bounded local spool
   -> authenticated batch ingest
   -> durable ingest log
@@ -111,5 +111,5 @@ Implementation should start only after per-node operation is proven with:
 2. bounded queues and byte budgets under overload;
 3. drop and coverage accounting that survives export/import;
 4. a reproducible 100k-event ingest/query report;
-5. semantic graph parity across local, Kubernetes, and microVM profiles.
-
+5. semantic graph parity across every profile that has earned `validated`
+   status; future microVM support must pass the same gate before inclusion.

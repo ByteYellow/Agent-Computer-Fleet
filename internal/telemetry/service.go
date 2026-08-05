@@ -489,9 +489,11 @@ func recordRuntimeCausalityEdges(db sqlStore, event IngestEvent, eventID, now st
 	insert(event.ToolCallID, eventNode, "runtime_tool_call_event")
 	insert(event.ProcessID, eventNode, "runtime_process_event")
 	insert(event.SnapshotID, eventNode, "runtime_snapshot_event")
-	if event.ProcessID != "" && event.PID != 0 {
+	if event.PID != 0 {
 		processNode := fmt.Sprintf("runtime_process/pid/%d", event.PID)
-		insert(event.ProcessID, processNode, "runtime_process_observed")
+		if event.ProcessID != "" {
+			insert(event.ProcessID, processNode, "runtime_process_observed")
+		}
 		insert(processNode, eventNode, "runtime_process_event")
 	}
 	if event.PID != 0 && event.PPID != 0 {

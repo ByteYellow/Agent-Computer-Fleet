@@ -1,5 +1,49 @@
 # Changelog
 
+## v0.7.2 - 2026-08-05
+
+Evidence collection and investigation hardening. This release turns the
+Kubernetes producer from a capture preview into a measured, lifecycle-aware
+node profile, adds bounded high-volume ingest, and makes outbound data movement
+queryable as evidence rather than a dashboard-specific special case.
+
+### Added
+
+- **Lifecycle-aware Kubernetes attribution.** A filtered `client-go` informer
+  maps Pod/container lifecycle to kernel cgroup bindings, including container
+  restart and Pod deletion. One privileged node sensor can observe multiple
+  independent workloads without modifying workload Pods.
+- **True local/Kubernetes semantic parity gate.** The same `id + ls /` workload
+  now runs through active `local-record` and passive `k8s-daemonset` capture.
+  Both evidence graphs verify with zero errors/warnings and share the canonical
+  `execve -> runtime_process -> runtime_event` semantics while preserving their
+  different scope-confidence tiers.
+- **Bounded telemetry ingest.** The daemon spool enforces batch-count,
+  total-byte, and per-batch limits with explicit reject/drop behavior and
+  producer-health counters. A checked 100k-event report records throughput,
+  query/health latency, memory, queue state, drops, and correlation coverage.
+- **Outbound Data Surfaces.** Endpoint capture, normalized egress evidence,
+  intent divergence, risk/response links, and generic dashboard investigation
+  cards cover sensitive context egress, source bundle upload attempts, and
+  behavioral telemetry sent to third-party services.
+- **Grok CLI evidence scenario.** A replayable demo captures and distinguishes
+  secret-to-model context flow, codebase upload behavior, and product telemetry
+  as three separate outbound surfaces.
+
+### Changed
+
+- **Producer capabilities are validation-gated.** Profiles now report
+  `validated` or `planned`. `microvm-guest-init` remains discoverable but reports
+  no coverage and zero confidence until a guest runner and live KVM acceptance
+  exist; local and Kubernetes profiles are validated. `agentprov sandbox
+  profiles --json` exposes the machine-readable capability report.
+- **Passive runtime causality is complete.** PID-derived runtime process nodes
+  now connect to their runtime events even when no application-level process ID
+  exists, which is required for zero-SDK Kubernetes capture.
+- **Central service remains design-only.** This release proves a bounded
+  single-node producer and documents the scale-out boundary; it does not claim
+  a multi-tenant control plane.
+
 ## v0.7.1 - 2026-07-09
 
 Zero-touch k8s attribution and multi-harness app-context. Capturing a pod is now

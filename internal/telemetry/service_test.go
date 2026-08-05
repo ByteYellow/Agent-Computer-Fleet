@@ -172,6 +172,54 @@ func TestIngestFilteredCorrelatesCgroupScopedRuntimeEvent(t *testing.T) {
 	}
 }
 
+func TestIngestFilteredLinksPassiveCgroupEventToRuntimeProcess(t *testing.T) {
+	root := t.TempDir()
+	paths, err := store.Init(filepath.Join(root, ".agentprov"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	started := time.Now().Add(-time.Second).UTC().Format(time.RFC3339Nano)
+	if _, err := correlation.RecordBinding(db, correlation.Binding{
+		RunID:         "run-passive",
+		SessionID:     "pod-uid",
+		CgroupID:      "cgroup-k8s",
+		StartedAt:     started,
+		BindingSource: "k8s_cgroup",
+		Confidence:    0.8,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	eventID, err := IngestFiltered(db, IngestEvent{
+		RawEventID: "raw-passive",
+		CgroupID:   "cgroup-k8s",
+		PID:        4242,
+		PPID:       1,
+		TGID:       4242,
+		EventType:  "execve",
+		Source:     "agentprov_sensor",
+		Payload:    `{"comm":"id","argv":["id"]}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM graph_edges
+		WHERE run_id = 'run-passive' AND from_id = 'runtime_process/pid/4242'
+		AND to_id = ? AND edge_type = 'runtime_process_event'`, "runtime_event/"+eventID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("passive runtime_process_event edges=%d, want 1", count)
+	}
+}
+
 func TestIngestFilteredAcceptsFileRuntimeEvents(t *testing.T) {
 	root := t.TempDir()
 	paths, err := store.Init(filepath.Join(root, ".agentprov"))

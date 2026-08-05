@@ -26,7 +26,7 @@
 
   <rect class="bg" width="1280" height="520"/>
   <text x="52" y="58" class="title"><tspan fill="#0071e3">Agent</tspan>Provenance: Portable Producer Profiles</text>
-  <text x="52" y="86" class="subtitle">Keep the core graph substrate-neutral: local and Kubernetes producers are active; microVM guest support is adapting.</text>
+  <text x="52" y="86" class="subtitle">Keep the core substrate-neutral: local and Kubernetes are validated; future profiles stay capability-gated.</text>
 
   <g transform="translate(48 142)">
     <rect width="252" height="238" rx="22" class="card work"/>
@@ -39,7 +39,7 @@
     <text x="50" y="170" class="t">k8s pods</text>
     <rect x="28" y="194" width="196" height="34" rx="17" class="pill"/>
     <text x="50" y="216" class="t">microVM guest</text>
-    <text x="152" y="216" class="small">(adapting)</text>
+    <text x="152" y="216" class="small">(planned)</text>
   </g>
 
   <g transform="translate(374 118)">

@@ -463,6 +463,17 @@ node and 8 BusyBox pods: 8 distinct cgroups, 1,140 captured events, and
 `graph verify` with zero errors and zero warnings. This proves one sensor can
 observe N workloads on one node; it is not a cluster-throughput claim.
 
+The same workload also passes a live cross-profile parity gate: active
+`local-record` and passive `k8s-daemonset` captures both verify cleanly and share
+the canonical workload commands, `execve` evidence, runtime-event nodes, and
+process-to-event causal edges. Host-specific PID/cgroup/container identities and
+event counts are intentionally excluded from equivalence; their different
+correlation confidence tiers remain visible.
+
+Inspect the validation boundary directly with `agentprov sandbox profiles` (or
+`--json`). Planned profiles report zero scope confidence and no collection
+coverage until they pass a live environment gate.
+
 A separate lightweight attribution-controller DaemonSet runs `agentprov
 sandbox watch`: a filtered `client-go` informer List/Watches Pods on its node,
 maps each running container to the host cgroup inode used by kernel telemetry,
@@ -1052,7 +1063,7 @@ Run:
 ## Architecture
 
 <p align="center">
-  <img src="docs/assets/producer-profile-architecture.svg" alt="AgentProvenance producer profile architecture: local record and Kubernetes pods feed substrate-neutral evidence into the AgentProvenance core; microVM guest support is adapting; dashboard, query, and replay surfaces consume the signed graph." width="100%">
+  <img src="docs/assets/producer-profile-architecture.svg" alt="AgentProvenance producer profile architecture: validated local-record and Kubernetes producers feed substrate-neutral evidence into the core; future profiles stay capability-gated until live validation." width="100%">
 </p>
 
 <p align="center">

@@ -19,11 +19,6 @@ type Options struct {
 	OnReady  func()
 }
 
-// Run is unavailable off Linux (eBPF requires a Linux kernel).
-func Run(_ io.Writer) error {
-	return fmt.Errorf("agentprov sensor requires linux (eBPF)")
-}
-
 // RunWithOptions is unavailable off Linux (eBPF requires a Linux kernel).
 func RunWithOptions(_ io.Writer, _ Options) error {
 	return fmt.Errorf("agentprov sensor requires linux (eBPF)")

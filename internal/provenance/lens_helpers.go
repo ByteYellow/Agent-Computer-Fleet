@@ -14,6 +14,21 @@ func lensEventLabel(ev lensEvent) string {
 			return ev.Type + " " + p
 		}
 	case "metadata_ip", "private_cidr", "network_connect", "dns_query":
+		if ev.Type == "network_connect" && ev.Source == "endpoint_capture" {
+			decision := payloadString(ev.Payload, "policy_decision", "decision", "action")
+			if decision == "deny" || decision == "blocked" {
+				decision = "BLOCKED"
+			} else if decision == "" {
+				decision = "endpoint egress"
+			}
+			path := payloadString(ev.Payload, "path")
+			if path != "" && ev.Destination != "" {
+				return fmt.Sprintf("%s %s -> %s", decision, path, ev.Destination)
+			}
+			if ev.Destination != "" {
+				return fmt.Sprintf("%s -> %s", decision, ev.Destination)
+			}
+		}
 		if ev.Destination != "" {
 			return ev.Type + " " + ev.Destination
 		}

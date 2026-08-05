@@ -21,19 +21,14 @@ type SpoolService struct {
 }
 
 type SpoolEnqueueRequest struct {
-	Format        string
-	RunID         string
-	SourcePath    string
-	PolicyEnabled bool
-	MaxQueued     int
-	DropPolicy    string
-}
-
-type SpoolListOptions struct {
-	RunID  string
-	Status string
-	Limit  int
-	Cursor string
+	Format         string
+	RunID          string
+	SourcePath     string
+	PolicyEnabled  bool
+	MaxQueued      int
+	MaxQueuedBytes int64
+	MaxBatchBytes  int64
+	DropPolicy     string
 }
 
 type SpoolBatch struct {
@@ -74,33 +69,29 @@ type SpoolProcessedBatch struct {
 	RowResultsTruncated bool   `json:"row_results_truncated,omitempty"`
 }
 
-type SpoolPruneResult struct {
-	Deleted int      `json:"deleted"`
-	Errors  []string `json:"errors,omitempty"`
-}
-
-type SpoolListResult struct {
-	Batches    []SpoolBatch `json:"batches"`
-	NextCursor string       `json:"next_cursor,omitempty"`
-	Limit      int          `json:"limit"`
-}
-
 type SpoolBackpressureError struct {
-	Queued    int    `json:"queued"`
-	MaxQueued int    `json:"max_queued"`
-	Reason    string `json:"reason"`
+	Queued         int    `json:"queued"`
+	QueuedBytes    int64  `json:"queued_bytes"`
+	IncomingBytes  int64  `json:"incoming_bytes"`
+	MaxQueued      int    `json:"max_queued"`
+	MaxQueuedBytes int64  `json:"max_queued_bytes"`
+	MaxBatchBytes  int64  `json:"max_batch_bytes"`
+	Reason         string `json:"reason"`
 }
 
 func (e SpoolBackpressureError) Error() string {
-	return fmt.Sprintf("telemetry spool backpressure: queued=%d max_queued=%d reason=%s", e.Queued, e.MaxQueued, e.Reason)
+	return fmt.Sprintf("telemetry spool backpressure: queued=%d queued_bytes=%d incoming_bytes=%d max_queued=%d max_queued_bytes=%d max_batch_bytes=%d reason=%s",
+		e.Queued, e.QueuedBytes, e.IncomingBytes, e.MaxQueued, e.MaxQueuedBytes, e.MaxBatchBytes, e.Reason)
+}
+
+type SpoolQueueStats struct {
+	QueuedBatches int   `json:"queued_batches"`
+	QueuedBytes   int64 `json:"queued_bytes"`
 }
 
 func (s SpoolService) Enqueue(req SpoolEnqueueRequest) (SpoolBatch, error) {
 	if s.DB == nil {
 		return SpoolBatch{}, fmt.Errorf("database is required")
-	}
-	if err := s.applyBackpressure(req.MaxQueued, req.DropPolicy); err != nil {
-		return SpoolBatch{}, err
 	}
 	if req.Format == "" {
 		req.Format = "falco"
@@ -111,14 +102,24 @@ func (s SpoolService) Enqueue(req SpoolEnqueueRequest) (SpoolBatch, error) {
 	if req.SourcePath == "" {
 		return SpoolBatch{}, fmt.Errorf("source_path is required")
 	}
-	if err := os.MkdirAll(s.Paths.Spool, 0o755); err != nil {
-		return SpoolBatch{}, err
-	}
 	source, err := os.Open(req.SourcePath)
 	if err != nil {
 		return SpoolBatch{}, err
 	}
 	defer source.Close()
+	info, err := source.Stat()
+	if err != nil {
+		return SpoolBatch{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return SpoolBatch{}, fmt.Errorf("source_path must be a regular file")
+	}
+	if err := s.applyBackpressure(req.MaxQueued, req.MaxQueuedBytes, req.MaxBatchBytes, info.Size(), req.DropPolicy); err != nil {
+		return SpoolBatch{}, err
+	}
+	if err := os.MkdirAll(s.Paths.Spool, 0o755); err != nil {
+		return SpoolBatch{}, err
+	}
 	id := ids.New("spool")
 	spoolPath := filepath.Join(s.Paths.Spool, id+".jsonl")
 	target, err := os.OpenFile(spoolPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
@@ -126,7 +127,12 @@ func (s SpoolService) Enqueue(req SpoolEnqueueRequest) (SpoolBatch, error) {
 		return SpoolBatch{}, err
 	}
 	hasher := sha256.New()
-	written, copyErr := io.Copy(io.MultiWriter(target, hasher), source)
+	var reader io.Reader = source
+	copyLimit := positiveByteLimit(req.MaxBatchBytes, req.MaxQueuedBytes)
+	if copyLimit > 0 {
+		reader = io.LimitReader(source, copyLimit+1)
+	}
+	written, copyErr := io.Copy(io.MultiWriter(target, hasher), reader)
 	closeErr := target.Close()
 	if copyErr != nil {
 		_ = os.Remove(spoolPath)
@@ -135,6 +141,12 @@ func (s SpoolService) Enqueue(req SpoolEnqueueRequest) (SpoolBatch, error) {
 	if closeErr != nil {
 		_ = os.Remove(spoolPath)
 		return SpoolBatch{}, closeErr
+	}
+	if written != info.Size() {
+		if err := s.applyBackpressure(req.MaxQueued, req.MaxQueuedBytes, req.MaxBatchBytes, written, req.DropPolicy); err != nil {
+			_ = os.Remove(spoolPath)
+			return SpoolBatch{}, err
+		}
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	policyEnabled := 0
@@ -165,21 +177,42 @@ func (s SpoolService) Enqueue(req SpoolEnqueueRequest) (SpoolBatch, error) {
 	}, nil
 }
 
-func (s SpoolService) CountQueued() (int, error) {
-	var queued int
-	err := s.DB.QueryRow(`SELECT COALESCE(COUNT(*), 0) FROM telemetry_spool_batches WHERE status = 'queued'`).Scan(&queued)
-	return queued, err
+func positiveByteLimit(values ...int64) int64 {
+	var limit int64
+	for _, value := range values {
+		if value > 0 && (limit == 0 || value < limit) {
+			limit = value
+		}
+	}
+	return limit
 }
 
-func (s SpoolService) applyBackpressure(maxQueued int, dropPolicy string) error {
-	if maxQueued <= 0 {
+func (s SpoolService) CountQueued() (int, error) {
+	stats, err := s.QueueStats()
+	return stats.QueuedBatches, err
+}
+
+func (s SpoolService) QueueStats() (SpoolQueueStats, error) {
+	var stats SpoolQueueStats
+	err := s.DB.QueryRow(`SELECT COALESCE(COUNT(*), 0), COALESCE(SUM(size_bytes), 0)
+		FROM telemetry_spool_batches WHERE status IN ('queued', 'processing')`).Scan(&stats.QueuedBatches, &stats.QueuedBytes)
+	return stats, err
+}
+
+func (s SpoolService) applyBackpressure(maxQueued int, maxQueuedBytes, maxBatchBytes, incomingBytes int64, dropPolicy string) error {
+	if maxBatchBytes > 0 && incomingBytes > maxBatchBytes {
+		return SpoolBackpressureError{IncomingBytes: incomingBytes, MaxQueued: maxQueued, MaxQueuedBytes: maxQueuedBytes, MaxBatchBytes: maxBatchBytes, Reason: "telemetry_spool_batch_too_large"}
+	}
+	if maxQueued <= 0 && maxQueuedBytes <= 0 {
 		return nil
 	}
-	queued, err := s.CountQueued()
+	stats, err := s.QueueStats()
 	if err != nil {
 		return err
 	}
-	if queued < maxQueued {
+	withinCount := maxQueued <= 0 || stats.QueuedBatches < maxQueued
+	withinBytes := maxQueuedBytes <= 0 || stats.QueuedBytes+incomingBytes <= maxQueuedBytes
+	if withinCount && withinBytes {
 		return nil
 	}
 	if dropPolicy == "" {
@@ -187,34 +220,53 @@ func (s SpoolService) applyBackpressure(maxQueued int, dropPolicy string) error 
 	}
 	switch dropPolicy {
 	case "reject":
-		return SpoolBackpressureError{Queued: queued, MaxQueued: maxQueued, Reason: "telemetry_spool_queue_full"}
+		reason := "telemetry_spool_queue_full"
+		if !withinBytes {
+			reason = "telemetry_spool_bytes_full"
+		}
+		return SpoolBackpressureError{Queued: stats.QueuedBatches, QueuedBytes: stats.QueuedBytes, IncomingBytes: incomingBytes, MaxQueued: maxQueued, MaxQueuedBytes: maxQueuedBytes, MaxBatchBytes: maxBatchBytes, Reason: reason}
 	case "drop_oldest":
-		return s.dropOldestQueued("queue_limit")
+		for !(withinCount && withinBytes) {
+			dropped, err := s.dropOldestQueued("queue_limit")
+			if err != nil {
+				return err
+			}
+			if !dropped {
+				return SpoolBackpressureError{Queued: stats.QueuedBatches, QueuedBytes: stats.QueuedBytes, IncomingBytes: incomingBytes, MaxQueued: maxQueued, MaxQueuedBytes: maxQueuedBytes, MaxBatchBytes: maxBatchBytes, Reason: "telemetry_spool_capacity_unavailable"}
+			}
+			stats, err = s.QueueStats()
+			if err != nil {
+				return err
+			}
+			withinCount = maxQueued <= 0 || stats.QueuedBatches < maxQueued
+			withinBytes = maxQueuedBytes <= 0 || stats.QueuedBytes+incomingBytes <= maxQueuedBytes
+		}
+		return nil
 	default:
 		return fmt.Errorf("unsupported telemetry spool drop_policy %q", dropPolicy)
 	}
 }
 
-func (s SpoolService) dropOldestQueued(reason string) error {
+func (s SpoolService) dropOldestQueued(reason string) (bool, error) {
 	var id, spoolPath string
 	err := s.DB.QueryRow(`SELECT id, spool_path FROM telemetry_spool_batches
 		WHERE status = 'queued' ORDER BY priority ASC, created_at ASC LIMIT 1`).Scan(&id, &spoolPath)
 	if err == sql.ErrNoRows {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := s.DB.Exec(`UPDATE telemetry_spool_batches
 		SET status = 'dropped', drop_reason = ?, dropped_at = ?, updated_at = ?
 		WHERE id = ? AND status = 'queued'`, reason, now, now, id); err != nil {
-		return err
+		return false, err
 	}
 	if spoolPath != "" {
 		_ = os.Remove(spoolPath)
 	}
-	return nil
+	return true, nil
 }
 
 func (s SpoolService) Process(limit int) (SpoolProcessResult, error) {

@@ -25,6 +25,8 @@ func daemonCmd(dataDir *string) *cobra.Command {
 	var spoolInterval time.Duration
 	var spoolLimit int
 	var spoolMaxQueued int
+	var spoolMaxBytes int64
+	var spoolMaxBatchBytes int64
 	var spoolDropPolicy string
 	var gcInterval time.Duration
 	var gcLimit int
@@ -48,6 +50,8 @@ func daemonCmd(dataDir *string) *cobra.Command {
 			server.SpoolInterval = spoolInterval
 			server.SpoolLimit = spoolLimit
 			server.SpoolMaxQueued = spoolMaxQueued
+			server.SpoolMaxBytes = spoolMaxBytes
+			server.SpoolMaxBatchBytes = spoolMaxBatchBytes
 			server.SpoolDropPolicy = spoolDropPolicy
 			server.GCInterval = gcInterval
 			server.GCLimit = gcLimit
@@ -92,6 +96,8 @@ func daemonCmd(dataDir *string) *cobra.Command {
 	serve.Flags().DurationVar(&spoolInterval, "spool-interval", 1*time.Second, "background telemetry spool processing interval; set 0 to disable")
 	serve.Flags().IntVar(&spoolLimit, "spool-limit", 100, "maximum queued telemetry spool batches processed per interval")
 	serve.Flags().IntVar(&spoolMaxQueued, "spool-max-queued", 1000, "maximum queued telemetry spool batches accepted before backpressure rejects new ingest")
+	serve.Flags().Int64Var(&spoolMaxBytes, "spool-max-bytes", 1<<30, "maximum total bytes held by queued/processing telemetry spool batches; set 0 to disable")
+	serve.Flags().Int64Var(&spoolMaxBatchBytes, "spool-max-batch-bytes", 256<<20, "maximum bytes accepted in one telemetry spool batch; set 0 to disable")
 	serve.Flags().StringVar(&spoolDropPolicy, "spool-drop-policy", "reject", "telemetry spool queue-full behavior: reject or drop_oldest")
 	serve.Flags().DurationVar(&gcInterval, "gc-interval", 5*time.Second, "background async GC interval; set 0 to disable")
 	serve.Flags().IntVar(&gcLimit, "gc-limit", 100, "maximum queued GC jobs processed per interval")

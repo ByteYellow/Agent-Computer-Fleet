@@ -49,7 +49,13 @@ var tokenRes = []*regexp.Regexp{
 // that have no recognizable prefix of their own. The value group deliberately
 // skips an optional `Bearer ` scheme prefix so the SCHEME is kept and the TOKEN
 // is masked (a naive value match eats "Bearer" and leaks the token after it).
-var kvSecretRe = regexp.MustCompile(`(?i)(password|passwd|secret|token|api[_-]?key|access[_-]?key|authorization)(["']?\s*[:=]\s*["']?)(?:(bearer|basic)\s+)?([^\s"',}]{6,})`)
+//
+// The value class excludes backslash as well as the JSON structural bytes: a
+// secret embedded in a (double-)escaped JSON string is followed by a `\"` escape,
+// and a value match that ran into the backslash would consume the escape and turn
+// the following quote structural — corrupting the document. Stopping at `\` keeps
+// Redact well-formed over escaped JSON payloads (the whole point of the package).
+var kvSecretRe = regexp.MustCompile(`(?i)(password|passwd|secret|token|api[_-]?key|access[_-]?key|authorization)(["']?\s*[:=]\s*["']?)(?:(bearer|basic)\s+)?([^\s"',}\\]{6,})`)
 
 // sensitiveHeaders are TLS/HTTP headers whose entire value is a credential.
 // tlsintent masks these structurally (by name) rather than by regex, which is

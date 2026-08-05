@@ -94,7 +94,8 @@ func edgeMatchesLens(lens, detail string, edge GraphLensEdge, nodes map[string]G
 	case "network-egress":
 		return isNetworkEvent(fromEvent.Type) || isNetworkEvent(toEvent.Type) || strings.Contains(edge.EdgeType, "network") || strings.Contains(edge.EdgeType, "egress") || strings.Contains(edge.EdgeType, "llm_call")
 	case "data-flow-taint":
-		return edge.Derived || isSourceEvent(fromEvent.Type, fromEvent.Path) || isSourceEvent(toEvent.Type, toEvent.Path) || isTaintSinkEvent(fromEvent) || isTaintSinkEvent(toEvent)
+		return edge.Derived || strings.Contains(edge.EdgeType, "sensitive_data_flow") || strings.Contains(edge.EdgeType, "sensitive_source") ||
+			isSourceEvent(fromEvent.Type, fromEvent.Path) || isSourceEvent(toEvent.Type, toEvent.Path) || isTaintSinkEvent(fromEvent) || isTaintSinkEvent(toEvent)
 	case "agent-intent":
 		// The LLM-story lens: the llm_call chain (request/response/decided/caused)
 		// and each agent's tool calls. Excludes (a) the broad ingest-time
@@ -165,7 +166,7 @@ func isStructuralEdge(edgeType string) bool {
 		"llm_call", "llm_request", "llm_response", "llm_caused",
 		"attempt_snapshot", "snapshot_parent", "promotion_winner",
 		"agent_spawn", "agent_message", "agent_tool_call", "agent_syscall",
-		"intent_contract", "intent_diff_effect":
+		"intent_contract", "intent_diff_effect", "endpoint_egress_payload", "sensitive_source_payload", "payload_egress_attempt", "confirmed_sensitive_data_flow":
 		return true
 	default:
 		return strings.Contains(edgeType, "policy") || strings.Contains(edgeType, "risk") ||

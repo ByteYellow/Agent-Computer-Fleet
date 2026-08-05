@@ -13,21 +13,17 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// sandboxWatchCmd is phase 2 of zero-touch k8s attribution (see
-// docs/design-k8s-auto-attribution.md): a node-side control loop that discovers
-// pods scheduled on this node and auto-binds each to a run, so their telemetry
-// attributes with no per-pod command. A pod opts into a named run via the
-// `agentprov.io/run` annotation; otherwise it gets an auto-run keyed by its UID.
-// Reuses the phase-1 capture resolution (kubectl poll, not a client-go informer,
-// keeping the node sensor self-contained).
-func sandboxWatchCmd(dataDir *string) *cobra.Command {
+// sandboxPollingWatchCmd keeps the original finite-window kubectl polling path
+// as a diagnostic fallback. The public `sandbox watch` command is the informer
+// controller in sandbox_informer_cmd.go.
+func sandboxPollingWatchCmd(dataDir *string) *cobra.Command {
 	var namespace, kubectl, sensorBin string
 	var window, rounds int
 	cmd := &cobra.Command{
-		Use:   "watch",
-		Short: "auto-attribute every pod on this node to a run (k8s-daemonset, phase-2 preview)",
-		Long: "Phase-2 PREVIEW of zero-touch attribution: a kubectl-polling control loop, " +
-			"NOT yet a client-go informer/operator. One sensor window per round covers all " +
+		Use:   "watch-poll",
+		Short: "diagnostic fallback: poll pods and capture finite node-sensor windows",
+		Long: "Compatibility path for zero-touch attribution using kubectl polling. " +
+			"The production-shaped `sandbox watch` command uses a client-go informer. One sensor window per round covers all " +
 			"bound cgroups, so — unlike `sandbox capture` — it does NOT set a per-pod " +
 			"AGENTPROV_SSL_LIB/AGENTPROV_LIBC_LIB, so model-intent (TLS) and DNS-domain " +
 			"coverage are weaker here; use `sandbox capture` for full per-pod model intent.",
@@ -118,6 +114,7 @@ func sandboxWatchCmd(dataDir *string) *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Hidden = true
 	cmd.Flags().StringVar(&namespace, "namespace", "", "limit to one namespace (default: all)")
 	cmd.Flags().StringVar(&kubectl, "kubectl", "kubectl", "kubectl command (e.g. \"k3s kubectl\")")
 	cmd.Flags().StringVar(&sensorBin, "sensor", "", "path to agentprov-sensor (required)")

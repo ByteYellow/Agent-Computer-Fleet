@@ -321,7 +321,17 @@ func eventIDs(events []EventRecord) []string {
 	return ids
 }
 
+type sqlStore interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
 func IngestFiltered(db *sql.DB, event IngestEvent) (string, error) {
+	return ingestFilteredWithStore(db, db, event)
+}
+
+func ingestFilteredWithStore(db *sql.DB, store sqlStore, event IngestEvent) (string, error) {
 	if event.EventType == "" {
 		return "", fmt.Errorf("event_type is required")
 	}
@@ -380,7 +390,7 @@ func IngestFiltered(db *sql.DB, event IngestEvent) (string, error) {
 			}
 			if event.AttemptID != "" && (event.RolloutID == "" || event.SnapshotID == "") {
 				var rolloutID, snapshotID string
-				_ = db.QueryRow(`SELECT COALESCE(rollout_id, ''), COALESCE(snapshot_id, '') FROM fork_attempts WHERE id = ?`, event.AttemptID).Scan(&rolloutID, &snapshotID)
+				_ = store.QueryRow(`SELECT COALESCE(rollout_id, ''), COALESCE(snapshot_id, '') FROM fork_attempts WHERE id = ?`, event.AttemptID).Scan(&rolloutID, &snapshotID)
 				if event.RolloutID == "" {
 					event.RolloutID = rolloutID
 				}
@@ -418,32 +428,32 @@ func IngestFiltered(db *sql.DB, event IngestEvent) (string, error) {
 	if event.RolloutID != "" || event.AttemptID != "" {
 		payload = fmt.Sprintf(`{"rollout_id":%q,"attempt_id":%q,"payload":%s}`, event.RolloutID, event.AttemptID, event.Payload)
 	}
-	_, err := db.Exec(`INSERT INTO events
+	_, err := store.Exec(`INSERT INTO events
 		(id, run_id, session_id, tool_call_id, process_id, snapshot_id, raw_event_id, correlation_method, correlation_confidence, container_id, cgroup_id, pid, tgid, ppid, binding_source, source, event_type, payload, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		eventID, event.RunID, event.SessionID, event.ToolCallID, event.ProcessID, event.SnapshotID, event.RawEventID, method, confidence, event.ContainerID, event.CgroupID, event.PID, event.TGID, event.PPID, bindingSource, event.Source, event.EventType, payload, now)
 	if err != nil {
 		return "", err
 	}
-	_ = recordRuntimeCausalityEdges(db, event, eventID, now)
+	_ = recordRuntimeCausalityEdges(store, event, eventID, now)
 	// Consume process_exit to CLOSE the exiting pid's correlation window, so a
 	// later event that reuses the pid does not over-bind to this dead scope.
 	// Use the event's own timestamp when present (chronological close), else now.
 	if event.EventType == "process_exit" && event.PID != 0 {
-		_ = correlation.CloseBindingByPID(db, event.PID, firstNonEmpty(event.Timestamp, now))
+		_ = correlation.CloseBindingByPID(store, event.PID, firstNonEmpty(event.Timestamp, now))
 	}
 	priority := "normal"
 	if event.EventType == "metadata_ip" || event.EventType == "private_cidr" || event.EventType == "secret_path" || event.EventType == "policy_verdict" {
 		priority = "high"
 	}
 	if event.RolloutID != "" || event.AttemptID != "" || event.SnapshotID != "" {
-		_, _ = db.Exec(`INSERT INTO evidence_events
+		_, _ = store.Exec(`INSERT INTO evidence_events
 			(id, run_id, rollout_id, attempt_id, session_id, tool_call_id, snapshot_id, event_type, priority, payload, status, created_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)`,
 			ids.New("evidence"), event.RunID, event.RolloutID, event.AttemptID, event.SessionID, event.ToolCallID, event.SnapshotID, event.EventType, priority, payload, now)
 	}
 	if event.SnapshotID != "" && highRiskEvent(event.EventType) {
-		_ = taintSnapshotAndDescendants(db, event.SnapshotID, event.RunID, event.EventType, now)
+		_ = taintSnapshotAndDescendants(store, event.SnapshotID, event.RunID, event.EventType, now)
 	}
 	return eventID, nil
 }
@@ -457,7 +467,7 @@ func AllowedEventType(eventType string) bool {
 	}
 }
 
-func recordRuntimeCausalityEdges(db *sql.DB, event IngestEvent, eventID, now string) error {
+func recordRuntimeCausalityEdges(db sqlStore, event IngestEvent, eventID, now string) error {
 	if event.RunID == "" {
 		return nil
 	}
@@ -479,9 +489,11 @@ func recordRuntimeCausalityEdges(db *sql.DB, event IngestEvent, eventID, now str
 	insert(event.ToolCallID, eventNode, "runtime_tool_call_event")
 	insert(event.ProcessID, eventNode, "runtime_process_event")
 	insert(event.SnapshotID, eventNode, "runtime_snapshot_event")
-	if event.ProcessID != "" && event.PID != 0 {
+	if event.PID != 0 {
 		processNode := fmt.Sprintf("runtime_process/pid/%d", event.PID)
-		insert(event.ProcessID, processNode, "runtime_process_observed")
+		if event.ProcessID != "" {
+			insert(event.ProcessID, processNode, "runtime_process_observed")
+		}
 		insert(processNode, eventNode, "runtime_process_event")
 	}
 	if event.PID != 0 && event.PPID != 0 {
@@ -545,7 +557,7 @@ func recordRuntimeCausalityEdges(db *sql.DB, event IngestEvent, eventID, now str
 // edgeExists reports whether a graph edge of edgeType already originates from
 // fromID, so callers can keep a relationship 1:1 (e.g. one request -> one
 // llm_call despite a streamed, multi-segment response).
-func edgeExists(db *sql.DB, fromID, edgeType string) bool {
+func edgeExists(db sqlStore, fromID, edgeType string) bool {
 	var x int
 	return db.QueryRow(`SELECT 1 FROM graph_edges WHERE from_id = ? AND edge_type = ? LIMIT 1`, fromID, edgeType).Scan(&x) == nil
 }
@@ -563,13 +575,13 @@ func llmActionEventType(eventType string) bool {
 
 // recentLLMIntent returns the id of the most recent tls_read (LLM response)
 // event in the same scope within the pairing window before now, or "".
-func recentLLMIntent(db *sql.DB, runID, processID, now string) string {
+func recentLLMIntent(db sqlStore, runID, processID, now string) string {
 	return recentScopedEvent(db, "tls_read", runID, processID, now)
 }
 
 // recentLLMRequest returns the id of the most recent tls_write (LLM request)
 // event in the same scope within the pairing window before now, or "".
-func recentLLMRequest(db *sql.DB, runID, processID, now string) string {
+func recentLLMRequest(db sqlStore, runID, processID, now string) string {
 	return recentScopedEvent(db, "tls_write", runID, processID, now)
 }
 
@@ -577,7 +589,7 @@ func recentLLMRequest(db *sql.DB, runID, processID, now string) string {
 // same run (and process, when known) within a 2-minute window before now, or ""
 // if none. now and stored created_at are RFC3339Nano UTC, so lexical string
 // comparison is chronological.
-func recentScopedEvent(db *sql.DB, eventType, runID, processID, now string) string {
+func recentScopedEvent(db sqlStore, eventType, runID, processID, now string) string {
 	if runID == "" {
 		return ""
 	}
@@ -668,7 +680,7 @@ func highRiskEvent(eventType string) bool {
 	}
 }
 
-func taintSnapshotAndDescendants(db *sql.DB, snapshotID, runID, reason, now string) error {
+func taintSnapshotAndDescendants(db sqlStore, snapshotID, runID, reason, now string) error {
 	queue := []string{snapshotID}
 	seen := map[string]bool{}
 	for len(queue) > 0 {

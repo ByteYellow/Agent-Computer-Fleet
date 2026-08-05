@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -24,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/byteyellow/agentprovenance/internal/compliance"
@@ -52,6 +54,7 @@ func (s Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/lens", s.lens)
 	mux.HandleFunc("GET /api/artifact", s.artifact)
 	mux.HandleFunc("GET /api/egress", s.egress)
+	mux.HandleFunc("GET /api/outbound", s.outbound)
 	mux.HandleFunc("GET /api/processes", s.processes)
 	mux.HandleFunc("GET /api/frameworks", s.frameworks)
 	mux.HandleFunc("GET /api/compliance", s.compliance)
@@ -83,6 +86,52 @@ func firstStr(m map[string]any, keys ...string) string {
 	return ""
 }
 
+const dnsJoinWindow = 5 * time.Second
+
+type dnsHostObservation struct {
+	host string
+	at   time.Time
+}
+
+// eventIdentity returns only stable execution identities. Command names are not
+// identities and a run-global fallback can cross-wire concurrent agents, so an
+// event without process/cgroup/PID identity is deliberately left unjoined.
+func eventIdentity(processID, cgroupID string, pid int64) string {
+	switch {
+	case cgroupID != "" && pid > 0:
+		return fmt.Sprintf("cgroup:%s/pid:%d", cgroupID, pid)
+	case pid > 0:
+		return fmt.Sprintf("pid:%d", pid)
+	case processID != "":
+		// Some producers only expose the logical process row. Prefer kernel PID
+		// above because a record wrapper may attach one coarse process_id to a
+		// whole descendant tree.
+		return "process:" + processID
+	default:
+		return ""
+	}
+}
+
+func eventTime(value string) time.Time {
+	t, _ := time.Parse(time.RFC3339Nano, value)
+	return t
+}
+
+func recentDNSHost(hosts map[string]dnsHostObservation, key, at string) string {
+	if key == "" {
+		return ""
+	}
+	h, ok := hosts[key]
+	if !ok {
+		return ""
+	}
+	now := eventTime(at)
+	if h.at.IsZero() || now.IsZero() || now.Before(h.at) || now.Sub(h.at) > dnsJoinWindow {
+		return ""
+	}
+	return h.host
+}
+
 // egress lists the run's outbound network attempts (the destination is the
 // security-relevant fact), flagging the risky ones (metadata IP, private CIDR).
 func (s Server) egress(w http.ResponseWriter, r *http.Request) {
@@ -91,7 +140,7 @@ func (s Server) egress(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "run is required", 400)
 		return
 	}
-	rows, err := s.DB.Query(`SELECT event_type, payload, created_at FROM events
+	rows, err := s.DB.Query(`SELECT source, event_type, payload, created_at, COALESCE(process_id,''), COALESCE(cgroup_id,''), COALESCE(pid,0) FROM events
 		WHERE run_id = ? AND event_type IN ('network_connect','metadata_ip','private_cidr','dns_query') ORDER BY created_at`, run)
 	if err != nil {
 		httpError(w, err.Error(), 500)
@@ -99,41 +148,258 @@ func (s Server) egress(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 	out := []map[string]any{}
-	// A getaddrinfo(hostname) immediately precedes the connect(resolved-IP) in the
-	// same process, so the most recent dns_query hostname per comm resolves the IP
-	// egress that follows it — giving egress a NAME, not just an IP, node-side.
-	lastHost := map[string]string{}
-	lastHostAny := ""
+	// A getaddrinfo(hostname) normally precedes connect(resolved-IP). Join only
+	// inside the same stable process identity and a short window; never guess from
+	// another process's last DNS query.
+	lastHost := map[string]dnsHostObservation{}
+	dnsRows := map[string]map[string]any{}
+	endpointRows := map[string]map[string]any{}
 	for rows.Next() {
-		var et, payload, created string
-		if err := rows.Scan(&et, &payload, &created); err != nil {
+		var source, et, payload, created, processID, cgroupID string
+		var pid int64
+		if err := rows.Scan(&source, &et, &payload, &created, &processID, &cgroupID, &pid); err != nil {
 			httpError(w, err.Error(), 500)
 			return
 		}
 		raw := rawBody(payload)
 		comm := firstStr(raw, "comm")
+		identity := eventIdentity(processID, cgroupID, pid)
+		if source == "endpoint_capture" {
+			host := firstStr(raw, "dst_host", "host")
+			path := firstStr(raw, "path")
+			decision := firstStr(raw, "policy_decision")
+			key := host + "|" + path + "|" + decision
+			row := endpointRows[key]
+			if row == nil {
+				row = map[string]any{
+					"type": "endpoint_egress", "dst": host, "domain": host,
+					"path": path, "port": "443", "comm": "endpoint capture",
+					"risk":     decision == "deny" || decision == "blocked" || hasNonEmptyList(raw, "canary_hits") || boolFromRaw(raw, "codebase_payload"),
+					"decision": decision, "evidence": "payload observed", "count": 0, "time": created,
+				}
+				endpointRows[key] = row
+				out = append(out, row)
+			}
+			row["count"] = row["count"].(int) + 1
+			continue
+		}
 		if et == "dns_query" {
 			if h := firstStr(raw, "host"); h != "" {
-				lastHost[comm] = h
-				lastHostAny = h
+				if identity != "" {
+					lastHost[identity] = dnsHostObservation{host: h, at: eventTime(created)}
+				}
+				row := dnsRows[h]
+				if row == nil {
+					row = map[string]any{"type": "dns_query", "dst": h, "domain": h, "path": "", "port": "", "comm": comm, "risk": false, "decision": "observed", "evidence": "DNS only", "count": 0, "time": created}
+					dnsRows[h] = row
+					out = append(out, row)
+				}
+				row["count"] = row["count"].(int) + 1
 			}
-			continue // the resolution, not an egress row
+			continue
 		}
-		domain := lastHost[comm]
-		if domain == "" {
-			domain = lastHostAny
+		dst := firstStr(raw, "host", "dst_ip", "dst")
+		// Loopback is capture-proxy plumbing. endpoint_capture above carries the
+		// actual remote host and inspected payload, so rendering both would double
+		// count one request and misrepresent localhost as the destination.
+		if isLoopbackHost(dst) {
+			continue
 		}
+		domain := recentDNSHost(lastHost, identity, created)
 		out = append(out, map[string]any{
-			"type":   et,
-			"dst":    firstStr(raw, "host", "dst_ip", "dst"),
-			"domain": domain,
-			"port":   firstStr(raw, "port", "dst_port"),
-			"comm":   comm,
-			"risk":   et == "metadata_ip" || et == "private_cidr",
-			"time":   created,
+			"type":     et,
+			"dst":      dst,
+			"domain":   domain,
+			"path":     "",
+			"port":     firstStr(raw, "port", "dst_port"),
+			"comm":     comm,
+			"risk":     et == "metadata_ip" || et == "private_cidr",
+			"decision": "observed",
+			"evidence": "connection observed",
+			"count":    1,
+			"time":     created,
 		})
 	}
 	writeJSON(w, out)
+}
+
+// outbound returns the run's Outbound Data Surfaces: evidence-driven cards of
+// where data left (or was blocked from leaving) the box, aggregated by
+// channel/owner/data-class/decision. Nothing here is demo-specific — the cards
+// are whatever the run's egress observations imply, and a run with no egress
+// yields an empty list (the client shows "No outbound surfaces observed").
+func (s Server) outbound(w http.ResponseWriter, r *http.Request) {
+	run := r.URL.Query().Get("run")
+	if run == "" {
+		httpError(w, "run is required", 400)
+		return
+	}
+	var obs []provenance.OutboundObservation
+
+	// Named / payload-bearing egress from the event stream. A getaddrinfo(host)
+	// precedes the connect, so the last dns host per comm names the egress that
+	// follows it (same correlation the /api/egress view uses).
+	rows, err := s.DB.Query(`SELECT id, source, event_type, payload, created_at, COALESCE(process_id,''), COALESCE(cgroup_id,''), COALESCE(pid,0),
+		COALESCE((SELECT rule_id FROM policy_decisions pd WHERE pd.event_id = events.id ORDER BY pd.created_at LIMIT 1),'')
+		FROM events
+		WHERE run_id = ? AND event_type IN ('network_connect','metadata_ip','private_cidr','dns_query') ORDER BY created_at`, run)
+	if err != nil {
+		httpError(w, err.Error(), 500)
+		return
+	}
+	lastHost := map[string]dnsHostObservation{}
+	for rows.Next() {
+		var id, source, et, payload, created, processID, cgroupID, ruleID string
+		var pid int64
+		if err := rows.Scan(&id, &source, &et, &payload, &created, &processID, &cgroupID, &pid, &ruleID); err != nil {
+			rows.Close()
+			httpError(w, err.Error(), 500)
+			return
+		}
+		raw := rawBody(payload)
+		identity := eventIdentity(processID, cgroupID, pid)
+		switch {
+		case source == "endpoint_capture":
+			// Endpoint payloads are already normalized by the capture adapter. Only
+			// proven code/secret uploads are artifacts; ordinary trace traffic remains
+			// telemetry instead of being mislabeled as codebase storage.
+			kind := endpointObservationKind(raw, ruleID)
+			isCodebase := boolFromRaw(raw, "codebase_payload") || boolFromRaw(raw, "is_git_bundle") || ruleID == "codebase_egress_block"
+			obs = append(obs, provenance.OutboundObservation{
+				Kind: kind, Host: firstStr(raw, "dst_host", "host"), Path: firstStr(raw, "path"),
+				Bytes: intFromRaw(raw, "bytes"), Blocked: boolFromRaw(raw, "blocked"),
+				IsSourceCode:          isCodebase,
+				HasSecret:             hasNonEmptyList(raw, "canary_hits"),
+				HasBehavioralMetadata: kind == "analytics_payload",
+				EvidenceRef:           "runtime_event/" + id, Time: created,
+			})
+		case et == "dns_query":
+			if h := firstStr(raw, "host"); h != "" {
+				if identity != "" {
+					lastHost[identity] = dnsHostObservation{host: h, at: eventTime(created)}
+				}
+				obs = append(obs, provenance.OutboundObservation{Kind: "dns", Host: h, EvidenceRef: "runtime_event/" + id, Time: created})
+			}
+		default: // ebpf network_connect / metadata_ip / private_cidr
+			dst := firstStr(raw, "dst_ip", "dst")
+			host := firstStr(raw, "host")
+			if host == "" {
+				host = recentDNSHost(lastHost, identity, created)
+			}
+			// Loopback is the local capture proxy / same-box IPC, not egress off the
+			// box, so it is not an outbound surface.
+			if isLoopbackHost(host) || isLoopbackHost(dst) {
+				continue
+			}
+			obs = append(obs, provenance.OutboundObservation{
+				Kind: "network", Host: host, Risky: et == "metadata_ip" || et == "private_cidr",
+				EvidenceRef: "runtime_event/" + id, Time: created, Note: dst,
+			})
+		}
+	}
+	rows.Close()
+
+	// Model-inference turns are stored as llm_request edges to the captured request
+	// body object (not as events), so pull them separately. The upstream host is
+	// not recorded in the capture, so it surfaces honestly as an unknown destination.
+	mrows, err := s.DB.Query(`SELECT e.from_id, COALESCE(o.size_bytes,0), COALESCE(o.created_at,''), COALESCE(o.path,'')
+		FROM graph_edges e LEFT JOIN provenance_objects o ON o.hash = e.to_id
+		WHERE e.run_id = ? AND e.edge_type = 'llm_request'`, run)
+	if err != nil {
+		httpError(w, err.Error(), 500)
+		return
+	}
+	for mrows.Next() {
+		var from, created, objPath string
+		var size int
+		if err := mrows.Scan(&from, &size, &created, &objPath); err != nil {
+			mrows.Close()
+			httpError(w, err.Error(), 500)
+			return
+		}
+		host, hasSecret, role := llmMessageMeta(objPath)
+		// Auxiliary title/summary calls are supporting model traffic, not a separate
+		// data surface. Preserve one if it independently contains a secret.
+		if role == "auxiliary" && !hasSecret {
+			continue
+		}
+		obs = append(obs, provenance.OutboundObservation{Kind: "model_turn", Host: host, HasSecret: hasSecret, Bytes: size, EvidenceRef: from, Time: created})
+	}
+	mrows.Close()
+
+	surfaces := provenance.BuildOutboundSurfaces(obs)
+	if surfaces == nil {
+		surfaces = []provenance.OutboundSurface{}
+	}
+	writeJSON(w, surfaces)
+}
+
+func intFromRaw(m map[string]any, k string) int {
+	if f, ok := m[k].(float64); ok {
+		return int(f)
+	}
+	return 0
+}
+
+func boolFromRaw(m map[string]any, k string) bool {
+	b, _ := m[k].(bool)
+	return b
+}
+
+func hasNonEmptyList(m map[string]any, k string) bool {
+	a, ok := m[k].([]any)
+	return ok && len(a) > 0
+}
+
+func endpointObservationKind(raw map[string]any, ruleID string) string {
+	if ruleID == "codebase_egress_block" || boolFromRaw(raw, "codebase_payload") || boolFromRaw(raw, "is_git_bundle") || hasNonEmptyList(raw, "canary_hits") {
+		return "artifact_upload"
+	}
+	switch firstStr(raw, "egress_kind") {
+	case "codebase_archive", "upload_manifest", "sensitive_payload", "config_files":
+		return "artifact_upload"
+	case "analytics", "product_analytics":
+		return "analytics_payload"
+	default:
+		return "telemetry"
+	}
+}
+
+// llmMessageMeta reads the captured request object and returns the upstream host
+// the proxy recorded for that model turn plus whether the capture layer matched
+// any sensitive markers in the request body (secrets that reached model context).
+func llmMessageMeta(objPath string) (host string, hasSecret bool, role string) {
+	if objPath == "" {
+		return "", false, ""
+	}
+	b, err := os.ReadFile(objPath)
+	if err != nil {
+		return "", false, ""
+	}
+	var o struct {
+		Payload struct {
+			Semantics struct {
+				Host       string   `json:"host"`
+				CanaryHits []string `json:"canary_hits"`
+				IntentRole string   `json:"intent_role"`
+			} `json:"semantics"`
+		} `json:"payload"`
+	}
+	if json.Unmarshal(b, &o) != nil {
+		return "", false, ""
+	}
+	return o.Payload.Semantics.Host, len(o.Payload.Semantics.CanaryHits) > 0, o.Payload.Semantics.IntentRole
+}
+
+func isLoopbackHost(h string) bool {
+	h = strings.TrimSpace(strings.ToLower(h))
+	if h == "localhost" || h == "::1" {
+		return true
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // processes returns the run's OS process events (pid/ppid/command) so the client

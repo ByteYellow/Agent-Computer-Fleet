@@ -9,7 +9,7 @@ import "strings"
 // per-demo tuning -- an install that reads ~/.aws/credentials violates it for
 // the same reason a read-only file tool that egresses does. That generality is
 // what makes a bundle "lighting up" real evidence rather than confirmation bias.
-var baselineForbidden = []EffectKind{EffectSecretRead, EffectMetadataEgress, EffectPrivateCIDR}
+var baselineForbidden = []EffectKind{EffectSecretRead, EffectMetadataEgress, EffectPrivateCIDR, EffectSensitiveEgress}
 
 // Profile is a tool/operation's effect contract: what it is expected to do
 // (Declared), what it may additionally do without it counting as drift

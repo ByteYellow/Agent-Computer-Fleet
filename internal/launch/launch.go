@@ -6,8 +6,8 @@
 // a run scope, start the read-only dashboard, inject a per-run hooks overlay
 // into the agent (Claude Code today) without touching the user's settings, start
 // the kernel sensor when the host can (else degrade honestly), exec the agent in
-// a dedicated cgroup, and on exit fold every source into one signed, verifiable
-// evidence graph and print a one-line verdict.
+// a dedicated cgroup, and on exit fold every source into one verifiable evidence
+// graph (signed when --sign-key is set) and print a one-line verdict.
 //
 // The design principle is honest degradation: the evidence level is two
 // independent axes -- application side (transcript/hooks vs record-only) and
@@ -28,6 +28,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/byteyellow/agentprovenance/internal/dashboard"
 	"github.com/byteyellow/agentprovenance/internal/forensics"
@@ -56,6 +57,7 @@ type Options struct {
 	SignKeyPath   string   // optional hex ed25519 private key; when set, the sealed bundle is signed
 	FileDiff      bool     // capture the working-tree file diff (off by default; expensive in big repos)
 	SelfExe       string   // absolute path to this agentprov binary (for the sensor subprocess + hook commands)
+	JSON          bool     // caller will emit the machine report on Stdout: keep Stdout pure JSON and don't block on the dashboard
 
 	Stdout io.Writer
 	Stderr io.Writer
@@ -107,6 +109,42 @@ func transcriptPathFromHookLog(hookLogPath string) string {
 		}
 	}
 	return ""
+}
+
+// subAgentTranscriptsFromHookLog collects each sub-agent's own transcript from a
+// run's hook log. Claude Code's SubagentStart/Stop events carry agent_id +
+// agent_transcript_path pointing at the delegate's session file (where its real
+// Bash decisions live). Deduplicated by path and with the main transcript
+// excluded, so the orchestrator is never re-harvested as a delegate.
+func subAgentTranscriptsFromHookLog(hookLogPath, mainPath string) []provenance.AgentTranscript {
+	if hookLogPath == "" {
+		return nil
+	}
+	f, err := os.Open(hookLogPath)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	seen := map[string]bool{}
+	var out []provenance.AgentTranscript
+	for sc.Scan() {
+		var ev struct {
+			AgentID             string `json:"agent_id"`
+			AgentTranscriptPath string `json:"agent_transcript_path"`
+		}
+		if json.Unmarshal(sc.Bytes(), &ev) != nil {
+			continue
+		}
+		p := ev.AgentTranscriptPath
+		if p == "" || p == mainPath || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, provenance.AgentTranscript{AgentID: ev.AgentID, Path: p})
+	}
+	return out
 }
 
 // Run executes the full launch lifecycle and returns its Report. The returned
@@ -227,6 +265,7 @@ func Run(opts Options) (Report, error) {
 
 	// --- Exec the agent in a dedicated cgroup (kernel telemetry auto-joins by
 	// cgroup_id). record.Run blocks until the agent exits.
+	agentStart := time.Now()
 	result, rerr := (record.Service{DB: db, Paths: paths}).Run(record.Request{
 		RunID:           runID,
 		Name:            "launch",
@@ -240,6 +279,17 @@ func Run(opts Options) (Report, error) {
 	report.ExitCode = result.ExitCode
 	report.Status = result.Status
 
+	// A transcript-recipe harness (codex/kimi) wrote its own session record during
+	// the run; locate it now (after exit) to bridge in seal.
+	transcriptHarness, transcriptPath := "", ""
+	if recipe.harness != "" && recipe.findTranscript != nil {
+		if p := recipe.findTranscript(agentStart); p != "" {
+			transcriptHarness, transcriptPath = recipe.harness, p
+		} else {
+			fmt.Fprintf(opts.Stderr, "launch: no %s session record found for this run (app-side degrades to record-only)\n", recipe.harness)
+		}
+	}
+
 	// Stop the sensor before sealing so its final correlated events are flushed.
 	if sensorProc != nil {
 		sensorProc.stop()
@@ -247,14 +297,22 @@ func Run(opts Options) (Report, error) {
 	}
 
 	// --- Seal: fold every source into the graph, apply policy, summarize, sign.
-	seal(db, paths, runID, hookLogPath, opts.SignKeyPath, &report, opts.Stderr)
+	seal(db, paths, runID, hookLogPath, transcriptHarness, transcriptPath, opts.SignKeyPath, &report, opts.Stderr)
 
-	printVerdict(opts.Stdout, report)
+	// Under --json the caller writes the machine report to Stdout, so every
+	// human-facing line here must go to Stderr or Stdout would not parse.
+	verdictOut := opts.Stdout
+	if opts.JSON {
+		verdictOut = opts.Stderr
+	}
+	printVerdict(verdictOut, report)
 
 	// --- Keep the dashboard live for inspection until the operator quits.
-	if dashListener != nil {
+	// Skipped under --json: a machine caller wants the report now, not a block
+	// on an interactive Ctrl-C.
+	if dashListener != nil && !opts.JSON {
 		drain(sigCh)
-		fmt.Fprintf(opts.Stdout, "\ndashboard live at %s  (Ctrl-C to exit)\n", report.DashboardURL)
+		fmt.Fprintf(verdictOut, "\ndashboard live at %s  (Ctrl-C to exit)\n", report.DashboardURL)
 		<-sigCh
 	}
 	return report, nil
@@ -264,21 +322,34 @@ func Run(opts Options) (Report, error) {
 // evidence graph and fills the risk/bundle fields of report. Best-effort: a
 // failure in any stage is reported to stderr but does not abort the others, so
 // the operator always gets whatever evidence was capturable.
-func seal(db *sql.DB, paths store.Paths, runID, hookLogPath, signKeyPath string, report *Report, stderr io.Writer) {
+func seal(db *sql.DB, paths store.Paths, runID, hookLogPath, transcriptHarness, transcriptPath, signKeyPath string, report *Report, stderr io.Writer) {
+	// App-side intent comes from EITHER an injected hook log (Claude Code) or a
+	// harness's own session transcript (codex/kimi), normalized to the same hook
+	// events. Both then command-match to the kernel via CorrelateSyscalls.
+	var appReader io.Reader
 	if hookLogPath != "" {
 		if f, err := os.Open(hookLogPath); err == nil {
-			sum, ierr := hooksbridge.Ingest(db, f, hooksbridge.Options{
-				RunID:   runID,
-				Objects: provenance.ObjectStore{DB: db, Paths: paths},
-			})
-			f.Close()
-			if ierr != nil {
-				fmt.Fprintf(stderr, "launch: hooks ingest: %v\n", ierr)
-			} else {
-				report.HooksIngested = sum.ToolCalls
-				if _, cerr := hooksbridge.CorrelateSyscalls(db, runID); cerr != nil {
-					fmt.Fprintf(stderr, "launch: syscall correlation: %v\n", cerr)
-				}
+			defer f.Close()
+			appReader = f
+		}
+	} else if transcriptHarness != "" && transcriptPath != "" {
+		if r, err := hooksbridge.BridgeTranscript(transcriptHarness, transcriptPath); err != nil {
+			fmt.Fprintf(stderr, "launch: bridge %s transcript: %v\n", transcriptHarness, err)
+		} else {
+			appReader = r
+		}
+	}
+	if appReader != nil {
+		sum, ierr := hooksbridge.Ingest(db, appReader, hooksbridge.Options{
+			RunID:   runID,
+			Objects: provenance.ObjectStore{DB: db, Paths: paths},
+		})
+		if ierr != nil {
+			fmt.Fprintf(stderr, "launch: app-context ingest: %v\n", ierr)
+		} else {
+			report.HooksIngested = sum.ToolCalls
+			if _, cerr := hooksbridge.CorrelateSyscalls(db, runID); cerr != nil {
+				fmt.Fprintf(stderr, "launch: syscall correlation: %v\n", cerr)
 			}
 		}
 	}
@@ -291,7 +362,12 @@ func seal(db *sql.DB, paths store.Paths, runID, hookLogPath, signKeyPath string,
 		fmt.Fprintf(stderr, "launch: materialize llm: %v\n", err)
 	}
 	if tp := transcriptPathFromHookLog(hookLogPath); tp != "" {
-		if turns, err := provenance.HarvestTranscript(provenance.ObjectStore{DB: db, Paths: paths}, db, runID, tp); err != nil {
+		// Also harvest each sub-agent's own transcript: a command a delegate
+		// decided lives there, not in the main session transcript, so without
+		// this the delegate's decision never becomes an llm_call and can never
+		// carry an llm_caused edge to the syscall it ran.
+		subs := subAgentTranscriptsFromHookLog(hookLogPath, tp)
+		if turns, err := provenance.HarvestTranscriptSet(provenance.ObjectStore{DB: db, Paths: paths}, db, runID, tp, subs); err != nil {
 			fmt.Fprintf(stderr, "launch: harvest transcript: %v\n", err)
 		} else {
 			report.TranscriptTurns = turns
@@ -323,14 +399,10 @@ func seal(db *sql.DB, paths store.Paths, runID, hookLogPath, signKeyPath string,
 		report.Signals = summary.Risk.Signals
 		report.HighRisk = summary.Risk.BySeverity["high"] + summary.Risk.BySeverity["critical"]
 	}
-	if report.HighRisk > 0 || report.IntentMismatches > 0 {
-		report.Verdict = "FLAGGED"
-	} else {
-		report.Verdict = "CLEAN"
-	}
+	report.Verdict = verdictFor(*report)
 
-	// Export a signed, verifiable bundle -- the durable replayable artifact that
-	// outlives the local store.
+	// Export a verifiable bundle (signed only when --sign-key is set) -- the
+	// durable replayable artifact that outlives the local store.
 	svc := forensics.Service{DB: db, Paths: paths}
 	if signKeyPath != "" {
 		if key, kerr := attest.LoadPrivateKeyHex(signKeyPath); kerr != nil {
@@ -431,10 +503,34 @@ func evidenceLevel(r Report) string {
 	}
 }
 
+// verdictFor decides the run verdict on two honest levels of confidence:
+//
+//	FLAGGED  - real risk or an intent/effect mismatch was found.
+//	DEGRADED - no findings, but neither observability axis actually saw the run
+//	           (no kernel telemetry AND no captured agent intent), so "no
+//	           findings" is absence of evidence, not a clean bill of health.
+//	CLEAN    - no findings, and at least one axis had real visibility (kernel
+//	           telemetry, or captured agent intent such as Claude Code hooks).
+func verdictFor(r Report) string {
+	kernelTelemetry := r.SysTier == "kernel"
+	agentIntent := r.AppTier != "record" && r.AppTier != "" && r.HooksIngested > 0
+	switch {
+	case r.HighRisk > 0 || r.IntentMismatches > 0:
+		return "FLAGGED"
+	case !kernelTelemetry && !agentIntent:
+		return "DEGRADED"
+	default:
+		return "CLEAN"
+	}
+}
+
 func printVerdict(w io.Writer, r Report) {
-	mark := "✓"
-	if r.Verdict != "CLEAN" {
-		mark = "⚠"
+	mark := "⚠"
+	switch r.Verdict {
+	case "CLEAN":
+		mark = "✓"
+	case "DEGRADED":
+		mark = "?"
 	}
 	signed := "unsigned"
 	if r.Signed {

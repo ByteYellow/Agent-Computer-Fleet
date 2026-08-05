@@ -129,3 +129,11 @@ paths:
       parameters: [ { $ref: "#/components/parameters/run" }, { name: event, in: query, schema: { type: string } } ]
       responses:
         "200": { description: correlation evidence, content: { application/json: { schema: { $ref: "#/components/schemas/VersionedEnvelope" } } } }
+  /v1/telemetry/producer-health:
+    get:
+      operationId: telemetry_producer_health
+      summary: bounded spool, drop, source, and correlation coverage health. agentprovenance.producer_health/v1
+      parameters:
+        - { name: run, in: query, required: false, schema: { type: string } }
+      responses:
+        "200": { description: producer health report, content: { application/json: { schema: { $ref: "#/components/schemas/VersionedEnvelope" } } } }

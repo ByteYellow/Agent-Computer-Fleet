@@ -1,16 +1,21 @@
 # Design: zero-touch K8s pod attribution (auto pod-scope binding)
 
-Status: proposal for sign-off. Turns the k8s-daemonset profile from a manual
-node-side script into `kubectl apply` + it-just-works.
+Status: one-shot capture, the real sensor DaemonSet, and a lightweight
+`client-go` Pod informer controller are implemented. The controller's
+create/restart/delete binding lifecycle is validated on single-node K3s. A
+full operator, HA/leader election, and cluster-wide evidence service remain
+deferred.
 
 ## Problem
 
-Today the sensor deploys as a DaemonSet (`deploy/k8s/agentprov-sensor-daemonset.yaml`)
-and streams events, but attributing a pod's telemetry to a run is manual: resolve
-`pid → cgroup`, read pod metadata from the K8s API, call `sandbox bind-cgroup`
-per pod, then ingest. That is the ~12-step flow in `scripts/demo_k8s_a2a.sh`.
-Nobody deploys that. The barrier is the gap between "sensor sees the cgroup" and
-"scope is bound to it."
+The sensor deploys as a DaemonSet
+(`deploy/k8s/agentprov-sensor-daemonset.yaml`) and streams normalized JSONL.
+`sandbox capture` collapses one-pod capture/bind/ingest into one command, while
+`sandbox watch` List/Watches pod metadata and maintains passive bindings for
+running containers. The environment gate in `scripts/accept_k8s_node_multiworkload.sh`
+independently proves the production-shaped seam: one actual DaemonSet observes
+N pods, Kubernetes pod/container identity resolves to cgroup ids present in the
+kernel stream, and all scoped evidence verifies in one run.
 
 The pieces already exist and are reused, not rebuilt:
 - `cgroupResolver` (`internal/sensor/sensor_linux.go`) already parses
@@ -20,11 +25,13 @@ The pieces already exist and are reused, not rebuilt:
 - The daemon ingest API (`POST /v1/telemetry/*`) already accepts streamed events.
 - `bind-cgroup` already records pod metadata as a context event.
 
-The only missing thing is the **glue that watches pods and binds automatically**.
+The remaining product gap is production operator hardening rather than basic
+attribution: HA/leader election, upgrade orchestration, and multi-node shared
+state are intentionally outside this local-first controller.
 
 ## Two phases
 
-### Phase 1 — `agentprov sandbox capture` (one-shot, manual trigger) ← build first
+### Phase 1 — `agentprov sandbox capture` (one-shot, manual trigger) — implemented
 
 A single node-side command that collapses the manual flow for one running pod:
 
@@ -47,11 +54,11 @@ Value: the 12-step script becomes one command. Pure Go + kubectl exec; no eBPF
 change; testable on the lab VM immediately. This is the near-term face of #1 and
 de-risks phase 2.
 
-### Phase 2 — informer/controller (auto, zero-touch) ← the product shape
+### Phase 2 — controller (auto, zero-touch) — lightweight informer implemented
 
-A control loop (runs in the DaemonSet pod, or as a small sidecar) that:
-1. Watches the K8s API for pods scheduled on this node (a client-go informer, or
-   — to avoid the client-go dep — polls `kubelet /pods` or `crictl`).
+A control loop runs as a small node-local DaemonSet companion to the sensor:
+1. A filtered `client-go` informer List/Watches pods scheduled on this node,
+   with an optional label selector and Pod-only `get/list/watch` RBAC.
 2. For each new pod, resolves its cgroup (the informer gives the pod UID; the
    cgroup path is `kubepods…/pod<uid>` — already the format `cgroupResolver`
    knows), and calls the same `BindCgroupScope` + metadata enrichment as phase 1,
@@ -64,11 +71,17 @@ node is attributed automatically. A pod annotation (e.g.
 `agentprov.io/run: <id>`) lets a workload opt its telemetry into a named run;
 absent that, each pod gets an auto-run keyed by its UID.
 
-Open choice for phase 2: **client-go informer** (accurate, adds a large dep +
-RBAC) vs **kubelet/crictl poll** (no dep, works with the existing node mounts,
-slightly less immediate). Recommendation: start with the kubelet/crictl poll (no
-new dep, matches the "node sensor is self-contained" posture); add the informer
-only if sub-second pod-start attribution is needed.
+`agentprov sandbox watch` is now the informer controller. It resolves a
+container id against the host cgroup tree, records the cgroup inode as the
+kernel join key, keeps PID as supplementary evidence, closes the exact prior
+binding when a container restarts, and closes all remaining bindings when the
+Pod is deleted. The previous kubectl polling implementation remains hidden as
+`sandbox watch-poll` only for diagnostics and compatibility.
+
+The repository uses `client-go v0.32.0` because its current Go baseline is
+1.23. The Pod core/v1 List/Watch path was live-validated against K3s 1.36.2;
+this is a tested compatibility point, not a claim that every Kubernetes minor
+is covered.
 
 ## Scope / non-goals
 
@@ -81,5 +94,12 @@ only if sub-second pod-start attribution is needed.
 - `agentprov sandbox capture --pod X` on the lab VM: a pod never touched by
   `record` gets attributed + `graph verify errors=0` — same as the manual demo,
   one command.
-- Phase 2: deploy the DaemonSet, start a pod, and its telemetry shows up
-  attributed to a run with no manual step, within N seconds of pod start.
+- DaemonSet node gate: `accept_k8s_node_multiworkload.sh` deploys the actual
+  DaemonSet, starts 8 pods by default, maps pod/container identity to observed
+  kernel cgroups, ingests the JSONL stream, and requires `graph verify` with
+  zero errors/warnings. Reference result: 8 cgroups, 1,140 events.
+- Informer lifecycle gate: `accept_k8s_informer_controller.sh` deploys the
+  checked controller manifest, creates an annotated Pod, forces a container
+  restart under the same Pod UID, and deletes the Pod. The reference K3s run
+  created two bindings, closed both, observed one restart, retained zero active
+  bindings, and reported zero retries/failures/resolution failures.

@@ -1,0 +1,5 @@
+FROM scratch
+
+COPY agentprov-sensor /usr/local/bin/agentprov-sensor
+
+ENTRYPOINT ["/usr/local/bin/agentprov-sensor"]

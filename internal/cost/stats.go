@@ -34,10 +34,6 @@ type SamplerResult struct {
 	Errors  []string
 }
 
-func SampleRunningDockerSessions(db *sql.DB) (SamplerResult, error) {
-	return SampleRunningDockerSessionsWithOptions(db, SamplerOptions{})
-}
-
 type SamplerOptions struct {
 	Limit            int
 	Timeout          time.Duration

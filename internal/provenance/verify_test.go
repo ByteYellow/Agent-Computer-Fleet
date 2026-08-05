@@ -17,6 +17,31 @@ import (
 	"github.com/byteyellow/agentprovenance/internal/telemetry"
 )
 
+func TestVerifyUnknownRunFails(t *testing.T) {
+	paths, err := store.Init(filepath.Join(t.TempDir(), ".agentprov"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// A run that left no trace anywhere must not verify clean -- there is
+	// nothing to verify, so an "ok" here would be a false green.
+	result, err := Verify(db, "run-does-not-exist")
+	if err != nil {
+		t.Fatalf("Verify returned infra error: %v", err)
+	}
+	if result.Status != "failed" || result.ErrorCount != 1 {
+		t.Fatalf("unknown run got status=%q errors=%d, want failed/1: %+v", result.Status, result.ErrorCount, result)
+	}
+	if len(result.Issues) != 1 || result.Issues[0].Kind != "unknown_run" {
+		t.Fatalf("expected a single unknown_run issue, got %+v", result.Issues)
+	}
+}
+
 func TestVerifyCleanRun(t *testing.T) {
 	root := t.TempDir()
 	paths, err := store.Init(filepath.Join(root, ".agentprov"))

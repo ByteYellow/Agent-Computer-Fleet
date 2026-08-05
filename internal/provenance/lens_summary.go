@@ -23,7 +23,7 @@ func summaryLensEdges(runID, lens, focus, detail string, nodes map[string]GraphL
 	case "network-egress":
 		return buildNetworkGroupEdges(runID, nodes, events), true
 	case "data-flow-taint":
-		return buildDataFlowSummaryEdges(events), true
+		return buildDataFlowSummaryEdges(events, edges), true
 	case "agent-intent":
 		return buildIntentDAGEdges(runID, nodes, events, edges), true
 	case "substrate":
@@ -632,6 +632,7 @@ func buildNetworkGroupEdges(runID string, nodes map[string]GraphLensNode, events
 	type netGroup struct {
 		count        int
 		risky        int
+		blocked      int
 		destinations map[string]bool
 		evidence     []string
 	}
@@ -649,6 +650,9 @@ func buildNetworkGroupEdges(runID string, nodes map[string]GraphLensNode, events
 		group.count++
 		if isRiskyNetworkSummaryEvent(ev) {
 			group.risky++
+		}
+		if strings.Contains(ev.Payload, `"blocked":true`) || strings.Contains(ev.Payload, `"blocked": true`) {
+			group.blocked++
 		}
 		if ev.Destination != "" {
 			group.destinations[ev.Destination] = true
@@ -673,7 +677,7 @@ func buildNetworkGroupEdges(runID string, nodes map[string]GraphLensNode, events
 			}
 		}
 		nodes[id] = GraphLensNode{ID: id, Kind: "egress_group", Subtype: key, Label: label, Risk: riskIf(group.risky > 0), TrustOrigin: "summary", Data: map[string]any{
-			"group": key, "count": group.count, "risky": group.risky, "destinations": destinations,
+			"group": key, "count": group.count, "risky": group.risky, "blocked": group.blocked, "destinations": destinations,
 			"evidence_refs": capStringSlice(group.evidence, 32), "omitted_evidence": maxInt(0, len(group.evidence)-32),
 			"drilldown_lens": "network-egress", "drilldown_detail": "raw", "drilldown_focus": firstString(group.evidence),
 		}}

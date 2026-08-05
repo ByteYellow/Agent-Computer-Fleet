@@ -164,6 +164,89 @@ func graphCmd(dataDir, daemonURL *string) *cobra.Command {
 	}
 	materializeLLM.Flags().StringVar(&llmRunID, "run", "", "run id")
 
+	var harvestRunID, harvestHookLog string
+	harvestTranscripts := &cobra.Command{
+		Use:   "harvest-transcripts",
+		Short: "harvest every transcript a run's hook log points at (main sessions + sub-agents) into llm_call nodes",
+		Long: "Objectify each turn of every transcript referenced by the hook log -- each main\n" +
+			"session transcript_path and each sub-agent agent_transcript_path -- as llm_call\n" +
+			"nodes, with llm_caused edges to the syscalls the decided shell commands ran.\n" +
+			"Use when sealing a run outside `launch` (e.g. a record + hooks bridge pipeline);\n" +
+			"a delegate's decided command only becomes llm_caused once its own transcript is\n" +
+			"harvested. Must run on the host that produced the transcripts (sub-agent files\n" +
+			"are not in the bundle).",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if harvestRunID == "" {
+				return fmt.Errorf("--run is required")
+			}
+			if harvestHookLog == "" {
+				return fmt.Errorf("--hooklog is required")
+			}
+			paths, err := store.Init(*dataDir)
+			if err != nil {
+				return err
+			}
+			db, err := store.Open(paths)
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+			turns, err := provenance.HarvestTranscriptsFromHookLog(provenance.ObjectStore{DB: db, Paths: paths}, db, harvestRunID, harvestHookLog)
+			if err != nil {
+				return err
+			}
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
+				"schema_version": "agentprovenance.harvest_transcripts/v1",
+				"run":            harvestRunID,
+				"turns":          turns,
+			})
+		},
+	}
+	harvestTranscripts.Flags().StringVar(&harvestRunID, "run", "", "run id")
+	harvestTranscripts.Flags().StringVar(&harvestHookLog, "hooklog", "", "hook JSONL log whose transcript_path / agent_transcript_path fields to harvest")
+
+	var epRunID, epDump string
+	ingestEndpoint := &cobra.Command{
+		Use:   "ingest-endpoint",
+		Short: "fold a capture proxy's dump (chat + data egress) into the run graph",
+		Long: "For agents whose TLS the libssl uprobe cannot read (e.g. rustls CLIs like\n" +
+			"Grok), the model traffic and data egress are captured at a controlled proxy.\n" +
+			"This ingests that dump: chat/responses -> llm_call nodes (with tool-call\n" +
+			"declaration); /v1/upload|/traces -> a network_connect egress event + a\n" +
+			"content-addressed payload descriptor, marked blocked/deny when the proxy\n" +
+			"blocked the upload.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if epRunID == "" {
+				return fmt.Errorf("--run is required")
+			}
+			if epDump == "" {
+				return fmt.Errorf("--dump is required")
+			}
+			paths, err := store.Init(*dataDir)
+			if err != nil {
+				return err
+			}
+			db, err := store.Open(paths)
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+			r, err := provenance.IngestEndpointDump(provenance.ObjectStore{DB: db, Paths: paths}, db, epRunID, epDump)
+			if err != nil {
+				return err
+			}
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
+				"schema_version": "agentprovenance.ingest_endpoint/v1",
+				"run":            epRunID,
+				"llm_calls":      r.LLMCalls,
+				"egress":         r.Egress,
+				"blocked_egress": r.BlockedEgress,
+			})
+		},
+	}
+	ingestEndpoint.Flags().StringVar(&epRunID, "run", "", "run id")
+	ingestEndpoint.Flags().StringVar(&epDump, "dump", "", "capture proxy dump directory")
+
 	var objectsRunID string
 	var objectsLimit int
 	var objectsCursor string
@@ -452,6 +535,8 @@ func graphCmd(dataDir, daemonURL *string) *cobra.Command {
 	cmd.AddCommand(logCmd)
 	cmd.AddCommand(materialize)
 	cmd.AddCommand(materializeLLM)
+	cmd.AddCommand(harvestTranscripts)
+	cmd.AddCommand(ingestEndpoint)
 	cmd.AddCommand(objectsCmd)
 	cmd.AddCommand(diffCmd)
 	cmd.AddCommand(blameCmd)

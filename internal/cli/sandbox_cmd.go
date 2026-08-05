@@ -19,16 +19,40 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// sandboxCmd is the in-sandbox Producer Profile runner (v0.7): the Go-native
-// form of the proven batch flow. It runs INSIDE a sandbox (microVM guest, Kata
-// pod, or plain container) and, in one command, wraps a workload with full
-// provenance capture, then exports a forensics bundle so a short-lived sandbox
-// does not lose its evidence. The correlation backbone is producer.BindSelfCgroup:
+// sandboxCmd contains Producer Profile operations. The run path executes inside
+// a Linux workload environment and exports a forensics bundle so a short-lived
+// workload does not lose its evidence. Environment support is reported by the
+// profiles subcommand; planned profiles are not implied to be runnable here.
+// The correlation backbone is producer.BindSelfCgroup:
 // bind the sandbox's own cgroup to the run scope, then batch-ingest the sensor's
 // telemetry dropping anything outside that scope, so the exported bundle imports
 // and verifies clean centrally.
 func sandboxCmd(dataDir *string) *cobra.Command {
-	cmd := &cobra.Command{Use: "sandbox", Short: "in-sandbox producer profile: capture a workload and export a verifiable bundle"}
+	cmd := &cobra.Command{Use: "sandbox", Short: "inspect and run portable evidence producer profiles"}
+
+	var profilesJSON bool
+	profiles := &cobra.Command{
+		Use:   "profiles",
+		Short: "show validated and planned producer capabilities",
+		RunE: func(c *cobra.Command, _ []string) error {
+			reports := producer.CapabilityReports()
+			if profilesJSON {
+				enc := json.NewEncoder(c.OutOrStdout())
+				enc.SetIndent("", "  ")
+				return enc.Encode(reports)
+			}
+			for _, report := range reports {
+				fmt.Fprintf(c.OutOrStdout(), "name=%s status=%s sensor=%s scope=%s confidence=%.2f system=%s model_intent=%s app_context=%s\n",
+					report.Name, report.Status, report.SensorPlacement, report.ScopeMode, report.ScopeConfidence,
+					report.Layers[producer.LayerSystemTelemetry].Coverage,
+					report.Layers[producer.LayerModelIntent].Coverage,
+					report.Layers[producer.LayerAppContext].Coverage)
+			}
+			return nil
+		},
+	}
+	profiles.Flags().BoolVar(&profilesJSON, "json", false, "emit structured capability JSON")
+	cmd.AddCommand(profiles)
 
 	var out, runID, workdir, sensorBin, sslLib string
 	var noSensor bool
@@ -245,6 +269,7 @@ func sandboxCmd(dataDir *string) *cobra.Command {
 	cmd.AddCommand(bindCgroup)
 	cmd.AddCommand(sandboxCaptureCmd(dataDir))
 	cmd.AddCommand(sandboxWatchCmd(dataDir))
+	cmd.AddCommand(sandboxPollingWatchCmd(dataDir))
 
 	run.Flags().SetInterspersed(false)
 	run.Flags().StringVar(&out, "out", "", "directory to copy the exported bundle into (mounted volume for teardown durability)")

@@ -217,6 +217,40 @@ func TestIngestFalcoMapsRiskEventsAndCorrelates(t *testing.T) {
 	}
 }
 
+func TestIngestFalcoRollsBackEventsWhenBatchManifestFails(t *testing.T) {
+	paths, err := store.Init(filepath.Join(t.TempDir(), ".agentprov"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(`CREATE TRIGGER reject_telemetry_batch
+		BEFORE INSERT ON telemetry_batches
+		BEGIN
+			SELECT RAISE(ABORT, 'forced batch manifest failure');
+		END`); err != nil {
+		t.Fatal(err)
+	}
+	raw := strings.NewReader(`{"time":"2026-01-01T00:00:01Z","rule":"Terminal shell in container","priority":"Notice","output_fields":{"evt.type":"execve","proc.pid":4242,"proc.ppid":1,"container.id":"container-atomic","proc.cmdline":"true"}}` + "\n")
+	if _, err := IngestFalco(db, FalcoIngestOptions{Path: "falco-atomic", RunID: "run-atomic"}, raw); err == nil {
+		t.Fatal("expected forced batch manifest failure")
+	}
+
+	for _, table := range []string{"events", "graph_edges", "telemetry_batches"} {
+		var count int
+		if err := db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("%s rows=%d, want transaction rollback", table, count)
+		}
+	}
+}
+
 func TestIngestNativeSensorRiskEventsAndCorrelates(t *testing.T) {
 	root := t.TempDir()
 	paths, err := store.Init(filepath.Join(root, ".agentprov"))

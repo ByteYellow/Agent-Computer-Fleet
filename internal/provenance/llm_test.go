@@ -56,6 +56,65 @@ func TestMaterializeLLMCallsDirectLink(t *testing.T) {
 	}
 }
 
+// When the eBPF execve truncates its argv (losing the script path), the record
+// process sample still carries the full /proc/cmdline command -- so command-match
+// stays robust and the llm_caused edge survives argv truncation.
+func TestCommandMatchedActionsRobustToExecveTruncation(t *testing.T) {
+	paths, err := store.Init(filepath.Join(t.TempDir(), ".agentprov"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	const run = "run-trunc"
+	ins := func(id, etype, payload string) {
+		if _, err := db.Exec(`INSERT INTO events (id, run_id, source, event_type, payload, created_at)
+			VALUES (?, ?, 'x', ?, ?, '2026-01-01T00:00:01Z')`, id, run, etype, payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	decided := "python3 ../pysnake-helper/setup.py install"
+	// The execve for that command came through truncated to just the program.
+	ins("ev-exec", "execve", `{"payload":{"raw":{"command":"/usr/bin/python3"}}}`)
+	// The record sample of the same process kept the full /proc/cmdline command
+	// (with an extra trailing arg -- a prefix match, not exact).
+	ins("ev-proc", "process_observed", `{"payload":{"command":"python3 ../pysnake-helper/setup.py install --user","pid":913280}}`)
+	// The shell wrapper Claude runs the command through CONTAINS the decided
+	// command but does not start with it -- it must NOT be attributed (prefix, not
+	// substring), else llm_caused points at plumbing instead of the command.
+	ins("ev-wrap", "process_observed", `{"payload":{"command":"/bin/bash -c source /home/u/.claude/shell-snapshots/snap.sh && python3 ../pysnake-helper/setup.py install","pid":913279}}`)
+	// A different command that merely shares the workspace path must not match.
+	ins("ev-other", "process_observed", `{"payload":{"command":"ls -la ../pysnake-helper","pid":42}}`)
+
+	got, err := commandMatchedActions(db, run, []string{decided})
+	if err != nil {
+		t.Fatal(err)
+	}
+	has := func(node string) bool {
+		for _, g := range got {
+			if g == node {
+				return true
+			}
+		}
+		return false
+	}
+	if !has("runtime_event/ev-proc") {
+		t.Errorf("truncated execve: expected match via process_observed sample, got %v", got)
+	}
+	if has("runtime_event/ev-wrap") {
+		t.Errorf("shell wrapper was attributed (should be excluded by prefix match): %v", got)
+	}
+	if has("runtime_event/ev-other") {
+		t.Errorf("different command sharing the workspace path matched: %v", got)
+	}
+	if len(got) != 1 {
+		t.Errorf("expected exactly one matched action (the setup.py process), got %v", got)
+	}
+}
+
 func TestMaterializeLLMCalls(t *testing.T) {
 	paths, err := store.Init(filepath.Join(t.TempDir(), ".agentprov"))
 	if err != nil {

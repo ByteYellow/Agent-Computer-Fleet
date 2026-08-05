@@ -361,10 +361,6 @@ func (r Rule) Matches(event Event) bool {
 	return r.Match.Source != "" || r.Match.EventType != "" || r.Match.DstIP != "" || r.Match.PrivateCIDR
 }
 
-func EvaluateJSONL(path string, out io.Writer) error {
-	return EvaluateJSONLWithEngine(nil, path, out, DefaultEngine())
-}
-
 func EvaluateJSONLWithState(db *sql.DB, path string, out io.Writer) error {
 	return EvaluateJSONLWithEngine(db, path, out, DefaultEngine())
 }
@@ -397,6 +393,22 @@ func EvaluateRuntimeEventWithEngine(db *sql.DB, eventID string, engine Engine) (
 
 func PersistDecision(db *sql.DB, event Event, rawPayload string, decision Decision) (DecisionRecord, error) {
 	return persistDecision(db, event, rawPayload, decision)
+}
+
+// PersistDenyForEvent attaches a deny policy decision -- plus its risk signal,
+// response action, unified security signal, and graph edges -- to an
+// already-stored runtime event, in the exact same verifiable chain the rule
+// engine writes. It is for out-of-band enforcers (e.g. the endpoint egress
+// blocker that DENIED a codebase upload the rule engine never saw): the block
+// becomes a first-class risk -> response node attributed to the event's
+// session/process, so it renders as one chain with the rest of the run.
+func PersistDenyForEvent(db *sql.DB, eventID, ruleID, reason string) (DecisionRecord, error) {
+	event, rawPayload, err := runtimeEventForPolicy(db, eventID)
+	if err != nil {
+		return DecisionRecord{}, err
+	}
+	return persistDecisionForEventID(db, eventID, event, rawPayload,
+		Decision{Decision: "deny", RuleID: ruleID, Reason: reason})
 }
 
 // ReevaluateRun re-runs the policy engine over a run's already-captured runtime

@@ -134,6 +134,88 @@ func TestAdaptKimiSessionCapturesDelegation(t *testing.T) {
 	}
 }
 
+func TestAdaptCodexRolloutCapturesSpawnAgent(t *testing.T) {
+	// Codex multi-agent: the parent rollout records a spawn_agent dispatch (the
+	// sub-agent's own tool calls live in a separate per-thread trace, not here).
+	// The adapter must yield the delegation shape the bridge draws a spawn edge
+	// from: an Agent dispatch named by agent_type + a bracketing SubagentStart/Stop.
+	rollout := strings.Join([]string{
+		`{"timestamp":"2026-07-09T06:00:00Z","type":"response_item","payload":{"type":"function_call","name":"spawn_agent","arguments":"{\"agent_type\":\"explorer\",\"message\":\"count the files\"}","call_id":"sp1"}}`,
+		`{"timestamp":"2026-07-09T06:00:05Z","type":"response_item","payload":{"type":"function_call_output","call_id":"sp1"}}`,
+	}, "\n")
+
+	r, err := AdaptHarness("codex", strings.NewReader(rollout))
+	if err != nil {
+		t.Fatal(err)
+	}
+	evs := decodeAdapted(t, r)
+	var dispatch, substart, substop bool
+	for _, e := range evs {
+		if e.Event == "PreToolUse" && e.ToolName == "Agent" && e.ToolInput["name"] == "explorer" && e.ToolUseID == "sp1" {
+			dispatch = true
+		}
+		if e.Event == "SubagentStart" && e.AgentID == "codex-sub-sp1" && e.AgentType == "explorer" {
+			substart = true
+		}
+		if e.Event == "SubagentStop" && e.AgentID == "codex-sub-sp1" {
+			substop = true
+		}
+	}
+	if !dispatch || !substart || !substop {
+		t.Fatalf("spawn_agent not mapped to delegation (dispatch=%v start=%v stop=%v): %+v", dispatch, substart, substop, evs)
+	}
+}
+
+func TestBridgeTranscriptClaudeFileIsReadableAfterClose(t *testing.T) {
+	// Regression: the claude adapter is a passthrough, so BridgeTranscript must
+	// buffer the file -- otherwise its defer-close fires before the caller reads,
+	// yielding "file already closed" and an empty bridge (no agents/tool_calls).
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hooklog.jsonl")
+	line := `{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo hi"},"tool_use_id":"c1"}`
+	if err := os.WriteFile(path, []byte(line+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, err := BridgeTranscript("claude", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("reader unreadable (file closed too early?): %v", err)
+	}
+	if !strings.Contains(string(data), "echo hi") {
+		t.Fatalf("bridged content lost: %q", data)
+	}
+}
+
+func TestAdaptGrokSessionMapsToolCalls(t *testing.T) {
+	// Grok's chat_history.jsonl: system/user context, an assistant turn that
+	// declares a Bash tool call (OpenAI function-shaped), its result, then a plain
+	// text turn with NO tool call (the model declaring only text -> no event).
+	hist := strings.Join([]string{
+		`{"type":"system","content":"you are grok"}`,
+		`{"type":"user","content":"set up the project"}`,
+		`{"type":"assistant","model_id":"grok-code","tool_calls":[{"id":"tc1","type":"function","function":{"name":"bash","arguments":"{\"command\":\"python3 setup.py install\"}"}}]}`,
+		`{"type":"tool_result","tool_call_id":"tc1","content":"ok"}`,
+		`{"type":"assistant","model_id":"grok-code","content":"ok"}`,
+	}, "\n")
+	r, err := AdaptHarness("grok", strings.NewReader(hist))
+	if err != nil {
+		t.Fatal(err)
+	}
+	evs := decodeAdapted(t, r)
+	if len(evs) != 2 {
+		t.Fatalf("got %d events, want 2 (1 PreToolUse + 1 PostToolUse): %+v", len(evs), evs)
+	}
+	if evs[0].Event != "PreToolUse" || evs[0].ToolName != "Bash" || evs[0].ToolInput["command"] != "python3 setup.py install" {
+		t.Fatalf("tool call not normalized to Bash+command: %+v", evs[0])
+	}
+	if evs[1].Event != "PostToolUse" || evs[1].ToolUseID != "tc1" {
+		t.Fatalf("tool result not mapped: %+v", evs[1])
+	}
+}
+
 func TestAdaptHarnessUnknownRejected(t *testing.T) {
 	if _, err := AdaptHarness("langchain", strings.NewReader("")); err == nil {
 		t.Fatal("unknown harness should error")

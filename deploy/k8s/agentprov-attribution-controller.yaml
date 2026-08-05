@@ -1,0 +1,93 @@
+# Lightweight node attribution controller for the k8s-daemonset Producer Profile.
+#
+# This is a control-plane companion to agentprov-sensor, not another telemetry
+# collector. It List/Watches only pods scheduled on its own node, resolves each
+# running container through host PID/cgroup identity, and maintains passive
+# execution_context_bindings in the node-local AgentProvenance store.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentprov
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentprov-attribution-controller
+  namespace: agentprov
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agentprov-attribution-controller
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agentprov-attribution-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agentprov-attribution-controller
+subjects:
+  - kind: ServiceAccount
+    name: agentprov-attribution-controller
+    namespace: agentprov
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: agentprov-attribution-controller
+  namespace: agentprov
+  labels: { app: agentprov-attribution-controller }
+spec:
+  selector:
+    matchLabels: { app: agentprov-attribution-controller }
+  template:
+    metadata:
+      labels:
+        app: agentprov-attribution-controller
+        agentprov.io/ignore: "true"
+      annotations:
+        agentprov.io/ignore: "true"
+    spec:
+      serviceAccountName: agentprov-attribution-controller
+      hostPID: true
+      terminationGracePeriodSeconds: 15
+      containers:
+        - name: controller
+          image: agentprov-controller:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/agentprov"]
+          args:
+            - --data-dir
+            - /var/lib/agentprov
+            - sandbox
+            - watch
+            - --node
+            - $(NODE_NAME)
+            - --report-interval
+            - 30s
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef: { fieldPath: spec.nodeName }
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: cgroup, mountPath: /sys/fs/cgroup, readOnly: true }
+            - { name: data, mountPath: /var/lib/agentprov }
+          resources:
+            requests: { cpu: 25m, memory: 48Mi }
+            limits: { cpu: 250m, memory: 192Mi }
+      volumes:
+        - { name: cgroup, hostPath: { path: /sys/fs/cgroup } }
+        - { name: data, hostPath: { path: /var/lib/agentprov, type: DirectoryOrCreate } }
+      tolerations:
+        - { operator: Exists }

@@ -292,7 +292,12 @@ system-side telemetry + application-side agent context
 The fastest path: wrap any agent in a full provenance run with a single command.
 
 ```sh
-go install github.com/ByteYellow/AgentProvenance/cmd/agentprov@latest
+# Build from source. A direct `go install ...@latest` does not work: the module
+# pins two transitive Docker deps (distribution/reference, go-connections) via
+# replace directives, which `go install` from a version tag does not honor.
+git clone https://github.com/byteyellow/agentprovenance
+cd agentprovenance
+go install ./cmd/agentprov
 
 agentprov doctor -- claude          # preflight: hooks, cgroup, sensor, dashboard port
 agentprov launch -- claude          # or codex, or any agent command
@@ -436,7 +441,58 @@ ingest, retention, and query services.
 |---|---|---|---|
 | Library / CLI-only recorder | one `agentprov` binary, optional Python helper, local SQLite/object store | evaluator jobs, benchmarks, CI, RL pipelines, local red-team harnesses | easiest to adopt; weaker shared query and long-running ingest |
 | Sidecar / local daemon | `agentprov daemon serve` beside one worker or sandbox host; the CLI and evaluator clients talk to it | sandbox worker, CI runner, local security harness, medium-volume telemetry ingest | adds a local service boundary, spool, backpressure, and stable query API |
-| Central evidence service | shared ingest/query service with object storage, retention, auth, and UI/API | enterprise security, audit, SRE, compliance, incident review | highest operational cost; not the default RL entry point |
+| Central evidence service (design only) | proposed shared ingest/query service with object storage, retention, auth, and UI/API | future enterprise security, audit, SRE, compliance, incident review | architecture is documented; multi-tenancy, billing, and cluster control-plane implementation are out of scope |
+
+The single-node scale boundary is concrete: the local daemon has a file-backed
+spool bounded by batch count, total bytes, and per-batch bytes; it exposes
+backpressure/drop/correlation coverage through `telemetry producer-health`.
+`scripts/accept_telemetry_100k_pressure.sh` writes a machine-readable throughput,
+latency, resource, queue, and coverage report. The finish line and the explicitly
+non-implemented central-service boundary are documented in
+[project-closeout.md](docs/project-closeout.md) and
+[central-evidence-service-design.md](docs/central-evidence-service-design.md).
+The checked reference run ingested all 100k events with zero failed/dropped
+batches while health and bounded event queries remained responsive; its measured
+throughput is documented as a local SQLite baseline, not a production SLA.
+
+The Kubernetes producer gate deploys the real privileged sensor DaemonSet,
+starts multiple independent pods, resolves each pod/container identity to the
+kernel cgroup observed by the sensor, ingests the DaemonSet's stdout JSONL, and
+verifies the resulting run. The checked 2026-08-05 lab run used one arm64 K3s
+node and 8 BusyBox pods: 8 distinct cgroups, 1,140 captured events, and
+`graph verify` with zero errors and zero warnings. This proves one sensor can
+observe N workloads on one node; it is not a cluster-throughput claim.
+
+The same workload also passes a live cross-profile parity gate: active
+`local-record` and passive `k8s-daemonset` captures both verify cleanly and share
+the canonical workload commands, `execve` evidence, runtime-event nodes, and
+process-to-event causal edges. Host-specific PID/cgroup/container identities and
+event counts are intentionally excluded from equivalence; their different
+correlation confidence tiers remain visible.
+
+Inspect the validation boundary directly with `agentprov sandbox profiles` (or
+`--json`). Planned profiles report zero scope confidence and no collection
+coverage until they pass a live environment gate.
+
+A separate lightweight attribution-controller DaemonSet runs `agentprov
+sandbox watch`: a filtered `client-go` informer List/Watches Pods on its node,
+maps each running container to the host cgroup inode used by kernel telemetry,
+and maintains exact bindings across container restart and Pod deletion. Its
+RBAC is limited to Pod `get/list/watch`; telemetry collection stays in the
+independent sensor data plane. The K3s lifecycle gate completed with 2 bindings
+created, 2 closed, 1 restart, and no active binding or resolver failure. This is
+not presented as a full Kubernetes operator or cluster control plane.
+
+```sh
+AGENTPROV=/path/to/linux/agentprov \
+SENSOR=/path/to/linux/agentprov-sensor \
+AGENTPROV_MULTIWORKLOAD_REPORT=/tmp/agentprov-k8s-multiworkload.json \
+  ./scripts/accept_k8s_node_multiworkload.sh
+
+AGENTPROV=/path/to/linux/agentprov \
+AGENTPROV_K8S_INFORMER_REPORT=/tmp/agentprov-k8s-informer.json \
+  ./scripts/accept_k8s_informer_controller.sh
+```
 
 For RL and evaluator pipelines, the default contract is lightweight and
 offline-first:
@@ -873,7 +929,9 @@ one signed run.
 
 This is the current shape of the **k8s-daemonset producer profile**: the core
 graph does not become Kubernetes-specific; Kubernetes only supplies producer
-placement and passive scope attribution.
+placement and passive scope attribution. The repeatable environment gate uses
+the actual DaemonSet, its stdout JSONL transport, Kubernetes pod/container
+metadata, and host cgroup identity; it does not require workload instrumentation.
 
 <p align="center">
   <img src="docs/assets/k8s-cross-pod-a2a-architecture.png" alt="Kubernetes cross-pod A2A architecture: one node-level eBPF sensor observes alice and bob pods, binds both cgroups into one AgentProvenance evidence graph, and shows cross-pod causality." width="100%">
@@ -1005,7 +1063,7 @@ Run:
 ## Architecture
 
 <p align="center">
-  <img src="docs/assets/producer-profile-architecture.svg" alt="AgentProvenance producer profile architecture: local record and Kubernetes pods feed substrate-neutral evidence into the AgentProvenance core; microVM guest support is adapting; dashboard, query, and replay surfaces consume the signed graph." width="100%">
+  <img src="docs/assets/producer-profile-architecture.svg" alt="AgentProvenance producer profile architecture: validated local-record and Kubernetes producers feed substrate-neutral evidence into the core; future profiles stay capability-gated until live validation." width="100%">
 </p>
 
 <p align="center">

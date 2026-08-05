@@ -265,6 +265,16 @@ func IngestFalco(db *sql.DB, opts FalcoIngestOptions, input io.Reader) (JSONLIng
 	}
 	hasher := sha256.New()
 	result := JSONLIngestResult{Format: "falco", Path: path}
+	tx, err := db.Begin()
+	if err != nil {
+		return result, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	lineNo := 0
@@ -300,7 +310,7 @@ func IngestFalco(db *sql.DB, opts FalcoIngestOptions, input io.Reader) (JSONLIng
 			appendRowResult(&result, RowResult{Line: lineNo, Status: "skipped", DetectedFormat: detected})
 			continue
 		}
-		id, err := IngestFiltered(db, event)
+		id, err := ingestFilteredWithStore(db, tx, event)
 		if err != nil {
 			result.Failed++
 			msg := fmt.Sprintf("line %d: ingest failed: %v", lineNo, err)
@@ -308,7 +318,7 @@ func IngestFalco(db *sql.DB, opts FalcoIngestOptions, input io.Reader) (JSONLIng
 			appendRowResult(&result, rowResultForEvent(lineNo, "failed", detected, event, "", "", msg))
 			continue
 		}
-		record, err := eventRecordByID(db, id)
+		record, err := eventRecordByID(tx, id)
 		if err != nil {
 			result.Failed++
 			msg := fmt.Sprintf("line %d: readback failed: %v", lineNo, err)
@@ -325,16 +335,20 @@ func IngestFalco(db *sql.DB, opts FalcoIngestOptions, input io.Reader) (JSONLIng
 	}
 	result.FileSHA256 = hex.EncodeToString(hasher.Sum(nil))
 	result.EventIDsSHA256 = hashStrings(result.EventIDs)
-	if err := persistJSONLBatch(db, jsonlOpts, &result); err != nil {
+	if err := persistJSONLBatch(tx, jsonlOpts, &result); err != nil {
 		return result, err
 	}
+	if err := tx.Commit(); err != nil {
+		return result, err
+	}
+	committed = true
 	if _, err := RebuildEventWindows(db, resultRunID(db, jsonlOpts.RunID, result.EventIDs)); err != nil {
 		return result, err
 	}
 	return result, nil
 }
 
-func persistJSONLBatch(db *sql.DB, opts JSONLIngestOptions, result *JSONLIngestResult) error {
+func persistJSONLBatch(db sqlStore, opts JSONLIngestOptions, result *JSONLIngestResult) error {
 	if result == nil {
 		return nil
 	}
@@ -369,7 +383,11 @@ func detectedJSONLFormat(opts JSONLIngestOptions, raw map[string]any) string {
 	return detectFormat(raw)
 }
 
-func eventRecordByID(db *sql.DB, id string) (EventRecord, error) {
+type rowQuerier interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+func eventRecordByID(db rowQuerier, id string) (EventRecord, error) {
 	var record EventRecord
 	err := db.QueryRow(`SELECT id, COALESCE(run_id, ''), COALESCE(session_id, ''), COALESCE(tool_call_id, ''),
 		COALESCE(process_id, ''), COALESCE(snapshot_id, ''), COALESCE(raw_event_id, ''),
@@ -464,7 +482,7 @@ func ingestEventIdentityKeys(event IngestEvent) []string {
 	return eventIdentityKeys(record)
 }
 
-func inferSingleRunID(db *sql.DB, eventIDs []string) (string, error) {
+func inferSingleRunID(db rowQuerier, eventIDs []string) (string, error) {
 	if len(eventIDs) == 0 {
 		return "", nil
 	}

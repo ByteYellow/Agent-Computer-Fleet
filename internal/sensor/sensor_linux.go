@@ -63,15 +63,8 @@ type Options struct {
 	OnReady func()
 }
 
-// Run loads the eBPF probes (exec/connect/openat), reads events from the ring
-// buffer, enriches each with a container id derived from the task's cgroup, and
-// writes one normalized telemetry event per line (JSONL) to out. It blocks until
-// SIGINT/SIGTERM. Requires root or CAP_BPF + CAP_PERFMON.
-func Run(out io.Writer) error {
-	return RunWithOptions(out, Options{})
-}
-
-// RunWithOptions is Run with optional extra probes (see Options).
+// RunWithOptions loads the configured eBPF probes and writes normalized JSONL
+// telemetry until SIGINT/SIGTERM. It requires root or CAP_BPF + CAP_PERFMON.
 func RunWithOptions(out io.Writer, opts Options) error {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return fmt.Errorf("remove memlock: %w", err)
@@ -375,13 +368,19 @@ type dropLookuper interface {
 // survives a process whose /proc entry is already gone by the time userspace
 // drains the ring buffer - the failure mode of the previous /proc-only lookup.
 type cgroupResolver struct {
-	root string
-	mu   sync.RWMutex
-	byID map[uint64]string
+	root            string
+	mu              sync.RWMutex
+	refreshMu       sync.Mutex
+	byID            map[uint64]string
+	lastRefresh     time.Time
+	refreshInterval time.Duration
 }
 
 func newCgroupResolver() *cgroupResolver {
-	return &cgroupResolver{root: "/sys/fs/cgroup", byID: map[uint64]string{}}
+	return &cgroupResolver{
+		root: "/sys/fs/cgroup", byID: map[uint64]string{},
+		refreshInterval: time.Second,
+	}
 }
 
 // resolve returns the container id for a kernel cgroup id, refreshing the cache
@@ -396,11 +395,31 @@ func (r *cgroupResolver) resolve(cgroupID uint64) string {
 	if ok {
 		return id
 	}
-	r.refresh()
+	r.refreshIfDue()
 	r.mu.RLock()
 	id = r.byID[cgroupID]
 	r.mu.RUnlock()
 	return id
+}
+
+// refreshIfDue bounds hierarchy scans. A node-wide sensor sees many host
+// cgroups that can never map to a container; rescanning the complete hierarchy
+// for every such event stalls ring-buffer consumption under normal K8s host
+// activity. Unknown ids use the live /proc fallback until the next refresh.
+func (r *cgroupResolver) refreshIfDue() {
+	r.refreshMu.Lock()
+	defer r.refreshMu.Unlock()
+	interval := r.refreshInterval
+	if interval <= 0 {
+		interval = time.Second
+	}
+	r.mu.RLock()
+	last := r.lastRefresh
+	r.mu.RUnlock()
+	if !last.IsZero() && time.Since(last) < interval {
+		return
+	}
+	r.refresh()
 }
 
 // refresh walks the cgroup v2 hierarchy and maps each container cgroup
@@ -427,6 +446,7 @@ func (r *cgroupResolver) refresh() {
 	})
 	r.mu.Lock()
 	r.byID = next
+	r.lastRefresh = time.Now()
 	r.mu.Unlock()
 }
 

@@ -28,6 +28,8 @@ func telemetryCmd(dataDir, daemonURL *string) *cobra.Command {
 	var correlationsRunID string
 	var correlationsEventID string
 	var correlationsJSON bool
+	var producerHealthRunID string
+	var producerHealthJSON bool
 	list := &cobra.Command{
 		Use:   "list",
 		Short: "list recorded telemetry events",
@@ -114,6 +116,44 @@ func telemetryCmd(dataDir, daemonURL *string) *cobra.Command {
 	correlations.Flags().StringVar(&correlationsEventID, "event", "", "explain one event id")
 	correlations.Flags().BoolVar(&correlationsJSON, "json", false, "emit structured correlation evidence JSON")
 	cmd.AddCommand(correlations)
+	producerHealth := &cobra.Command{
+		Use:   "producer-health",
+		Short: "show telemetry producer queue, drop, and correlation coverage health",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var report telemetry.ProducerHealthReport
+			var err error
+			if *daemonURL != "" {
+				report, err = daemon.NewClient(*daemonURL).TelemetryProducerHealth(producerHealthRunID)
+			} else {
+				var paths store.Paths
+				paths, err = store.Init(*dataDir)
+				if err == nil {
+					var db *sql.DB
+					db, err = store.Open(paths)
+					if err == nil {
+						defer db.Close()
+						report, err = telemetry.BuildProducerHealth(db, telemetry.ProducerHealthOptions{RunID: producerHealthRunID})
+					}
+				}
+			}
+			if err != nil {
+				return err
+			}
+			if producerHealthJSON {
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				return enc.Encode(report)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "runtime_events=%d correlated=%d uncorrelated=%d coverage=%.4f sensor_dropped=%d queued_batches=%d queued_bytes=%d dropped_batches=%d failed_batches=%d\n",
+				report.Events.RuntimeEvents, report.Events.CorrelatedEvents, report.Events.UncorrelatedEvents,
+				report.Coverage.CorrelationRatio, report.Events.SensorDroppedEvents, report.Spool.QueuedBatches,
+				report.Spool.QueuedBytes, report.Spool.DroppedBatches, report.Spool.FailedBatches)
+			return nil
+		},
+	}
+	producerHealth.Flags().StringVar(&producerHealthRunID, "run", "", "filter producer health by run id")
+	producerHealth.Flags().BoolVar(&producerHealthJSON, "json", false, "emit structured producer health JSON")
+	cmd.AddCommand(producerHealth)
 	batches := &cobra.Command{
 		Use:   "batches",
 		Short: "list telemetry ingest batch manifests",
@@ -375,6 +415,7 @@ func telemetryBindCmd(dataDir *string) *cobra.Command {
 
 func telemetryBindingsCmd(dataDir *string) *cobra.Command {
 	var filter correlation.BindingFilter
+	var jsonOut bool
 	bindings := &cobra.Command{
 		Use:   "bindings",
 		Short: "list ToolCallScope bindings",
@@ -392,6 +433,12 @@ func telemetryBindingsCmd(dataDir *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if jsonOut {
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
+					"schema_version": "agentprovenance.telemetry_bindings/v1",
+					"bindings":       items,
+				})
+			}
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
 			fmt.Fprintln(w, "ID\tRUN\tSUBSTRATE_SCOPE\tEXECUTION_SCOPE\tTOOL_CALL\tPROCESS\tCONTAINER\tCGROUP\tROOT_PID\tPID\tSOURCE\tCONFIDENCE\tSTARTED_AT\tENDED_AT")
 			for _, item := range items {
@@ -408,6 +455,7 @@ func telemetryBindingsCmd(dataDir *string) *cobra.Command {
 	bindings.Flags().StringVar(&filter.AttemptID, "attempt", "", "legacy alias for --execution-scope")
 	bindings.Flags().StringVar(&filter.ToolCallID, "tool-call", "", "filter by tool call id")
 	bindings.Flags().StringVar(&filter.ProcessID, "process", "", "filter by process id")
+	bindings.Flags().BoolVar(&jsonOut, "json", false, "emit structured binding JSON")
 	_ = bindings.Flags().MarkHidden("session")
 	_ = bindings.Flags().MarkHidden("attempt")
 	return bindings

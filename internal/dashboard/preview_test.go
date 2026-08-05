@@ -305,6 +305,117 @@ func TestDashboardComplianceUnknownFramework(t *testing.T) {
 	}
 }
 
+func TestDashboardOutboundUsesHonestEvidenceClasses(t *testing.T) {
+	db := newDashboardTestDB(t)
+	if _, err := db.Exec(`INSERT INTO events
+		(id, run_id, session_id, process_id, source, event_type, payload, pid, created_at)
+		VALUES
+		('evt-trace', 'run-dash', 'session-dash', 'proc-grok', 'endpoint_capture', 'network_connect',
+		 '{"dst_host":"cli-chat-proxy.grok.com","path":"/traces","bytes":900,"egress_kind":"trace","blocked":false}', 100, '2026-06-30T00:00:00Z'),
+		('evt-mixpanel-dns', 'run-dash', 'session-dash', 'proc-grok', 'agentprov_ebpf', 'dns_query',
+		 '{"host":"api.mixpanel.com","comm":"grok"}', 100, '2026-06-30T00:00:01Z'),
+		('evt-xai-dns', 'run-dash', 'session-dash', 'proc-grok', 'agentprov_ebpf', 'dns_query',
+		 '{"host":"cli-chat-proxy.grok.com","comm":"grok"}', 100, '2026-06-30T00:00:02Z')`); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/outbound?run=run-dash", nil)
+	rec := httptest.NewRecorder()
+	(Server{DB: db}).outbound(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var surfaces []struct {
+		ChannelClass  string `json:"channel_class"`
+		DataClass     string `json:"data_class"`
+		EvidenceLevel string `json:"evidence_level"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &surfaces); err != nil {
+		t.Fatal(err)
+	}
+	if len(surfaces) != 2 {
+		t.Fatalf("want telemetry + Mixpanel DNS surfaces, with duplicate xAI DNS suppressed: %+v", surfaces)
+	}
+	seen := map[string]struct {
+		data, evidence string
+	}{}
+	for _, s := range surfaces {
+		seen[s.ChannelClass] = struct{ data, evidence string }{s.DataClass, s.EvidenceLevel}
+	}
+	if got := seen["telemetry_service"]; got.data != "unknown" || got.evidence != "payload_observed" {
+		t.Errorf("trace endpoint must be telemetry payload evidence, got %+v", got)
+	}
+	if got := seen["product_analytics"]; got.data != "unknown" || got.evidence != "dns_only" {
+		t.Errorf("DNS-only analytics endpoint must not claim behavioral payload, got %+v", got)
+	}
+}
+
+func TestDashboardEgressDoesNotCrossWireDNSAcrossProcesses(t *testing.T) {
+	db := newDashboardTestDB(t)
+	if _, err := db.Exec(`INSERT INTO events
+		(id, run_id, session_id, process_id, source, event_type, payload, pid, created_at)
+		VALUES
+		('evt-dns-a', 'run-dash', 'session-dash', 'proc-a', 'agentprov_ebpf', 'dns_query',
+		 '{"host":"api.example.com","comm":"python"}', 101, '2026-06-30T00:00:00Z'),
+		('evt-connect-b', 'run-dash', 'session-dash', 'proc-a', 'agentprov_ebpf', 'network_connect',
+		 '{"dst_ip":"203.0.113.8","dst_port":"443","comm":"python"}', 202, '2026-06-30T00:00:01Z')`); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/egress?run=run-dash", nil)
+	rec := httptest.NewRecorder()
+	(Server{DB: db}).egress(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var rows []struct {
+		Type   string `json:"type"`
+		Domain string `json:"domain"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("want one DNS observation and one connection: %+v", rows)
+	}
+	for _, row := range rows {
+		if row.Type == "network_connect" && row.Domain != "" {
+			t.Fatalf("another process's DNS must not name this connection: %+v", rows)
+		}
+	}
+}
+
+func TestDashboardEgressHidesProxyLoopbackAndShowsEndpointDestination(t *testing.T) {
+	db := newDashboardTestDB(t)
+	if _, err := db.Exec(`INSERT INTO events
+		(id, run_id, session_id, process_id, source, event_type, payload, pid, created_at)
+		VALUES
+		('evt-loopback', 'run-dash', 'session-dash', 'proc-grok', 'agentprov_ebpf', 'network_connect',
+		 '{"dst_ip":"127.0.0.1","dst_port":"8088","comm":"grok"}', 100, '2026-06-30T00:00:00Z'),
+		('evt-endpoint', 'run-dash', 'session-dash', 'proc-grok', 'endpoint_capture', 'network_connect',
+		 '{"dst_host":"cli-chat-proxy.grok.com","path":"/traces","bytes":900,"egress_kind":"trace","blocked":false,"policy_decision":"observe"}', 100, '2026-06-30T00:00:01Z')`); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/egress?run=run-dash", nil)
+	rec := httptest.NewRecorder()
+	(Server{DB: db}).egress(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var rows []struct {
+		Type string `json:"type"`
+		Dst  string `json:"dst"`
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Type != "endpoint_egress" || rows[0].Dst != "cli-chat-proxy.grok.com" || rows[0].Path != "/traces" {
+		t.Fatalf("egress must show remote endpoint instead of local proxy: %+v", rows)
+	}
+}
+
 func newDashboardTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	paths, err := store.Init(filepath.Join(t.TempDir(), ".agentprov"))

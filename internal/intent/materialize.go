@@ -395,7 +395,9 @@ func persistDiffs(db *sql.DB, runID string, diffs []IntentRuntimeDiff) error {
 		// observed runtime event. Endpoints are not checked by graph verify, so
 		// these new edge types are safe to add.
 		scope := "agent/" + d.AgentID
-		if d.ToolCallID != "" {
+		if d.ContractKind == ContractModelResponse && strings.HasPrefix(d.Source, "endpoint/resp-") {
+			scope = "llm_call/ep-" + strings.TrimPrefix(d.Source, "endpoint/resp-")
+		} else if d.ToolCallID != "" {
 			scope = d.ToolCallID
 		}
 		if err := insertEdge(tx, runID, scope, d.ID, edgeIntentContract, now, &seq); err != nil {

@@ -3,7 +3,6 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 
 	"github.com/byteyellow/agentprovenance/internal/hooksbridge"
 	"github.com/byteyellow/agentprovenance/internal/provenance"
@@ -45,32 +44,15 @@ func hooksBridgeCmd(dataDir *string) *cobra.Command {
 			defer db.Close()
 
 			r := cmd.InOrStdin()
-			kimiSession := ""
-			// A Kimi session directory carries a per-agent wire.jsonl each; walk
-			// them all so sub-agent delegation is captured, not just the main agent.
-			if harness == "kimi" && file != "" && file != "-" {
-				if info, statErr := os.Stat(file); statErr == nil && info.IsDir() {
-					kimiSession = file
-				}
-			}
-			if kimiSession != "" {
-				r, err = hooksbridge.AdaptKimiSession(kimiSession)
-				if err != nil {
-					return err
-				}
+			if file != "" && file != "-" {
+				// A file/dir path: BridgeTranscript handles a Kimi session directory
+				// (per-agent wire.jsonl) and any single transcript file uniformly.
+				r, err = hooksbridge.BridgeTranscript(harness, file)
 			} else {
-				if file != "" && file != "-" {
-					f, err := os.Open(file)
-					if err != nil {
-						return err
-					}
-					defer f.Close()
-					r = f
-				}
-				r, err = hooksbridge.AdaptHarness(harness, r)
-				if err != nil {
-					return err
-				}
+				r, err = hooksbridge.AdaptHarness(harness, r) // stdin
+			}
+			if err != nil {
+				return err
 			}
 			sum, err := hooksbridge.Ingest(db, r, hooksbridge.Options{
 				RunID:   runID,
@@ -99,6 +81,6 @@ func hooksBridgeCmd(dataDir *string) *cobra.Command {
 	cmd.Flags().StringVar(&runID, "run", "", "run id to attach the orchestration graph to")
 	cmd.Flags().StringVar(&file, "file", "-", "hook JSONL file (default stdin)")
 	cmd.Flags().BoolVar(&correlate, "correlate", true, "attribute sensor syscall events to the acting agent by command-match")
-	cmd.Flags().StringVar(&harness, "harness", "claude", "harness whose session transcript this is: claude | kimi | codex")
+	cmd.Flags().StringVar(&harness, "harness", "claude", "harness whose session transcript this is: claude | kimi | codex | grok")
 	return cmd
 }

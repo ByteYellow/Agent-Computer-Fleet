@@ -43,8 +43,9 @@ const (
 	// ~/.claude creds from flooding every run as a mismatch.
 	EffectSecretRead EffectKind = "secret_read"
 	// EffectMetadataEgress is egress to the link-local cloud metadata IP.
-	EffectMetadataEgress EffectKind = "metadata_egress"
-	EffectPrivateCIDR    EffectKind = "private_cidr_access"
+	EffectMetadataEgress  EffectKind = "metadata_egress"
+	EffectPrivateCIDR     EffectKind = "private_cidr_access"
+	EffectSensitiveEgress EffectKind = "sensitive_egress"
 )
 
 // RuntimeEffect is one normalized effect attributed to an agent scope.
@@ -72,6 +73,9 @@ func classifyEvent(eng security.Engine, eventType, payload string) (EffectKind, 
 	case "private_cidr":
 		return EffectPrivateCIDR, dstIP, true
 	case "network_connect":
+		if payloadHasCanary(payload) {
+			return EffectSensitiveEgress, dstIP, true
+		}
 		return EffectNetworkConnect, dstIP, true
 	case "file_write":
 		return EffectFileWrite, path, true
@@ -126,12 +130,21 @@ func extractEventFields(payload string) (path, dstIP, command string) {
 		raw = r
 	}
 	path = firstString(inner["path"], raw["path"])
-	dstIP = firstString(inner["dst_ip"], raw["dst_ip"], inner["host"], raw["host"])
+	dstIP = firstString(inner["dst_ip"], raw["dst_ip"], inner["dst_host"], raw["dst_host"], inner["host"], raw["host"])
 	command = firstString(inner["command"], raw["command"])
 	if command == "" {
 		command = argvToCommand(firstAny(inner["argv"], raw["argv"]))
 	}
 	return path, dstIP, command
+}
+
+func payloadHasCanary(payload string) bool {
+	var top map[string]any
+	if json.Unmarshal([]byte(payload), &top) != nil {
+		return false
+	}
+	v, ok := top["canary_hits"].([]any)
+	return ok && len(v) > 0
 }
 
 // extractComm returns the executing process's short name (comm) from an event

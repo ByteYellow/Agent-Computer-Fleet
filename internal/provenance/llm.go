@@ -140,38 +140,68 @@ func MaterializeLLMCalls(store ObjectStore, db *sql.DB, runID string) (int, erro
 	return n, nil
 }
 
-// commandMatchedActions returns the execve event nodes whose command line matches
+// commandMatchedActions returns the runtime-event nodes whose command line matches
 // one of the commands the model decided to run, collected before any write (to
 // avoid the single-connection nested-cursor footgun). Empty when the model
 // decided no command or nothing ran it -- we link only what we can attribute.
+//
+// It scans BOTH execve events and process_observed samples. The eBPF execve
+// captures argv from user memory at exec and intermittently truncates it to just
+// the program (e.g. "/usr/bin/python3", losing the script path) -- which strips
+// the distinctive token command-match needs. The record process sampler reads the
+// full command line from /proc/<pid>/cmdline independently, so it carries the
+// complete command for the same action. Matching against both makes the llm_caused
+// edge robust to execve argv truncation: when the execve string is stripped, the
+// process_observed sample still ties the decided command to the syscall it ran.
 func commandMatchedActions(db *sql.DB, runID string, commands []string) ([]string, error) {
 	if len(commands) == 0 {
 		return nil, nil
 	}
-	rows, err := db.Query(`SELECT id, COALESCE(payload,'') FROM events
-		WHERE run_id = ? AND event_type = 'execve'`, runID)
+	rows, err := db.Query(`SELECT id, event_type, COALESCE(payload,'') FROM events
+		WHERE run_id = ? AND event_type IN ('execve', 'process_observed')`, runID)
 	if err != nil {
 		return nil, fmt.Errorf("materialize llm calls: command match: %w", err)
 	}
 	defer rows.Close()
 	var out []string
+	seen := map[string]bool{}
 	for rows.Next() {
-		var id, payload string
-		if err := rows.Scan(&id, &payload); err != nil {
+		var id, eventType, payload string
+		if err := rows.Scan(&id, &eventType, &payload); err != nil {
 			return nil, err
 		}
-		cmd := execveCommand(payload)
+		cmd := actionCommand(eventType, payload)
 		if cmd == "" {
 			continue
 		}
 		for _, decided := range commands {
 			if commandsMatch(cmd, decided) {
-				out = append(out, "runtime_event/"+id)
+				node := "runtime_event/" + id
+				if !seen[node] {
+					seen[node] = true
+					out = append(out, node)
+				}
 				break
 			}
 		}
 	}
 	return out, rows.Err()
+}
+
+// actionCommand pulls the command line from a runtime action event: execve carries
+// argv (possibly truncated) in its own envelope; a record process sample carries
+// the full /proc/<pid>/cmdline command in the record envelope.
+func actionCommand(eventType, payload string) string {
+	if eventType == "process_observed" {
+		var proc struct {
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal(unwrapRecordProcessPayload(payload), &proc); err == nil {
+			return proc.Command
+		}
+		return ""
+	}
+	return execveCommand(payload)
 }
 
 // execveCommand pulls the command line from an execve event payload, handling the
@@ -194,39 +224,38 @@ func execveCommand(payload string) string {
 	return c
 }
 
-// commandsMatch reports whether an execve command line ran the command the model
-// decided to run. The sensor captures argv reordered and truncated (~31 chars per
-// slot), so a full-line compare fails; instead we match the model command's most
-// distinctive token -- its longest path-like token -- (or a prefix of it, to
-// tolerate truncation) appearing in the execve line. A token under 8 chars is too
-// generic to attribute safely, so such commands link nothing.
-func commandsMatch(execCmd, decided string) bool {
-	tok := longestToken(decided)
-	if len(tok) < 8 {
+// commandsMatch reports whether a runtime action's command line ran the command
+// the model decided to run. It requires one command to be a PREFIX of the other
+// (after normalization): the actual process command begins with the decided one
+// (extra trailing args allowed), or vice-versa when the sample is itself clipped.
+//
+// Prefix, not substring, is what keeps attribution both precise and clean:
+//   - Precise: several commands in one workspace share a long directory-path
+//     token (`/home/u/proj/...`), so token- or substring-matching cross-links
+//     `ls`, `git`, and `rg` to each other. A prefix match does not.
+//   - Clean: Claude runs each command as `bash -c 'source <snapshot> && <cmd>'`.
+//     That wrapper CONTAINS the decided command but does not start with it, so a
+//     prefix match attaches llm_caused to the command's own process, not the
+//     shell-plumbing wrapper.
+//
+// This does not cost truncation robustness: the eBPF execve may be argv-truncated,
+// but the record process sample carries the full /proc/cmdline for the same action
+// (see commandMatchedActions), and that starts with the decided command. A command
+// under 12 chars is too generic to attribute.
+func commandsMatch(actual, decided string) bool {
+	a := normCmd(actual)
+	d := normCmd(decided)
+	short, long := d, a
+	if len(a) < len(d) {
+		short, long = a, d
+	}
+	if len(short) < 12 {
 		return false
 	}
-	if len(tok) > 20 {
-		tok = tok[:20] // match a prefix: the sensor truncates long argv slots
-	}
-	return strings.Contains(normCmd(execCmd), tok)
+	return strings.HasPrefix(long, short)
 }
 
 func normCmd(s string) string { return strings.ToLower(strings.Join(strings.Fields(s), " ")) }
-
-// longestToken returns the longest non-flag token of a command (lowercased) --
-// usually the script/target path, the most distinctive part to match on.
-func longestToken(cmd string) string {
-	best := ""
-	for _, f := range strings.Fields(strings.ToLower(cmd)) {
-		if strings.HasPrefix(f, "-") {
-			continue
-		}
-		if len(f) > len(best) {
-			best = f
-		}
-	}
-	return best
-}
 
 // insertLLMEdge writes one graph edge. An empty endpoint is a legitimate skip
 // (e.g. a request with no captured response body) and returns nil; a real write

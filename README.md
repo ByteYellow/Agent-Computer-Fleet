@@ -22,6 +22,8 @@ checkout, or mutable working tree.
 
 **[Quickstart](#quickstart)** | **[Core Model](#core-model)** | **[Current Capability](#current-capability)** | **[Demos](demo/README.md)** | **[Roadmap](#roadmap)**
 
+English | [简体中文](README.zh-CN.md)
+
 </div>
 
 ---
@@ -103,6 +105,7 @@ The goal is to answer questions ordinary traces do not answer well:
 - [Repository Layout](#repository-layout)
 - [Roadmap](#roadmap)
 - [Development](#development)
+- [Author and License](#author-and-license)
 
 ## Why
 
@@ -793,9 +796,11 @@ Panels:
   entry switches to a bounded local lens instead of asking the browser to draw
   the whole canonical graph.
 - **Graph Explorer** (`/api/lens`, same `graph lens` query surface as the CLI):
-  a **lens switcher** over 9 projections — default causality, security,
+  a **lens switcher** over 12 projections — default causality, security,
   process tree, file/artifact lineage, network egress, **data-flow/taint**,
-  agent intent, trust origin, sandbox boundary — with **risk/trust overlays**,
+  agent intent, orchestration, **conformance (declared vs actual)**, substrate
+  (producer/cgroup/workload), trust origin, sandbox boundary — with
+  **risk/trust overlays**,
   click-to-focus on a node's causal lineage, and a Sugiyama-layered DAG.
   It defaults to `detail=summary`: the default lens is a **Run Overview** rather
   than a raw DAG dump, and every wide lens uses bounded summary nodes:
@@ -987,7 +992,7 @@ per-command purpose: [docs/graph-commands.md](docs/graph-commands.md).
 | Provenance DAG | `graph trace / refs / log / materialize / objects / verify / replay` over content-addressed objects |
 | Multi-agent orchestration | `hooks bridge` folds a Claude Code (or compatible) agent team's harness hooks into the graph — agent nodes, delegation (`agent_spawn`) + peer (`agent_message`, body objectified as evidence) edges, per-agent tool_calls, and command-match syscall attribution (`agent_syscall`) since in-process sub-agents share one cgroup |
 | LLM-intent causality | captured LLM traffic is materialized into the signed graph (`graph materialize-llm`): each body becomes a content-addressed `llm_message` object, each request/response pair a first-class `llm_call` node, and `llm_caused` edges attribute a syscall to the model call **only when the executed command matches what the model's response actually decided** — so "the model told it to" stays narrow and verifiable |
-| Graph Explorer lenses | `graph lens` projects the canonical graph into default, security, process, file-artifact, network-egress, data-flow-taint, agent-intent (a causal intent DAG over real evidence nodes: `llm_call` → decided command → process → runtime events → risk, with blocked/refused intents grouped by the agent that proposed them), orchestration, trust-origin, and sandbox-boundary views; `summary` mode uses Run Overview plus `process_group`, `event_burst`, `file_group`, `risk_group`, `egress_group`, `intent_group`, `trust_group`, and `boundary_group` nodes while keeping raw events queryable; `expanded` keeps high-value details without low-value noise, and `raw` exposes full evidence for focused forensics; group nodes carry drill-down metadata for local expansion, node selection supports lineage/upstream/downstream/children/raw-events controls, and derived edges are marked with derivation rule, confidence, counts, and evidence refs |
+| Graph Explorer lenses | `graph lens` projects the canonical graph into default, security, process, file-artifact, network-egress, data-flow-taint, agent-intent (a causal intent DAG over real evidence nodes: `llm_call` → decided command → process → runtime events → risk, with blocked/refused intents grouped by the agent that proposed them), orchestration, intent (declared-vs-actual: each action's contract scope → diff verdict → the observed effects backing it, as `declared_vs_effect_mismatch` / `refused_bypass` / `coverage_gap`), substrate (producer profile → node sensor → workload group → cgroup binding → run), trust-origin, and sandbox-boundary views; `summary` mode uses Run Overview plus `process_group`, `event_burst`, `file_group`, `risk_group`, `egress_group`, `intent_group`, `trust_group`, and `boundary_group` nodes while keeping raw events queryable; `expanded` keeps high-value details without low-value noise, and `raw` exposes full evidence for focused forensics; group nodes carry drill-down metadata for local expansion, node selection supports lineage/upstream/downstream/children/raw-events controls, and derived edges are marked with derivation rule, confidence, counts, and evidence refs |
 | Graph verify | checks object hashes, parent links, and the policy → risk → response → signal chain (app-context and external-telemetry runs) |
 | Correlation explain | `telemetry correlations` — raw identity, resolved context, matched binding, confidence, and time window per event |
 
@@ -1200,31 +1205,43 @@ See [docs/product.md](docs/product.md) for the product direction and
 cmd/agentprov/        CLI entrypoint
 cmd/agentprov-sensor/ native eBPF sensor (Linux)
 internal/cli/         command parsing and output
+internal/launch/      one-command porcelain (`launch -- <agent>`): scope, dashboard, hooks overlay, sensor, honest degradation
 
 internal/record/      zero-SDK command recorder
 internal/sensor/      native eBPF sensor (exec/connect/file/privesc/tamper/TLS-body/DNS); Linux-only, arm64
+internal/producer/    producer profiles (local-record / k8s-daemonset / microvm-guest-init), passive cgroup scope attribution, K8s informer
 internal/tlsintent/   TLS chunk -> full HTTP message reassembly + LLM request/response semantics
 internal/telemetry/   normalized runtime event schema, JSONL ingest, TLS HTTP metadata, correlation inputs
 internal/correlation/ ToolCallScope and runtime identity binding
-internal/provenance/  timeline, graph trace, refs, objects, diff, blame, verify, replay, domain aliases
+internal/provenance/  timeline, graph trace, refs, objects, diff, blame, verify, replay, lenses, domain aliases
 internal/evidence/    compact evidence records and external effects
+internal/effects/     external effect records (what left the box)
+internal/redact/      secret masking before storage, materialization, and bundle export
 internal/security/    policy decisions, risk signals, baseline deviations, response actions
 internal/signals/     unified graph-attached signal model (behavior/cost/quality/security)
+internal/signal/      evaluator/RL signal contexts, batch import, external eval output
+internal/intent/      declared intent contracts and declared-vs-effect diff verdicts
+internal/observability/ observe query surface (summary/coverage/scopes/event/process/flow) with integrity metadata
+internal/compliance/  OWASP Agentic + NIST AI control mapping, coverage and gap reports
 internal/cost/        resource telemetry, Docker stats sampling, and resource-window evidence
 internal/baseline/    behavior baseline learning and deviation records
 internal/attest/      in-toto/DSSE ed25519 evidence signing (tamper-evidence)
 internal/forensics/   evidence bundle export (optional signed attestation)
 internal/aitools/     AI-callable tool catalog (read surface + inline gate + context-write)
-internal/hooksbridge/ harness-hooks -> agent orchestration graph (delegation/peer edges, command-match attribution)
+internal/hooksbridge/ harness-hooks -> agent orchestration graph (delegation/peer edges, command-match attribution); claude|kimi|codex|grok
 internal/mcpserver/   stdio MCP (JSON-RPC 2.0) server over the aitools catalog
+internal/daemon/      HTTP /v1 server, client, and the advisory two-writer lock
 internal/dashboard/   local read-only web dashboard (embedded UI)
 
 internal/substrate/   execution substrate facts and compatibility adapters
+internal/adapter/     substrate adapter capability registry (what each adapter claims)
 internal/control/     hidden substrate scope compatibility plumbing
 internal/computerapi/ hidden compatibility file/tool API for substrate-backed demos
+internal/envtemplate/ substrate task/environment template build and inspect
 internal/ports/       local preview proxy support
 
 internal/store/       SQLite schema and repositories
+internal/ids/         prefixed identifier generation
 examples/             events, telemetry, policies
 scripts/              runnable demos
 docs/                 product direction, MVP details, comparisons
@@ -1346,3 +1363,10 @@ and the Deploy 1 batch pipeline. CI runs `accept_phase1.sh` plus the
 sensor-bindings drift check (`regen-sensor.sh --check`). The eBPF sensor is
 validated on a Linux host (`go generate ./internal/sensor`, then run
 `agentprov-sensor`).
+
+## Author and License
+
+Built and maintained by [ByteYellow](https://github.com/ByteYellow).
+
+Licensed under the Apache License 2.0 — see [LICENSE](LICENSE).
+Copyright 2026 ByteYellow.

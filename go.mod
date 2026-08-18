@@ -2,10 +2,6 @@ module github.com/byteyellow/agentprovenance
 
 go 1.23.0
 
-replace github.com/distribution/reference => github.com/distribution/reference v0.5.0
-
-replace github.com/docker/go-connections => github.com/docker/go-connections v0.4.0
-
 require (
 	github.com/cilium/ebpf v0.16.0
 	github.com/docker/docker v24.0.9+incompatible
@@ -21,9 +17,9 @@ require (
 require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
-	github.com/distribution/reference v0.6.0 // indirect
+	github.com/distribution/reference v0.5.0 // indirect
 	github.com/docker/distribution v2.8.3+incompatible // indirect
-	github.com/docker/go-connections v0.7.0 // indirect
+	github.com/docker/go-connections v0.4.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/emicklei/go-restful/v3 v3.11.0 // indirect
